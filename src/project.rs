@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 use indexmap::IndexMap;
@@ -8,14 +9,8 @@ use serde::Deserialize;
 
 use crate::config::{atomic_create, atomic_write, target_display_name};
 use crate::deploy::unified_diff;
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Section {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) path: String,
-}
+use crate::git_worktree::worktree_root;
+use crate::section::{Section, render_format_1, validate_id, validate_relative_path};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +56,8 @@ pub(crate) struct TargetView {
     pub(crate) status: ProjectTargetStatus,
     pub(crate) diff: String,
     section_paths: Vec<PathBuf>,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +256,7 @@ impl Workspace {
         } else {
             unified_diff(&deployed, &expected, &old, &format!("rendered:{id}"))
         };
+        let difference = (deployed != expected).then(|| diff.clone());
         Ok(TargetView {
             id: id.to_owned(),
             path,
@@ -271,6 +269,7 @@ impl Workspace {
                 .iter()
                 .map(|id| self.section_path(id).unwrap())
                 .collect(),
+            difference,
         })
     }
 
@@ -288,20 +287,6 @@ impl Workspace {
         }
         Ok(current.status)
     }
-}
-
-pub(crate) fn worktree_root(start: &Path) -> Result<PathBuf, String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(start)
-        .output()
-        .map_err(|error| format!("cannot run git: {error}"))?;
-    if !output.status.success() {
-        return Err("project management requires a Git worktree".into());
-    }
-    let raw = String::from_utf8(output.stdout)
-        .map_err(|_| "git returned a non-UTF-8 worktree path".to_owned())?;
-    Ok(PathBuf::from(raw.trim()))
 }
 
 pub(crate) fn init(root: &Path) -> Result<Workspace, String> {
@@ -435,14 +420,14 @@ fn validate(manifest: &Manifest) -> Result<(), String> {
     }
     let mut ids = HashSet::new();
     for section in &manifest.sections {
-        validate_id("section", &section.id)?;
+        validate_id("project section", &section.id)?;
         if !ids.insert(section.id.as_str()) {
             return Err(format!("duplicate project section {}", section.id));
         }
         if section.name.trim().is_empty() {
             return Err(format!("project section {} has an empty name", section.id));
         }
-        validate_relative_path(&section.path)?;
+        validate_relative_path("project Section", &section.path)?;
     }
     for (id, target) in &manifest.targets {
         target_filename(id)?;
@@ -506,58 +491,17 @@ fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, St
     Ok(contents)
 }
 
-pub(crate) fn render_format_1(contents: &[&str]) -> String {
-    match contents {
-        [] => String::new(),
-        [content] => (*content).to_owned(),
-        contents => {
-            contents
-                .iter()
-                .map(|content| content.trim_matches(['\r', '\n']))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-                + "\n"
-        }
-    }
-}
+/// Supported Project targets and their root filenames; unknown target ids are errors.
+pub(crate) const PROJECT_TARGETS: [(&str, &str); 2] =
+    [("agents", "AGENTS.md"), ("claude", "CLAUDE.md")];
 
-fn target_filename(id: &str) -> Result<&'static str, String> {
-    match id {
-        "agents" => Ok("AGENTS.md"),
-        "claude" => Ok("CLAUDE.md"),
-        _ => Err(format!(
-            "unknown project target {id}; expected agents or claude"
-        )),
-    }
-}
-
-fn validate_id(kind: &str, id: &str) -> Result<(), String> {
-    let mut characters = id.chars();
-    if !matches!(characters.next(), Some('a'..='z'))
-        || !characters.all(|character| {
-            character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || matches!(character, '-' | '_')
-        })
-    {
-        return Err(format!("invalid project {kind} id {id}"));
-    }
-    Ok(())
-}
-
-fn validate_relative_path(raw: &str) -> Result<(), String> {
-    let path = Path::new(raw);
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!(
-            "project Section path must be clean and relative: {raw}"
-        ));
-    }
-    Ok(())
+/// Project target filename policy, independent of display labels.
+pub(crate) fn target_filename(id: &str) -> Result<&'static str, String> {
+    PROJECT_TARGETS
+        .iter()
+        .find(|(target, _)| *target == id)
+        .map(|(_, filename)| *filename)
+        .ok_or_else(|| format!("unknown project target {id}; expected agents or claude"))
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf, String> {

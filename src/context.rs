@@ -9,6 +9,15 @@ use walkdir::{DirEntry, WalkDir};
 use crate::config::{GlobalConfig, Paths};
 use crate::deploy;
 
+/// Pi candidate order: the first existing file wins, even an empty override.
+pub(crate) const PI_INSTRUCTION_CANDIDATES: [&str; 5] = [
+    "AGENTS.override.md",
+    "AGENTS.md",
+    "AGENTS.MD",
+    "CLAUDE.md",
+    "CLAUDE.MD",
+];
+
 /// Context runtime: the coding agent whose loaded instruction files an `Audit` explains.
 /// Selected by `mdmanager context --runtime` and the TUI picker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,9 +164,19 @@ pub(crate) struct Audit {
     pub(crate) directory: PathBuf,
     pub(crate) sources: Vec<ContextSource>,
     pub(crate) summary: String,
+    // Warnings are data; summary formatting belongs to the public CLI boundary.
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Audit {
+    pub(crate) fn formatted_summary(&self) -> String {
+        let mut summary = self.summary.clone();
+        for warning in &self.warnings {
+            summary.push_str(&format!(" · Warning: {warning}"));
+        }
+        summary
+    }
+
     pub(crate) fn resolve(
         runtime: ContextRuntime,
         directory: &Path,
@@ -310,6 +329,7 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Claude,
         directory: directory.to_owned(),
         sources,
+        warnings: Vec::new(),
         summary: format!("{startup} load at startup"),
     }
 }
@@ -371,15 +391,13 @@ pub(crate) fn scan_claude_descendants(
             && !seen.contains(path)
         {
             let content = fs::read_to_string(path).unwrap_or_default();
-            let patterns = rule_paths(&content);
-            let state = if patterns.is_empty() {
+            let state = claude_rule_state(
+                &content,
                 SourceState::Nested(
                     "Claude can load this after working with files below its nested rule directory"
                         .into(),
-                )
-            } else {
-                SourceState::Conditional(format!("declares paths: {}", patterns.join(", ")))
-            };
+                ),
+            );
             push_with_state(
                 &mut sources,
                 &mut seen,
@@ -407,7 +425,9 @@ fn apply_claude_exclusions(sources: &mut [ContextSource], directory: &Path, path
         settings.push(ancestor.join(".claude/settings.json"));
         settings.push(ancestor.join(".claude/settings.local.json"));
     }
-    if let Some(main_checkout) = git_main_checkout(directory) {
+    if let Ok(main_checkout) = crate::git_worktree::worktree_root(directory)
+        .and_then(|root| crate::git_worktree::main_worktree(&root))
+    {
         settings.push(main_checkout.join(".claude/settings.local.json"));
     }
     settings.sort();
@@ -546,33 +566,6 @@ fn markdown_without_code(content: &str) -> String {
     output
 }
 
-fn git_main_checkout(directory: &Path) -> Option<PathBuf> {
-    let root = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(directory)
-        .output()
-        .ok()?;
-    if !root.status.success() {
-        return None;
-    }
-    let root = PathBuf::from(String::from_utf8(root.stdout).ok()?.trim());
-    let common = std::process::Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(&root)
-        .output()
-        .ok()?;
-    if !common.status.success() {
-        return None;
-    }
-    let common = PathBuf::from(String::from_utf8(common.stdout).ok()?.trim());
-    let common = if common.is_absolute() {
-        common
-    } else {
-        root.join(common)
-    };
-    fs::canonicalize(common).ok()?.parent().map(Path::to_owned)
-}
-
 fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
     let process_home = env::var_os("HOME").map(PathBuf::from);
     let codex_home = if process_home.as_ref() == Some(&paths.home) {
@@ -640,16 +633,13 @@ fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
         })
         .count();
     let used = settings.max_bytes.saturating_sub(remaining);
-    let warning = settings
-        .warning
-        .as_ref()
-        .map_or_else(String::new, |warning| format!(" · Warning: {warning}"));
     Audit {
         runtime: ContextRuntime::Codex,
         directory: directory.to_owned(),
         sources,
+        warnings: settings.warning.into_iter().collect(),
         summary: format!(
-            "{loaded} load at startup · {used}/{} project instruction bytes{warning}",
+            "{loaded} load at startup · {used}/{} project instruction bytes",
             settings.max_bytes,
         ),
     }
@@ -721,6 +711,7 @@ fn resolve_cursor(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Cursor,
         directory: directory.to_owned(),
         sources,
+        warnings: Vec::new(),
         summary: format!(
             "{startup} load at startup · User and Team Rules live in Cursor settings and are not inspectable"
         ),
@@ -769,8 +760,12 @@ fn push_cursor_rules(
 }
 
 fn cursor_rule_state(content: &str) -> SourceState {
-    let Some(frontmatter) = yaml_frontmatter(content) else {
-        return SourceState::Ambiguous("Cursor rule has no complete YAML frontmatter".into());
+    let frontmatter = match rule_frontmatter(content) {
+        Ok(Some(header)) => header,
+        Err(reason) => return SourceState::Ambiguous(reason.into()),
+        Ok(None) => {
+            return SourceState::Ambiguous("Cursor rule has no complete YAML frontmatter".into());
+        }
     };
     if frontmatter_value(&frontmatter, "alwaysApply") == Some("true") {
         return SourceState::Startup;
@@ -789,19 +784,21 @@ fn cursor_rule_state(content: &str) -> SourceState {
     SourceState::Relevant("loaded when explicitly selected in Cursor".into())
 }
 
-fn yaml_frontmatter(content: &str) -> Option<Vec<&str>> {
+/// Rule frontmatter models complete delimiter headers and simple lists, not general YAML.
+/// Unterminated rule frontmatter is ambiguous for both runtimes.
+fn rule_frontmatter(content: &str) -> Result<Option<Vec<&str>>, &'static str> {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
-        return None;
+        return Ok(None);
     }
     let mut frontmatter = Vec::new();
     for line in lines {
         if line == "---" {
-            return Some(frontmatter);
+            return Ok(Some(frontmatter));
         }
         frontmatter.push(line);
     }
-    None
+    Err("rule frontmatter has no closing --- delimiter")
 }
 
 fn frontmatter_value<'a>(frontmatter: &'a [&str], key: &str) -> Option<&'a str> {
@@ -847,18 +844,11 @@ fn frontmatter_list(frontmatter: &[&str], key: &str) -> Vec<String> {
 }
 
 fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
-    const NAMES: [&str; 5] = [
-        "AGENTS.override.md",
-        "AGENTS.md",
-        "AGENTS.MD",
-        "CLAUDE.md",
-        "CLAUDE.MD",
-    ];
     let mut sources = Vec::new();
     let global = pi_agent_dir(paths);
     push_priority_candidates(
         &mut sources,
-        &NAMES
+        &PI_INSTRUCTION_CANDIDATES
             .iter()
             .map(|name| global.join(name))
             .collect::<Vec<_>>(),
@@ -871,7 +861,7 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
     for ancestor in ancestors_from_root(directory) {
         push_priority_candidates(
             &mut sources,
-            &NAMES
+            &PI_INSTRUCTION_CANDIDATES
                 .iter()
                 .map(|name| ancestor.join(name))
                 .collect::<Vec<_>>(),
@@ -890,6 +880,7 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Pi,
         directory: directory.to_owned(),
         sources,
+        warnings: Vec::new(),
         summary: format!("{loaded} load at startup"),
     }
 }
@@ -1043,12 +1034,7 @@ fn push_rules(
     rules.sort();
     for rule in rules {
         let content = fs::read_to_string(&rule).unwrap_or_default();
-        let patterns = rule_paths(&content);
-        let state = if patterns.is_empty() {
-            SourceState::Startup
-        } else {
-            SourceState::Conditional(format!("declares paths: {}", patterns.join(", ")))
-        };
+        let state = claude_rule_state(&content, SourceState::Startup);
         push_with_state(sources, seen, &rule, scope, state, paths, directory);
     }
 }
@@ -1076,39 +1062,20 @@ fn runtime_config_dir(paths: &Paths, variable: &str, default: &str) -> PathBuf {
     }
 }
 
-fn rule_paths(content: &str) -> Vec<String> {
-    let mut lines = content.lines();
-    if lines.next() != Some("---") {
-        return Vec::new();
+fn rule_paths(content: &str) -> Result<Vec<String>, &'static str> {
+    Ok(rule_frontmatter(content)?
+        .map(|header| frontmatter_list(&header, "paths"))
+        .unwrap_or_default())
+}
+
+fn claude_rule_state(content: &str, unconditional: SourceState) -> SourceState {
+    match rule_paths(content) {
+        Err(reason) => SourceState::Ambiguous(reason.into()),
+        Ok(patterns) if patterns.is_empty() => unconditional,
+        Ok(patterns) => {
+            SourceState::Conditional(format!("declares paths: {}", patterns.join(", ")))
+        }
     }
-    let frontmatter = lines.take_while(|line| *line != "---").collect::<Vec<_>>();
-    let Some(start) = frontmatter
-        .iter()
-        .position(|line| line.trim_start().starts_with("paths:"))
-    else {
-        return Vec::new();
-    };
-    let inline = frontmatter[start]
-        .trim_start()
-        .strip_prefix("paths:")
-        .unwrap_or("")
-        .trim();
-    if !inline.is_empty() {
-        return inline
-            .trim_matches(['[', ']'])
-            .split(',')
-            .map(|value| value.trim().trim_matches(['\'', '"']).to_owned())
-            .filter(|value| !value.is_empty())
-            .collect();
-    }
-    frontmatter
-        .iter()
-        .skip(start + 1)
-        .take_while(|line| line.trim_start().starts_with('-') || line.trim().is_empty())
-        .filter_map(|line| line.trim().strip_prefix('-'))
-        .map(|value| value.trim().trim_matches(['\'', '"']).to_owned())
-        .filter(|value| !value.is_empty())
-        .collect()
 }
 
 fn push_loaded(
@@ -1529,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_reports_invalid_settings_in_the_summary() {
+    fn codex_reports_invalid_settings_as_warnings() {
         let temp = TempDir::new().unwrap();
         let cwd = temp.path().join("repo");
         fs::create_dir_all(temp.path().join(".codex")).unwrap();
@@ -1537,8 +1504,8 @@ mod tests {
         fs::write(temp.path().join(".codex/config.toml"), "invalid = [").unwrap();
 
         let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
-        assert!(audit.summary.contains("Warning: invalid"));
-        assert!(audit.summary.contains("config.toml"));
+        assert!(!audit.warnings.is_empty());
+        assert!(audit.warnings[0].contains("config.toml"));
     }
 
     #[test]
@@ -1657,13 +1624,40 @@ mod tests {
     #[test]
     fn parses_block_and_inline_rule_paths() {
         assert_eq!(
-            rule_paths("---\npaths:\n  - 'src/**'\n  - \"tests/**\"\n---\n"),
+            rule_paths("---\npaths:\n  - 'src/**'\n  - \"tests/**\"\n---\n").unwrap(),
             ["src/**", "tests/**"]
         );
         assert_eq!(
-            rule_paths("---\npaths: ['*.rs', 'Cargo.toml']\n---\n"),
+            rule_paths("---\npaths: ['*.rs', 'Cargo.toml']\n---\n").unwrap(),
             ["*.rs", "Cargo.toml"]
         );
+        for (key, runtime) in [
+            ("paths", ContextRuntime::Claude),
+            ("globs", ContextRuntime::Cursor),
+        ] {
+            for list in ["['src/**', 'tests/**']", "\n  - 'src/**'\n  - \"tests/**\""] {
+                let content = format!("---\n{key}: {list}\n---\nbody");
+                let state = match runtime {
+                    ContextRuntime::Claude => claude_rule_state(&content, SourceState::Startup),
+                    _ => cursor_rule_state(&content),
+                };
+                assert!(
+                    matches!(state, SourceState::Conditional(reason) if reason.contains("src/**") && reason.contains("tests/**"))
+                );
+            }
+            for metadata in [
+                format!("{key}: ['src/**']"),
+                "alwaysApply: true".into(),
+                "body".into(),
+            ] {
+                let content = format!("---\n{metadata}\n");
+                let state = match runtime {
+                    ContextRuntime::Claude => claude_rule_state(&content, SourceState::Startup),
+                    _ => cursor_rule_state(&content),
+                };
+                assert!(matches!(state, SourceState::Ambiguous(reason) if !reason.is_empty()));
+            }
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table, value};
 
+use crate::section::{Section, validate_id, validate_relative_path};
 #[derive(Clone, Debug)]
 pub(crate) struct Paths {
     pub(crate) home: PathBuf,
@@ -48,14 +49,6 @@ impl Paths {
             home: home.to_owned(),
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Section {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -265,7 +258,7 @@ impl GlobalConfig {
                     .ok_or_else(|| format!("unknown personal Section {id}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::project::render_format_1(&contents))
+        Ok(crate::section::render_format_1(&contents))
     }
 }
 
@@ -362,33 +355,6 @@ fn read_sections(manifest: &Manifest, paths: &Paths) -> Result<IndexMap<String, 
         contents.insert(section.id.clone(), content);
     }
     Ok(contents)
-}
-
-fn validate_id(kind: &str, id: &str) -> Result<(), String> {
-    let mut chars = id.chars();
-    if !matches!(chars.next(), Some('a'..='z'))
-        || !chars.all(|character| {
-            character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || matches!(character, '-' | '_')
-        })
-    {
-        return Err(format!("invalid {kind} id {id}"));
-    }
-    Ok(())
-}
-
-fn validate_relative_path(kind: &str, raw: &str) -> Result<(), String> {
-    let path = Path::new(raw);
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!("{kind} path must be a clean relative path: {raw}"));
-    }
-    Ok(())
 }
 
 fn expand_target_path(raw: &str, home: &Path) -> Result<PathBuf, String> {

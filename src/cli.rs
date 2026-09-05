@@ -311,7 +311,7 @@ fn print_context(audit: &Audit, paths: &Paths) {
         "{} · {}\n{} · {relevant} load when relevant",
         audit.runtime.label(),
         audit.directory.display(),
-        audit.summary,
+        audit.formatted_summary(),
     );
     for group in [
         SourceGroup::Startup,
@@ -375,7 +375,7 @@ fn context_json(audit: &Audit, paths: &Paths) -> Result<String, String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "runtime": audit.runtime.id(),
         "directory": audit.directory,
-        "summary": audit.summary,
+        "summary": audit.formatted_summary(),
         "sources": sources,
     }))
     .map_err(|error| format!("cannot serialize Context: {error}"))
@@ -577,7 +577,7 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
         .map_err(|error| format!("cannot determine launch directory: {error}"))?;
     match command {
         ProjectCommand::Create { target, from, yes } => {
-            let root = project::worktree_root(&directory)?;
+            let root = crate::git_worktree::worktree_root(&directory)?;
             let content = fs::read_to_string(&from)
                 .map_err(|error| format!("cannot read {}: {error}", from.display()))?;
             let plan = project::create_plan(&root, &target, &content)?;
@@ -600,16 +600,8 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         ProjectCommand::Adopt { target, yes } => {
-            let root = project::worktree_root(&directory)?;
-            let path = root.join(match target.as_str() {
-                "agents" => "AGENTS.md",
-                "claude" => "CLAUDE.md",
-                _ => {
-                    return Err(format!(
-                        "unknown project target {target}; expected agents or claude"
-                    ));
-                }
-            });
+            let root = crate::git_worktree::worktree_root(&directory)?;
+            let path = root.join(project::target_filename(&target)?);
             if project::Workspace::discover(&root)?
                 .is_some_and(|workspace| workspace.manifest.targets.contains_key(&target))
             {

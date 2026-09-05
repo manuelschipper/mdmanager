@@ -149,10 +149,10 @@ The agent authors or selects a personal Section, then creates or adopts the Loca
 edit each ordered list to add Sections. Missing referenced Sections make the composition invalid.
 
 State: `~/.mdmanager/state/`; Global backups: `~/.mdmanager/backups/`.
-Do not hand-edit state. `doctor` repairs Global state. Recover invalid Local `overlays.toml`
-from backup before writes. Local restore preserves unrelated settings edits;
-restore can partially fail.
-Runtime configuration observed by Context remains outside these manifests.
+Invalid Local `overlays.toml` blocks writes. No backup/repair: use your valid copy or keep
+files for manual recovery. `doctor` repairs Global only. Local restore keeps unrelated
+edits but may partially fail.
+Context runtime settings remain outside these manifests.
 
 ## Sharing a personal Section
 

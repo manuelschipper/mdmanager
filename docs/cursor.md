@@ -12,6 +12,10 @@ Cursor User and Team Rules live in Cursor settings rather than documented Markdo
 notes that boundary but cannot inspect their contents. Context reports root `CLAUDE.md` as
 uncertain, noting that only Cursor CLI documents it.
 
+mdmanager models complete `---` frontmatter headers and simple inline or block lists, not general
+YAML. A leading `---` without a closing delimiter is reported as ambiguous; close the header
+before relying on the reported loading behavior.
+
 ## Managed files
 
 - Project Instructions target root `AGENTS.md`, shared by Cursor, Codex, and Pi.

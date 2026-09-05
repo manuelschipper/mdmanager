@@ -65,6 +65,8 @@ pub(crate) struct TargetView {
     pub(crate) expected: String,
     pub(crate) status: GlobalTargetStatus,
     pub(crate) diff: String,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
     fingerprint: Option<String>,
 }
 
@@ -196,7 +198,7 @@ fn inspect_target(
         Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
     };
 
-    let (status, old, fingerprint, symlink) = if let Some(metadata) = metadata {
+    let (status, old, fingerprint, symlink, matches_content) = if let Some(metadata) = metadata {
         if metadata.file_type().is_dir() {
             return Err(format!(
                 "target path {} is a directory; inspect it and move it out of the target path before applying",
@@ -253,9 +255,21 @@ fn inspect_target(
                 Some(_) => GlobalTargetStatus::Modified,
             }
         };
-        (status, old, Some(fingerprint), symlink)
+        (
+            status,
+            old,
+            Some(fingerprint),
+            symlink,
+            bytes == expected.as_bytes(),
+        )
     } else {
-        (GlobalTargetStatus::Missing, String::new(), None, None)
+        (
+            GlobalTargetStatus::Missing,
+            String::new(),
+            None,
+            None,
+            expected.is_empty(),
+        )
     };
 
     let old_label = if let Some((destination, dangling)) = symlink {
@@ -280,12 +294,14 @@ fn inspect_target(
             &format!("expected: {profile}/{target}"),
         )
     };
+    let difference = (!matches_content).then(|| diff.clone());
     Ok(TargetView {
         id: target.into(),
         path,
         expected,
         status,
         diff,
+        difference,
         fingerprint,
     })
 }

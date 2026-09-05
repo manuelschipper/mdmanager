@@ -345,6 +345,12 @@ fn context_reports_rules_imports_exclusions_and_json() {
     .unwrap();
     fs::write(repository.path().join(".pi/SYSTEM.md"), "# Out of scope\n").unwrap();
 
+    fs::write(
+        repository.path().join(".claude/rules/incomplete.md"),
+        "---\nalwaysApply: true\npaths: ['tests/**']\n",
+    )
+    .unwrap();
+
     let output = mdmanager_in(
         home.path(),
         repository.path(),
@@ -365,6 +371,13 @@ fn context_reports_rules_imports_exclusions_and_json() {
     );
     assert!(json.status.success());
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(json["sources"].as_array().unwrap().iter().any(|source| {
+        source["display"] == "./.claude/rules/incomplete.md"
+            && source["status"] == "uncertain"
+            && source["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+    }));
     assert_eq!(json["runtime"], "claude");
     assert!(json["summary"].as_str().is_some());
     assert!(json["sources"].as_array().is_some_and(|sources| {
@@ -406,6 +419,12 @@ fn cursor_context_reports_agents_and_cursor_rules() {
     )
     .unwrap();
 
+    fs::write(
+        repository.path().join(".cursor/rules/incomplete.mdc"),
+        "---\nalwaysApply: true\npaths: ['tests/**']\n",
+    )
+    .unwrap();
+
     let output = mdmanager_in(
         home.path(),
         repository.path(),
@@ -414,6 +433,13 @@ fn cursor_context_reports_agents_and_cursor_rules() {
 
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["sources"].as_array().unwrap().iter().any(|source| {
+        source["display"] == "./.cursor/rules/incomplete.mdc"
+            && source["status"] == "uncertain"
+            && source["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+    }));
     assert_eq!(json["runtime"], "cursor");
     assert!(
         json["summary"]
@@ -509,6 +535,7 @@ fn codex_context_reports_invalid_configuration_in_human_and_json_output() {
     );
     assert!(json.status.success());
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(json.get("warnings").is_none());
     assert!(
         json["summary"]
             .as_str()
