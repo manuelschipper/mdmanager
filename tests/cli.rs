@@ -728,6 +728,11 @@ fn doctor_gives_a_safe_action_for_a_directory_target() {
     let output = String::from_utf8(output.stdout).unwrap();
     assert!(output.contains(&target.display().to_string()));
     assert!(output.lines().any(|line| line.starts_with("Action: ")));
+    assert!(
+        !output
+            .split_whitespace()
+            .any(|word| matches!(word, "remove" | "delete"))
+    );
     assert!(target.is_dir());
 }
 
