@@ -245,7 +245,7 @@ impl App {
             Ok(project) => (project, None),
             Err(error) => (None, Some(error)),
         };
-        let watch_root = project::worktree_root(&directory).ok();
+        let watch_root = crate::git_worktree::worktree_root(&directory).ok();
         let project_root = project.as_ref().map_or_else(
             || watch_root.clone().unwrap_or_else(|| directory.clone()),
             |project| project.root.clone(),
@@ -317,7 +317,7 @@ impl App {
         if self.project_error.is_some() {
             items.push(HomeItem::ProjectInvalid);
         } else if self.local_repository.is_some() {
-            for (id, name) in [("agents", "AGENTS.md"), ("claude", "CLAUDE.md")] {
+            for (id, name) in project::PROJECT_TARGETS {
                 let path = self.project_root.join(name);
                 if self
                     .project
@@ -497,7 +497,7 @@ impl App {
                 self.project_error = Some(error);
             }
         }
-        self.watch_root = project::worktree_root(&self.context.audit.directory).ok();
+        self.watch_root = crate::git_worktree::worktree_root(&self.context.audit.directory).ok();
         self.project_root = self.project.as_ref().map_or_else(
             || {
                 self.watch_root
@@ -1106,18 +1106,10 @@ fn relevant_project_file(path: &Path) -> bool {
                 .any(|(left, right)| left.as_os_str() == ".cursor" && right.as_os_str() == "rules"))
 }
 
-fn project_file_name(id: &str) -> &str {
-    match id {
-        "agents" => "AGENTS.md",
-        "claude" => "CLAUDE.md",
-        _ => id,
-    }
-}
-
 fn missing_project_text(id: &str) -> String {
     format!(
         "{} does not exist in this project.\n\nThe TUI does not edit instructions. Ask your coding agent to run 'mdmanager docs start', inspect the repository, and create or adopt the appropriate project instructions.",
-        project_file_name(id)
+        project::target_filename(id).expect("validated Project target")
     )
 }
 
@@ -1248,7 +1240,7 @@ fn project_section_usage(project: &Workspace, id: &str) -> String {
         .targets
         .iter()
         .filter(|(_, target)| target.sections.iter().any(|section| section == id))
-        .map(|(target, _)| project_file_name(target))
+        .map(|(target, _)| project::target_filename(target).expect("validated Project target"))
         .collect::<Vec<_>>();
     if targets.is_empty() {
         "not currently used".into()
@@ -1331,7 +1323,9 @@ fn managed_destination(app: &App, resolved: &Path) -> Option<ManagedDestination>
             let path = project.target_path(id).ok()?;
             regular_file_resolves_to(&path, resolved).then(|| ManagedDestination {
                 scope: "Project",
-                target: project_file_name(id).into(),
+                target: project::target_filename(id)
+                    .expect("validated Project target")
+                    .into(),
                 status: project
                     .inspect(id)
                     .map_or_else(|_| "invalid".into(), |view| view.status.label().into()),
@@ -1506,7 +1500,10 @@ fn managed_workspace(app: &App, reference: &ManagedRef) -> Result<ManagedWorkspa
                 })
                 .collect();
             Ok(ManagedWorkspace {
-                title: format!("Project · {}", project_file_name(id)),
+                title: format!(
+                    "Project · {}",
+                    project::target_filename(id).expect("validated Project target")
+                ),
                 status: inspected.status.label().into(),
                 target: inspected.path,
                 rendered: inspected.expected,
@@ -2062,12 +2059,17 @@ fn enter_home(app: &mut App) {
                 .unwrap_or_else(|| "Project configuration is invalid".into()),
         }),
         HomeItem::ProjectMissing(id) => app.open(View::Info {
-            title: format!("{} · not found", project_file_name(&id)),
+            title: format!(
+                "{} · not found",
+                project::target_filename(&id).expect("validated Project target")
+            ),
             text: missing_project_text(&id),
         }),
         HomeItem::ProjectTarget(id) => app.open(View::Managed(ManagedRef::Project(id))),
         HomeItem::ProjectExternal { id, path } => app.open(View::File {
-            title: project_file_name(&id).into(),
+            title: project::target_filename(&id)
+                .expect("validated Project target")
+                .into(),
             about: external_file_about(app, "Project file", &path),
             path,
         }),
@@ -2623,7 +2625,11 @@ fn home_line(app: &App, item: &HomeItem) -> Line<'static> {
             "  project.toml is invalid · Enter details",
             Style::new().fg(active_theme().error),
         ),
-        HomeItem::ProjectMissing(id) => home_status_line(project_file_name(id), 20, "not found"),
+        HomeItem::ProjectMissing(id) => home_status_line(
+            project::target_filename(id).expect("validated Project target"),
+            20,
+            "not found",
+        ),
         HomeItem::ProjectTarget(id) => {
             let status = app
                 .project
@@ -2631,7 +2637,7 @@ fn home_line(app: &App, item: &HomeItem) -> Line<'static> {
                 .and_then(|project| project.inspect(id).ok())
                 .map_or("invalid", |view| view.status.label());
             home_status_line(
-                project_file_name(id),
+                project::target_filename(id).expect("validated Project target"),
                 20,
                 &format!("managed by mdmanager.ai · {status}"),
             )

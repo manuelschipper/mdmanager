@@ -1,15 +1,18 @@
 //! Local scope: machine-local instruction files (CLAUDE.local.md, AGENTS.override.md) and local disables for one Git worktree.
 //! The ownership-state file keeps its `overlays.toml` name and emitted `overlay` error text is unchanged.
 
+mod claude_settings;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 
 use crate::config::{GlobalConfig, Paths, atomic_create, atomic_write, sha256_hex};
+use crate::context::PI_INSTRUCTION_CANDIDATES;
 use crate::deploy::unified_diff;
+use crate::git_worktree::git;
 
 const VERIFIED_CODEX_EMPTY_OVERRIDE_VERSIONS: [&str; 1] = ["0.147.0"];
 
@@ -224,7 +227,7 @@ struct Exclusion {
 
 impl LocalRepository {
     pub(crate) fn discover(start: &Path, paths: &Paths) -> Result<Self, String> {
-        let root = crate::project::worktree_root(start).map_err(|error| {
+        let root = crate::git_worktree::worktree_root(start).map_err(|error| {
             if error == "project management requires a Git worktree" {
                 "local management requires a Git worktree".to_owned()
             } else {
@@ -358,23 +361,16 @@ impl LocalRepository {
                 }
             }
             DisableRuntime::Pi => {
-                const CANDIDATES: [&str; 5] = [
-                    "AGENTS.override.md",
-                    "AGENTS.md",
-                    "AGENTS.MD",
-                    "CLAUDE.md",
-                    "CLAUDE.MD",
-                ];
                 if filename == "AGENTS.override.md" {
                     return Err("Pi's selected override cannot disable itself".into());
                 }
-                if !CANDIDATES.contains(&filename) {
+                if !PI_INSTRUCTION_CANDIDATES.contains(&filename) {
                     return Err(format!(
                         "{} is not a Pi instruction candidate",
                         source.display()
                     ));
                 }
-                let selected = CANDIDATES
+                let selected = PI_INSTRUCTION_CANDIDATES
                     .iter()
                     .map(|name| parent.join(name))
                     .find(|candidate| candidate.is_file());
@@ -442,7 +438,7 @@ impl LocalRepository {
                 );
             }
             DisableRuntime::Claude => {
-                let settings_worktree = self.claude_settings_worktree()?;
+                let settings_worktree = crate::git_worktree::main_worktree(&self.root)?;
                 ensure_untracked(&settings_worktree, &plan.output)?;
                 if let Some(exclusion) = &plan.exclusion {
                     apply_exclusion(exclusion, &settings_worktree, &plan.output)?;
@@ -452,15 +448,8 @@ impl LocalRepository {
                     .clone()
                     .unwrap_or_else(|| "{}\n".into());
                 let created = plan.reviewed_output.is_none();
-                let object = parse_json_object(&old, &plan.output)?;
-                let excludes = object.get("claudeMdExcludes").and_then(Value::as_array);
                 let source = plan.source.display().to_string();
-                if excludes.is_some_and(|entries| {
-                    entries.iter().any(|entry| entry.as_str() == Some(&source))
-                }) {
-                    return Err("the selected Claude source is already excluded".into());
-                }
-                let rendered = insert_json_array_string(&old, "claudeMdExcludes", &source)?;
+                let rendered = claude_settings::insert_exclusion(&old, &plan.output, &source)?;
                 atomic_write(&plan.output, rendered.as_bytes())?;
                 state.disables.insert(
                     state_key,
@@ -526,8 +515,7 @@ impl LocalRepository {
                     let disabled_source = owned.disabled_source.as_deref().ok_or_else(|| {
                         "Claude ownership record does not contain its disabled source".to_owned()
                     })?;
-                    let rendered =
-                        remove_json_array_string(&source, "claudeMdExcludes", disabled_source)?;
+                    let rendered = claude_settings::remove_exclusion(&source, disabled_source)?;
                     atomic_write(&path, rendered.as_bytes())?;
                 }
                 remove_owned_exclusion(&owned)?;
@@ -548,15 +536,12 @@ impl LocalRepository {
                     let Some(disabled_source) = owned.disabled_source.as_deref() else {
                         return false;
                     };
-                    parse_json_object(&source, Path::new(&owned.path))
-                        .ok()
-                        .and_then(|object| object.get("claudeMdExcludes").cloned())
-                        .and_then(|value| value.as_array().cloned())
-                        .is_some_and(|entries| {
-                            entries
-                                .iter()
-                                .any(|entry| entry.as_str() == Some(disabled_source))
-                        })
+                    claude_settings::contains_exclusion(
+                        &source,
+                        Path::new(&owned.path),
+                        disabled_source,
+                    )
+                    .unwrap_or(false)
                 });
                 Ok(if active {
                     DisableStatus::Owned
@@ -858,7 +843,7 @@ impl LocalRepository {
     }
 
     fn claude_disable_plan(&self, source: PathBuf) -> Result<DisablePlan, String> {
-        let settings_worktree = self.claude_settings_worktree()?;
+        let settings_worktree = crate::git_worktree::main_worktree(&self.root)?;
         let output = settings_worktree.join(".claude/settings.local.json");
         ensure_untracked(&settings_worktree, &output)?;
         let exclusion = self.exclusion_for(&settings_worktree, &output)?;
@@ -867,19 +852,14 @@ impl LocalRepository {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(format!("cannot read {}: {error}", output.display())),
         };
-        if let Some(source_text) = &reviewed_output {
-            let object = parse_json_object(source_text, &output)?;
-            if object
-                .get("claudeMdExcludes")
-                .and_then(Value::as_array)
-                .is_some_and(|entries| {
-                    entries
-                        .iter()
-                        .any(|entry| entry.as_str() == Some(source.to_string_lossy().as_ref()))
-                })
-            {
-                return Err("the selected Claude source is already excluded".into());
-            }
+        if let Some(source_text) = &reviewed_output
+            && claude_settings::contains_exclusion(
+                source_text,
+                &output,
+                source.to_string_lossy().as_ref(),
+            )?
+        {
+            return Err("the selected Claude source is already excluded".into());
         }
         let exclusion_text = exclusion.needs_write.then(|| {
             format!(
@@ -918,25 +898,6 @@ impl LocalRepository {
             pattern,
             needs_write: !ignored,
         })
-    }
-
-    fn claude_settings_worktree(&self) -> Result<PathBuf, String> {
-        let output = git(&self.root, &["worktree", "list", "--porcelain", "-z"])?;
-        let path = output
-            .strip_prefix("worktree ")
-            .and_then(|output| output.split_once('\0'))
-            .map(|(path, _)| path)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "git did not report a main worktree".to_owned())?;
-        let path = fs::canonicalize(path)
-            .map_err(|error| format!("cannot resolve reported main worktree: {error}"))?;
-        let is_worktree = git(&path, &["rev-parse", "--is-inside-work-tree"])?;
-        if is_worktree.trim() == "true" {
-            Ok(path)
-        } else {
-            // Submodules and separate Git directories report their Git directory here.
-            Ok(self.root.clone())
-        }
     }
 
     fn local_manifest_path(&self) -> PathBuf {
@@ -1074,15 +1035,6 @@ fn codex_version() -> Result<String, String> {
         .ok_or_else(|| "cannot parse Codex version".to_owned())
 }
 
-fn parse_json_object(source: &str, path: &Path) -> Result<Map<String, Value>, String> {
-    let value: Value = serde_json::from_str(source)
-        .map_err(|error| format!("invalid {}: {error}", path.display()))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| format!("{} must contain a JSON object", path.display()))
-}
-
 fn logical_launch_path(path: &Path) -> PathBuf {
     let Ok(current) = std::env::current_dir() else {
         return path.to_owned();
@@ -1097,193 +1049,6 @@ fn logical_launch_path(path: &Path) -> PathBuf {
         return path.to_owned();
     }
     pwd.join(path.strip_prefix(current).unwrap())
-}
-
-fn insert_json_array_string(source: &str, key: &str, value: &str) -> Result<String, String> {
-    let value = serde_json::to_string(value)
-        .map_err(|error| format!("cannot serialize Claude exclusion: {error}"))?;
-    if let Some((open, close)) = json_array_range(source, key)? {
-        let interior = &source[open + 1..close];
-        let insertion = if interior.trim().is_empty() {
-            value
-        } else if interior.contains('\n') {
-            let indent = interior
-                .trim_end()
-                .rsplit('\n')
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take_while(|character| character.is_whitespace())
-                .collect::<String>();
-            format!(",\n{indent}{value}")
-        } else {
-            format!(", {value}")
-        };
-        let insert_at = close - interior.len() + interior.trim_end().len();
-        let mut output = source.to_owned();
-        output.insert_str(insert_at, &insertion);
-        return Ok(output);
-    }
-
-    let (open, close) = top_level_object_range(source)?;
-    let interior = &source[open + 1..close];
-    let property = format!("\"{key}\": [{value}]");
-    let insertion = if interior.trim().is_empty() {
-        format!("\n  {property}\n")
-    } else if interior.contains('\n') {
-        let indent = interior
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or_default()
-            .chars()
-            .take_while(|character| character.is_whitespace())
-            .collect::<String>();
-        format!(",\n{indent}{property}")
-    } else {
-        format!(", {property}")
-    };
-    let insert_at = open + 1 + interior.trim_end().len();
-    let mut output = source.to_owned();
-    output.insert_str(insert_at, &insertion);
-    Ok(output)
-}
-
-fn remove_json_array_string(source: &str, key: &str, value: &str) -> Result<String, String> {
-    parse_json_object(source, Path::new("Claude settings"))?;
-    let (open, close) = json_array_range(source, key)?
-        .ok_or_else(|| format!("Claude settings no longer contain {key}"))?;
-    let needle = serde_json::to_string(value)
-        .map_err(|error| format!("cannot serialize Claude exclusion: {error}"))?;
-    for (relative, _) in source[open + 1..close].match_indices(&needle) {
-        let start = open + 1 + relative;
-        let end = start + needle.len();
-        let before = source[open..start].trim_end();
-        let after = source[end..=close].trim_start();
-        if !matches!(before.as_bytes().last(), Some(b'[' | b','))
-            || !matches!(after.as_bytes().first(), Some(b',' | b']'))
-        {
-            continue;
-        }
-
-        let mut output = source.to_owned();
-        if after.starts_with(',') {
-            let comma = end + source[end..=close].len() - after.len();
-            let leading_whitespace = open + before.len();
-            output.replace_range(leading_whitespace..comma + 1, "");
-        } else if before.ends_with(',') {
-            let comma = open + before.len() - 1;
-            output.replace_range(comma..end, "");
-        } else {
-            output.replace_range(start..end, "");
-        }
-        return Ok(output);
-    }
-    Err(format!(
-        "Claude settings no longer contain the mdmanager.ai-owned exclusion {value}"
-    ))
-}
-
-fn json_array_range(source: &str, key: &str) -> Result<Option<(usize, usize)>, String> {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    let mut object_depth = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                let end = json_string_end(bytes, index)?;
-                if object_depth == 1 {
-                    let decoded: String = serde_json::from_str(&source[index..end])
-                        .map_err(|error| format!("invalid JSON property: {error}"))?;
-                    let mut next = skip_json_space(bytes, end);
-                    if decoded == key && bytes.get(next) == Some(&b':') {
-                        next = skip_json_space(bytes, next + 1);
-                        if bytes.get(next) != Some(&b'[') {
-                            return Err(format!("{key} is not an array"));
-                        }
-                        return Ok(Some((next, matching_json_bracket(bytes, next)?)));
-                    }
-                }
-                index = end;
-                continue;
-            }
-            b'{' => object_depth += 1,
-            b'}' => object_depth = object_depth.saturating_sub(1),
-            _ => {}
-        }
-        index += 1;
-    }
-    Ok(None)
-}
-
-fn top_level_object_range(source: &str) -> Result<(usize, usize), String> {
-    let bytes = source.as_bytes();
-    let mut index = skip_json_space(bytes, 0);
-    if bytes.get(index) != Some(&b'{') {
-        return Err("Claude settings must contain a JSON object".into());
-    }
-    let open = index;
-    index += 1;
-    let mut depth = 1usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                index = json_string_end(bytes, index)?;
-                continue;
-            }
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok((open, index));
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    Err("Claude settings JSON object is not closed".into())
-}
-
-fn matching_json_bracket(bytes: &[u8], open: usize) -> Result<usize, String> {
-    let mut index = open + 1;
-    let mut depth = 1usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                index = json_string_end(bytes, index)?;
-                continue;
-            }
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(index);
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    Err("claudeMdExcludes array is not closed".into())
-}
-
-fn json_string_end(bytes: &[u8], start: usize) -> Result<usize, String> {
-    let mut index = start + 1;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            b'"' => return Ok(index + 1),
-            _ => index += 1,
-        }
-    }
-    Err("unterminated JSON string".into())
-}
-
-fn skip_json_space(bytes: &[u8], mut index: usize) -> usize {
-    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-        index += 1;
-    }
-    index
 }
 
 fn ensure_untracked(root: &Path, path: &Path) -> Result<(), String> {
@@ -1366,22 +1131,6 @@ fn remove_owned_exclusion(owned: &Owned) -> Result<(), String> {
         output.push('\n');
     }
     atomic_write(&path, output.as_bytes())
-}
-
-fn git(directory: &Path, arguments: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(directory)
-        .output()
-        .map_err(|error| format!("cannot run git: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git {} failed: {}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    String::from_utf8(output.stdout).map_err(|_| "git returned non-UTF-8 output".to_owned())
 }
 
 fn git_status(directory: &Path, arguments: &[&str]) -> Result<bool, String> {
@@ -1539,11 +1288,37 @@ mod tests {
         let local_repository =
             LocalRepository::discover(&worktree, &Paths::for_home(home.path())).unwrap();
 
+        // Git metadata parents must not contribute Claude settings.
+        let decoy = fixture.path().join("gitdirs/.claude");
+        fs::create_dir_all(&decoy).unwrap();
+        fs::write(
+            decoy.join("settings.local.json"),
+            serde_json::json!({"claudeMdExcludes": [source.display().to_string()]}).to_string(),
+        )
+        .unwrap();
+        let audit = crate::context::Audit::resolve(
+            crate::context::ContextRuntime::Claude,
+            &worktree,
+            &Paths::for_home(home.path()),
+            None,
+        );
+        assert!(audit.sources.iter().any(|entry| entry.path == source
+            && matches!(entry.state, crate::context::SourceState::Startup)));
+        fs::remove_dir_all(&decoy).unwrap();
+
         let plan = local_repository
             .disable_plan(DisableRuntime::Claude, &source)
             .unwrap();
         assert_eq!(plan.output, worktree.join(".claude/settings.local.json"));
         local_repository.apply_disable(&plan).unwrap();
+        let audit = crate::context::Audit::resolve(
+            crate::context::ContextRuntime::Claude,
+            &worktree,
+            &Paths::for_home(home.path()),
+            None,
+        );
+        assert!(audit.sources.iter().any(|entry| entry.path == source
+            && matches!(entry.state, crate::context::SourceState::Excluded(_))));
 
         assert!(worktree.join(".claude/settings.local.json").is_file());
         assert!(!fixture.path().join("gitdirs/.claude").exists());
@@ -1621,11 +1396,37 @@ mod tests {
         let local_repository =
             LocalRepository::discover(&worktree, &Paths::for_home(home.path())).unwrap();
 
+        // Git metadata parents must not contribute Claude settings.
+        let decoy = superproject.join(".git/modules/.claude");
+        fs::create_dir_all(&decoy).unwrap();
+        fs::write(
+            decoy.join("settings.local.json"),
+            serde_json::json!({"claudeMdExcludes": [source.display().to_string()]}).to_string(),
+        )
+        .unwrap();
+        let audit = crate::context::Audit::resolve(
+            crate::context::ContextRuntime::Claude,
+            &worktree,
+            &Paths::for_home(home.path()),
+            None,
+        );
+        assert!(audit.sources.iter().any(|entry| entry.path == source
+            && matches!(entry.state, crate::context::SourceState::Startup)));
+        fs::remove_dir_all(&decoy).unwrap();
+
         let plan = local_repository
             .disable_plan(DisableRuntime::Claude, &source)
             .unwrap();
         assert_eq!(plan.output, worktree.join(".claude/settings.local.json"));
         local_repository.apply_disable(&plan).unwrap();
+        let audit = crate::context::Audit::resolve(
+            crate::context::ContextRuntime::Claude,
+            &worktree,
+            &Paths::for_home(home.path()),
+            None,
+        );
+        assert!(audit.sources.iter().any(|entry| entry.path == source
+            && matches!(entry.state, crate::context::SourceState::Excluded(_))));
 
         assert!(worktree.join(".claude/settings.local.json").is_file());
         assert!(!superproject.join(".git/modules/.claude").exists());
@@ -1823,26 +1624,6 @@ mod tests {
             .disable_plan(DisableRuntime::Claude, &rule)
             .unwrap_err();
         assert!(error.contains("not a Claude instruction file"));
-    }
-
-    #[test]
-    fn inserts_into_an_existing_exclusion_array_without_reformatting() {
-        let source = "{\n  \"before\": 1,\n  \"claudeMdExcludes\": [\n    \"/before.md\"\n  ],\n  \"after\": 2\n}\n";
-        let updated = insert_json_array_string(source, "claudeMdExcludes", "/new.md").unwrap();
-        assert_eq!(
-            updated,
-            "{\n  \"before\": 1,\n  \"claudeMdExcludes\": [\n    \"/before.md\",\n    \"/new.md\"\n  ],\n  \"after\": 2\n}\n"
-        );
-    }
-
-    #[test]
-    fn removes_only_the_owned_exclusion_without_reformatting() {
-        let source = "{\n  \"before\": 1,\n  \"claudeMdExcludes\": [\n    \"/before.md\",\n    \"/owned.md\",\n    \"/after.md\"\n  ],\n  \"after\": 2\n}\n";
-        let updated = remove_json_array_string(source, "claudeMdExcludes", "/owned.md").unwrap();
-        assert_eq!(
-            updated,
-            "{\n  \"before\": 1,\n  \"claudeMdExcludes\": [\n    \"/before.md\",\n    \"/after.md\"\n  ],\n  \"after\": 2\n}\n"
-        );
     }
 
     #[test]
