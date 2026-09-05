@@ -311,7 +311,7 @@ fn print_context(audit: &Audit, paths: &Paths) {
         "{} · {}\n{} · {relevant} load when relevant",
         audit.runtime.label(),
         audit.directory.display(),
-        audit.summary,
+        audit.formatted_summary(),
     );
     for group in [
         SourceGroup::Startup,
@@ -375,7 +375,7 @@ fn context_json(audit: &Audit, paths: &Paths) -> Result<String, String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "runtime": audit.runtime.id(),
         "directory": audit.directory,
-        "summary": audit.summary,
+        "summary": audit.formatted_summary(),
         "sources": sources,
     }))
     .map_err(|error| format!("cannot serialize Context: {error}"))

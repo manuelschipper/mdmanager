@@ -55,6 +55,8 @@ pub(crate) struct TargetView {
     pub(crate) deployed: String,
     pub(crate) status: ProjectTargetStatus,
     pub(crate) diff: String,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +255,7 @@ impl Workspace {
         } else {
             unified_diff(&deployed, &expected, &old, &format!("rendered:{id}"))
         };
+        let difference = (deployed != expected).then(|| diff.clone());
         Ok(TargetView {
             id: id.to_owned(),
             path,
@@ -260,6 +263,7 @@ impl Workspace {
             deployed,
             status,
             diff,
+            difference,
         })
     }
 

@@ -164,9 +164,19 @@ pub(crate) struct Audit {
     pub(crate) directory: PathBuf,
     pub(crate) sources: Vec<ContextSource>,
     pub(crate) summary: String,
+    // Warnings are data; summary formatting belongs to the public CLI boundary.
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Audit {
+    pub(crate) fn formatted_summary(&self) -> String {
+        let mut summary = self.summary.clone();
+        for warning in &self.warnings {
+            summary.push_str(&format!(" · Warning: {warning}"));
+        }
+        summary
+    }
+
     pub(crate) fn resolve(
         runtime: ContextRuntime,
         directory: &Path,
@@ -319,6 +329,7 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Claude,
         directory: directory.to_owned(),
         sources,
+        warnings: Vec::new(),
         summary: format!("{startup} load at startup"),
     }
 }
@@ -622,16 +633,13 @@ fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
         })
         .count();
     let used = settings.max_bytes.saturating_sub(remaining);
-    let warning = settings
-        .warning
-        .as_ref()
-        .map_or_else(String::new, |warning| format!(" · Warning: {warning}"));
     Audit {
         runtime: ContextRuntime::Codex,
         directory: directory.to_owned(),
         sources,
+        warnings: settings.warning.into_iter().collect(),
         summary: format!(
-            "{loaded} load at startup · {used}/{} project instruction bytes{warning}",
+            "{loaded} load at startup · {used}/{} project instruction bytes",
             settings.max_bytes,
         ),
     }
@@ -703,6 +711,7 @@ fn resolve_cursor(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Cursor,
         directory: directory.to_owned(),
         sources,
+        warnings: Vec::new(),
         summary: format!(
             "{startup} load at startup · User and Team Rules live in Cursor settings and are not inspectable"
         ),
@@ -871,6 +880,7 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Pi,
         directory: directory.to_owned(),
         sources,
+        warnings: Vec::new(),
         summary: format!("{loaded} load at startup"),
     }
 }
@@ -1486,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_reports_invalid_settings_in_the_summary() {
+    fn codex_reports_invalid_settings_as_warnings() {
         let temp = TempDir::new().unwrap();
         let cwd = temp.path().join("repo");
         fs::create_dir_all(temp.path().join(".codex")).unwrap();
@@ -1494,8 +1504,8 @@ mod tests {
         fs::write(temp.path().join(".codex/config.toml"), "invalid = [").unwrap();
 
         let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
-        assert!(audit.summary.contains("Warning: invalid"));
-        assert!(audit.summary.contains("config.toml"));
+        assert!(!audit.warnings.is_empty());
+        assert!(audit.warnings[0].contains("config.toml"));
     }
 
     #[test]

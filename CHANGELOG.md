@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Consistent TUI inspection** — Pages, search, and difference controls use explicit inspection snapshots, keeping file observations stable between reloads and reporting current refresh errors. Differences follow content comparison independently of deployment status, and Context diagnostics no longer depend on display wording.
+
 - **Claude worktree settings** — Context uses the same Git-reported settings worktree as Local disables, including separate Git directories and submodules, and no longer reads settings from Git metadata parents.
 - **Malformed rule headers** — Claude and Cursor rules with unterminated frontmatter are reported as ambiguous with a reason instead of inferring loading from incomplete metadata.
 

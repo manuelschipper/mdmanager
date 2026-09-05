@@ -66,6 +66,7 @@ impl ContextUi {
 
     pub(crate) fn reload(&mut self, global: Option<&GlobalConfig>) {
         let selected = self.selected().map(|source| source.path.clone());
+        // Dropping the receiver prevents a previous runtime or reload from publishing a scan.
         self.scan_receiver = None;
         self.scan_started_at = None;
         self.audit = Audit::resolve(
@@ -127,7 +128,16 @@ impl ContextUi {
         match receiver.try_recv() {
             Ok(scan) => {
                 let unreadable = scan.unreadable.clone();
+                let selected = self.selected().map(|source| source.path.clone());
                 self.audit.add_claude_scan(scan, global);
+                if let Some(index) = selected.and_then(|path| {
+                    self.audit
+                        .sources
+                        .iter()
+                        .position(|source| source.path == path)
+                }) {
+                    self.source_index = index;
+                }
                 self.scan_receiver = None;
                 self.scan_started_at = None;
                 self.scan_status = ContextScanStatus::Complete { unreadable };
@@ -162,6 +172,48 @@ fn spinner_frame(elapsed: Duration) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_scan_discards_results_after_runtime_switch_or_reload() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let paths = crate::config::Paths::for_home(directory.path());
+        let mut context = ContextUi::new_at(paths, None, directory.path().to_owned()).unwrap();
+        for switch_runtime in [false, true] {
+            let (sender, receiver) = mpsc::channel();
+            context.scan_receiver = Some(receiver);
+            sender
+                .send(ClaudeScan {
+                    sources: Vec::new(),
+                    unreadable: vec![directory.path().join("stale-scan")],
+                })
+                .unwrap();
+            if switch_runtime {
+                context.select_runtime(
+                    ContextRuntime::ALL
+                        .iter()
+                        .position(|runtime| *runtime == ContextRuntime::Pi)
+                        .unwrap(),
+                    None,
+                );
+            } else {
+                context.reload(None);
+            }
+            assert!(!context.poll_scan(None));
+            assert!(!matches!(
+                context.scan_status,
+                ContextScanStatus::Complete { .. }
+            ));
+            assert!(
+                sender
+                    .send(ClaudeScan {
+                        sources: Vec::new(),
+                        unreadable: Vec::new()
+                    })
+                    .is_err()
+            );
+        }
+        assert_eq!(context.audit.runtime, ContextRuntime::Pi);
+    }
 
     #[test]
     fn spinner_advances_and_wraps() {
