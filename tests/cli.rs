@@ -535,6 +535,7 @@ fn codex_context_reports_invalid_configuration_in_human_and_json_output() {
     );
     assert!(json.status.success());
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(json.get("warnings").is_none());
     assert!(
         json["summary"]
             .as_str()

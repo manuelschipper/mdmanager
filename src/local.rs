@@ -156,6 +156,8 @@ pub(crate) struct ManagedView {
     pub(crate) rendered: String,
     pub(crate) status: LocalTargetStatus,
     pub(crate) diff: String,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
     pub(crate) sections: Vec<LocalSection>,
     pub(crate) ordered: Vec<String>,
 }
@@ -707,6 +709,7 @@ impl LocalRepository {
                 "rendered local instructions",
             )
         };
+        let difference = (deployed != rendered).then(|| diff.clone());
         let library = GlobalConfig::load(&self.paths)?;
         let sections = local_target
             .sections
@@ -726,6 +729,7 @@ impl LocalRepository {
             rendered,
             status,
             diff,
+            difference,
             sections,
             ordered: local_target.sections,
         })
