@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Collision-safe Global backups** — Backup reservations use create-only persistence so
+  overlapping replacements retain every recovery point.
+- **Project creation safety** — Reviewed creation rejects newly introduced target symlinks
+  and preserves intervening Section replacements when a manifest commit fails.
+
 - **Reviewed Project writes** — Apply retains the displayed review and refuses changed
   targets or source paths before writing, including when using `--yes`.
 - **Local ownership safety** — Managed outputs reject resolving and dangling symlinks.

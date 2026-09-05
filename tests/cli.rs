@@ -712,8 +712,33 @@ fn doctor_repairs_invalid_generated_state_without_changing_targets() {
     assert!(output.contains("Repair: rebuilt generated state for detected Profile default"));
     assert!(output.contains("No problems found"));
     assert!(mdmanager(home.path(), &["doctor"]).status.success());
-    for (path, expected) in targets.iter().zip(before) {
-        assert_eq!(fs::read(path).unwrap(), expected);
+    for (path, expected) in targets.iter().zip(&before) {
+        assert_eq!(&fs::read(path).unwrap(), expected);
+    }
+    let config = home.path().join(".mdmanager/mdmanager.toml");
+    let source = fs::read_to_string(&config).unwrap();
+    let mut manifest: toml::Value = toml::from_str(&source).unwrap();
+    let duplicate = manifest["profiles"]["default"].clone();
+    manifest["profiles"]
+        .as_table_mut()
+        .unwrap()
+        .insert("identical".into(), duplicate);
+    fs::write(&config, toml::to_string(&manifest).unwrap()).unwrap();
+    fs::write(&state, "active_profile = [").unwrap();
+    let ambiguous = mdmanager(home.path(), &["doctor"]);
+    assert!(!ambiguous.status.success());
+    let cleared: toml::Value = toml::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    assert!(cleared.get("active_profile").is_none());
+    assert!(cleared["targets"].as_table().unwrap().is_empty());
+    let state_before = fs::read(&state).unwrap();
+    assert!(
+        !mdmanager(home.path(), &["apply", "default", "--yes"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read(&state).unwrap(), state_before);
+    for (path, expected) in targets.iter().zip(&before) {
+        assert_eq!(&fs::read(path).unwrap(), expected);
     }
 }
 
