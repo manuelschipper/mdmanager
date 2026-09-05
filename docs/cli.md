@@ -43,8 +43,10 @@ Project targets are `agents` (`AGENTS.md`) and `claude` (`CLAUDE.md`). Local tar
 reference it without copying its Markdown.
 
 Non-interactive target writes require `--yes`. `init`, `local create`, and `local adopt` create only
-owned sources. Local Apply never overwrites changed or unowned files. Replacing changed, unowned, or
-symlinked Global targets requires `--force` and creates a numbered backup.
+owned sources. Local Apply never overwrites changed or unowned files. Resolve Local symlinks,
+even dangling ones, before writes. Replacing changed, unowned, or symlinked Global targets requires `--force` and creates a numbered backup.
+
+Project Apply rechecks reviewed targets before writing. On changes, review again. Recover via Git.
 
 `doctor` repairs only invalid generated state and never changes instruction targets. It restores a
 uniquely matching Profile; otherwise it clears invalid ownership so Apply remains protected.

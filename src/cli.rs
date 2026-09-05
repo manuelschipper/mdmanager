@@ -649,9 +649,13 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
             if targets.is_empty() {
                 return Err("project manifest declares no targets".into());
             }
+            let views = targets
+                .iter()
+                .map(|target| workspace.inspect(target))
+                .collect::<Result<Vec<_>, _>>()?;
             let mut changed = false;
-            for target in &targets {
-                let view = workspace.inspect(target)?;
+            for view in &views {
+                let target = &view.id;
                 println!(
                     "{:<12} {:<12} {}",
                     target_display_name(target),
@@ -672,8 +676,9 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
                 println!("Cancelled.");
                 return Ok(ExitCode::FAILURE);
             }
-            for target in &targets {
-                let previous = workspace.apply(target)?;
+            for view in &views {
+                let target = &view.id;
+                let previous = workspace.apply(view)?;
                 if previous != project::ProjectTargetStatus::Current {
                     println!(
                         "{}: applied (was {})",

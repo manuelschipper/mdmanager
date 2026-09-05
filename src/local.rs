@@ -192,7 +192,8 @@ struct LocalTarget {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct Owned {
+#[serde(deny_unknown_fields)]
+struct RawOwned {
     path: String,
     hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,11 +209,186 @@ struct Owned {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawState {
+    #[serde(default)]
+    disables: std::collections::BTreeMap<String, RawOwned>,
+    #[serde(default)]
+    managed: std::collections::BTreeMap<String, RawOwned>,
+}
+
+// Only validated ownership enters Local operations; RawState preserves overlays.toml's format.
+#[derive(Clone, Debug)]
+struct Owned {
+    path: String,
+    hash: String,
+    exclusion: Option<OwnedExclusion>,
+}
+
+#[derive(Clone, Debug)]
+struct OwnedExclusion {
+    path: String,
+    pattern: String,
+}
+
+#[derive(Clone, Debug)]
+enum ClaudeRecovery {
+    Created,
+    Existing(String),
+}
+
+#[derive(Clone, Debug)]
+enum DisableOwned {
+    Pi {
+        owned: Owned,
+        source: String,
+    },
+    Claude {
+        owned: Owned,
+        source: String,
+        recovery: ClaudeRecovery,
+    },
+}
+
+impl DisableOwned {
+    fn owned(&self) -> &Owned {
+        match self {
+            Self::Pi { owned, .. } | Self::Claude { owned, .. } => owned,
+        }
+    }
+
+    fn source(&self) -> &str {
+        match self {
+            Self::Pi { source, .. } | Self::Claude { source, .. } => source,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 struct State {
-    #[serde(default)]
-    disables: std::collections::BTreeMap<String, Owned>,
-    #[serde(default)]
+    disables: std::collections::BTreeMap<String, DisableOwned>,
     managed: std::collections::BTreeMap<String, Owned>,
+}
+
+impl RawOwned {
+    fn ownership(&self) -> Result<Owned, String> {
+        let exclusion = match (&self.exclusion_path, &self.exclusion_pattern) {
+            (Some(path), Some(pattern)) => Some(OwnedExclusion {
+                path: path.clone(),
+                pattern: pattern.clone(),
+            }),
+            (None, None) => None,
+            _ => return Err("overlay ownership requires both exclusion path and pattern".into()),
+        };
+        Ok(Owned {
+            path: self.path.clone(),
+            hash: self.hash.clone(),
+            exclusion,
+        })
+    }
+}
+
+impl TryFrom<RawState> for State {
+    type Error = String;
+
+    fn try_from(raw: RawState) -> Result<Self, String> {
+        let mut state = Self::default();
+        for (key, raw) in raw.managed {
+            if raw.disabled_source.is_some()
+                || raw.created_container
+                || raw.original_content.is_some()
+            {
+                return Err("managed overlay ownership contains disable recovery data".into());
+            }
+            state.managed.insert(key, raw.ownership()?);
+        }
+        for (key, raw) in raw.disables {
+            let owned = raw.ownership()?;
+            let source = raw
+                .disabled_source
+                .ok_or("overlay disable ownership requires its disabled source")?;
+            let disable = match key.split(':').next() {
+                Some("pi")
+                    if key.starts_with("pi:")
+                        && !raw.created_container
+                        && raw.original_content.is_none() =>
+                {
+                    DisableOwned::Pi { owned, source }
+                }
+                Some("claude") if key == "claude" => {
+                    let recovery =
+                        match (raw.created_container, raw.original_content) {
+                            (true, None) => ClaudeRecovery::Created,
+                            (false, Some(original)) => {
+                                parse_json_object(&original, Path::new(&owned.path))?;
+                                ClaudeRecovery::Existing(original)
+                            }
+                            _ => return Err(
+                                "Claude overlay ownership has inconsistent settings recovery data"
+                                    .into(),
+                            ),
+                        };
+                    DisableOwned::Claude {
+                        owned,
+                        source,
+                        recovery,
+                    }
+                }
+                _ => return Err("invalid overlay disable ownership kind or recovery data".into()),
+            };
+            state.disables.insert(key, disable);
+        }
+        Ok(state)
+    }
+}
+
+impl From<&Owned> for RawOwned {
+    fn from(owned: &Owned) -> Self {
+        Self {
+            path: owned.path.clone(),
+            hash: owned.hash.clone(),
+            exclusion_path: owned
+                .exclusion
+                .as_ref()
+                .map(|exclusion| exclusion.path.clone()),
+            exclusion_pattern: owned
+                .exclusion
+                .as_ref()
+                .map(|exclusion| exclusion.pattern.clone()),
+            disabled_source: None,
+            created_container: false,
+            original_content: None,
+        }
+    }
+}
+
+impl From<&State> for RawState {
+    fn from(state: &State) -> Self {
+        Self {
+            managed: state
+                .managed
+                .iter()
+                .map(|(key, owned)| (key.clone(), owned.into()))
+                .collect(),
+            disables: state
+                .disables
+                .iter()
+                .map(|(key, disable)| {
+                    let mut raw = RawOwned::from(disable.owned());
+                    raw.disabled_source = Some(disable.source().into());
+                    if let DisableOwned::Claude { recovery, .. } = disable {
+                        match recovery {
+                            ClaudeRecovery::Created => raw.created_container = true,
+                            ClaudeRecovery::Existing(original) => {
+                                raw.original_content = Some(original.clone())
+                            }
+                        }
+                    }
+                    (key.clone(), raw)
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -220,6 +396,30 @@ struct Exclusion {
     path: PathBuf,
     pattern: String,
     needs_write: bool,
+}
+
+impl Exclusion {
+    fn owned(&self) -> Option<OwnedExclusion> {
+        self.needs_write.then(|| OwnedExclusion {
+            path: self.path.display().to_string(),
+            pattern: self.pattern.clone(),
+        })
+    }
+}
+
+fn validate_local_target(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "local target {} is not an ordinary file; refusing to replace it",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot inspect local target {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 impl LocalRepository {
@@ -296,7 +496,7 @@ impl LocalRepository {
             .load_state()?
             .disables
             .get(&self.disable_state_key(runtime))
-            .and_then(|owned| owned.disabled_source.as_deref())
+            .map(|owned| owned.source())
             .map(PathBuf::from))
     }
 
@@ -422,22 +622,13 @@ impl LocalRepository {
                 atomic_create(&plan.output, b"")?;
                 state.disables.insert(
                     state_key.clone(),
-                    Owned {
-                        path: plan.output.display().to_string(),
-                        hash: sha256_hex(b""),
-                        disabled_source: Some(plan.source.display().to_string()),
-                        exclusion_path: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.path.display().to_string()),
-                        exclusion_pattern: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.pattern.clone()),
-                        created_container: false,
-                        original_content: None,
+                    DisableOwned::Pi {
+                        owned: Owned {
+                            path: plan.output.display().to_string(),
+                            hash: sha256_hex(b""),
+                            exclusion: plan.exclusion.as_ref().and_then(Exclusion::owned),
+                        },
+                        source: plan.source.display().to_string(),
                     },
                 );
             }
@@ -464,22 +655,18 @@ impl LocalRepository {
                 atomic_write(&plan.output, rendered.as_bytes())?;
                 state.disables.insert(
                     state_key,
-                    Owned {
-                        path: plan.output.display().to_string(),
-                        hash: sha256_hex(rendered.as_bytes()),
-                        disabled_source: Some(plan.source.display().to_string()),
-                        exclusion_path: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.path.display().to_string()),
-                        exclusion_pattern: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.pattern.clone()),
-                        created_container: created,
-                        original_content: (!created).then_some(old),
+                    DisableOwned::Claude {
+                        owned: Owned {
+                            path: plan.output.display().to_string(),
+                            hash: sha256_hex(rendered.as_bytes()),
+                            exclusion: plan.exclusion.as_ref().and_then(Exclusion::owned),
+                        },
+                        source,
+                        recovery: if created {
+                            ClaudeRecovery::Created
+                        } else {
+                            ClaudeRecovery::Existing(old)
+                        },
                     },
                 );
             }
@@ -490,48 +677,53 @@ impl LocalRepository {
     pub(crate) fn restore_disable(&self, runtime: DisableRuntime) -> Result<(), String> {
         let mut state = self.load_state()?;
         let state_key = self.disable_state_key(runtime);
-        let owned = state
+        let disable = state
             .disables
             .get(&state_key)
-            .cloned()
             .ok_or_else(|| format!("no mdmanager.ai-owned {} disable", runtime.key()))?;
+        let owned = disable.owned();
         let path = PathBuf::from(&owned.path);
         let bytes = fs::read(&path)
             .map_err(|error| format!("cannot read owned overlay {}: {error}", path.display()))?;
         let unchanged = sha256_hex(&bytes) == owned.hash;
-        match runtime {
-            DisableRuntime::Pi => {
+        let replacement = match disable {
+            DisableOwned::Pi { .. } => {
                 if !unchanged {
                     return Err(format!(
                         "{} changed after mdmanager.ai wrote it; refusing restore",
                         path.display()
                     ));
                 }
-                fs::remove_file(&path)
-                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-                remove_owned_exclusion(&owned)?;
+                None
             }
-            DisableRuntime::Claude => {
-                if unchanged && owned.created_container {
-                    fs::remove_file(&path)
-                        .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-                } else if unchanged {
-                    let original = owned.original_content.as_deref().ok_or_else(|| {
-                        "Claude ownership record does not contain the original settings".to_owned()
-                    })?;
-                    atomic_write(&path, original.as_bytes())?;
+            DisableOwned::Claude {
+                source, recovery, ..
+            } => {
+                if unchanged {
+                    match recovery {
+                        ClaudeRecovery::Created => None,
+                        ClaudeRecovery::Existing(original) => Some(original.clone()),
+                    }
                 } else {
-                    let source = String::from_utf8(bytes)
+                    let settings = String::from_utf8(bytes)
                         .map_err(|_| format!("{} is not UTF-8", path.display()))?;
-                    let disabled_source = owned.disabled_source.as_deref().ok_or_else(|| {
-                        "Claude ownership record does not contain its disabled source".to_owned()
-                    })?;
-                    let rendered =
-                        remove_json_array_string(&source, "claudeMdExcludes", disabled_source)?;
-                    atomic_write(&path, rendered.as_bytes())?;
+                    Some(remove_json_array_string(
+                        &settings,
+                        "claudeMdExcludes",
+                        source,
+                    )?)
                 }
-                remove_owned_exclusion(&owned)?;
             }
+        };
+        let exclusion_edit = owned_exclusion_removal(owned)?;
+        if let Some(replacement) = replacement {
+            atomic_write(&path, replacement.as_bytes())?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        }
+        if let Some((path, content)) = exclusion_edit {
+            atomic_write(&path, content.as_bytes())?;
         }
         state.disables.remove(&state_key);
         self.save_state(&state)
@@ -542,12 +734,11 @@ impl LocalRepository {
         let Some(owned) = state.disables.get(&self.disable_state_key(runtime)) else {
             return Ok(DisableStatus::None);
         };
+        let disabled_source = owned.source();
+        let owned = owned.owned();
         match fs::read(&owned.path) {
             Ok(bytes) if runtime == DisableRuntime::Claude => {
                 let active = String::from_utf8(bytes).ok().is_some_and(|source| {
-                    let Some(disabled_source) = owned.disabled_source.as_deref() else {
-                        return false;
-                    };
                     parse_json_object(&source, Path::new(&owned.path))
                         .ok()
                         .and_then(|object| object.get("claudeMdExcludes").cloned())
@@ -579,6 +770,7 @@ impl LocalRepository {
         section: &str,
     ) -> Result<(), String> {
         let output = self.root.join(target.filename());
+        validate_local_target(&output)?;
         if output.exists() {
             return Err(format!("refusing to overwrite {}", output.display()));
         }
@@ -588,6 +780,7 @@ impl LocalRepository {
 
     pub(crate) fn adopt_managed(&self, target: ManagedTarget, section: &str) -> Result<(), String> {
         let output = self.root.join(target.filename());
+        validate_local_target(&output)?;
         if !output.is_file() {
             return Err(format!("{} does not exist", output.display()));
         }
@@ -629,11 +822,7 @@ impl LocalRepository {
             Owned {
                 path: output.display().to_string(),
                 hash: sha256_hex(content.as_bytes()),
-                disabled_source: None,
-                exclusion_path: None,
-                exclusion_pattern: None,
-                created_container: false,
-                original_content: None,
+                exclusion: None,
             },
         );
         self.save_state(&state)
@@ -690,6 +879,7 @@ impl LocalRepository {
         let local_target = self.load_local_target(target)?;
         let rendered = self.render_managed(target)?;
         let path = self.root.join(target.filename());
+        validate_local_target(&path)?;
         let deployed = match fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -784,25 +974,24 @@ impl LocalRepository {
                 view.status.label()
             ));
         }
+        let mut state = self.load_state()?;
         if exclusion.needs_write {
             apply_exclusion(&exclusion, &self.root, &view.path)?;
         }
         if view.status != LocalTargetStatus::Current {
             atomic_write(&view.path, view.rendered.as_bytes())?;
         }
-        let mut state = self.load_state()?;
         state.managed.insert(
             self.managed_state_key(target),
             Owned {
                 path: view.path.display().to_string(),
                 hash: sha256_hex(view.rendered.as_bytes()),
-                disabled_source: None,
-                exclusion_path: exclusion
-                    .needs_write
-                    .then(|| exclusion.path.display().to_string()),
-                exclusion_pattern: exclusion.needs_write.then_some(exclusion.pattern),
-                created_container: false,
-                original_content: None,
+                exclusion: exclusion.owned().or_else(|| {
+                    state
+                        .managed
+                        .get(&self.managed_state_key(target))
+                        .and_then(|owned| owned.exclusion.clone())
+                }),
             },
         );
         self.save_state(&state)?;
@@ -1003,6 +1192,7 @@ impl LocalRepository {
     }
 
     fn create_local_target(&self, target: ManagedTarget, section: &str) -> Result<(), String> {
+        self.load_state()?;
         let path = self.local_manifest_path();
         let exists = path.is_file();
         let mut manifest = if exists {
@@ -1036,7 +1226,9 @@ impl LocalRepository {
 
     fn load_state(&self) -> Result<State, String> {
         match fs::read_to_string(&self.state_path) {
-            Ok(source) => toml::from_str(&source)
+            Ok(source) => toml::from_str::<RawState>(&source)
+                .map_err(|error| error.to_string())
+                .and_then(State::try_from)
                 .map_err(|error| format!("invalid {}: {error}", self.state_path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(error) => Err(format!(
@@ -1047,7 +1239,7 @@ impl LocalRepository {
     }
 
     fn save_state(&self, state: &State) -> Result<(), String> {
-        let source = toml::to_string_pretty(state)
+        let source = toml::to_string_pretty(&RawState::from(state))
             .map_err(|error| format!("cannot serialize overlay state: {error}"))?;
         atomic_write(&self.state_path, source.as_bytes())
     }
@@ -1342,9 +1534,9 @@ fn apply_exclusion(exclusion: &Exclusion, worktree: &Path, output: &Path) -> Res
     Ok(())
 }
 
-fn remove_owned_exclusion(owned: &Owned) -> Result<(), String> {
-    let (Some(path), Some(pattern)) = (&owned.exclusion_path, &owned.exclusion_pattern) else {
-        return Ok(());
+fn owned_exclusion_removal(owned: &Owned) -> Result<Option<(PathBuf, String)>, String> {
+    let Some(OwnedExclusion { path, pattern }) = &owned.exclusion else {
+        return Ok(None);
     };
     let path = PathBuf::from(path);
     let source = fs::read_to_string(&path)
@@ -1365,7 +1557,7 @@ fn remove_owned_exclusion(owned: &Owned) -> Result<(), String> {
     if !output.is_empty() {
         output.push('\n');
     }
-    atomic_write(&path, output.as_bytes())
+    Ok(Some((path, output)))
 }
 
 fn git(directory: &Path, arguments: &[&str]) -> Result<String, String> {
@@ -1845,6 +2037,130 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn managed_symlinks_refuse_adoption_and_reviewed_writes_without_effects() {
+        use std::os::unix::fs::symlink;
+        for target in [ManagedTarget::Agents, ManagedTarget::Claude] {
+            for dangling in [false, true] {
+                let (_home, repository, repo) = repository();
+                personal_section(&repo.paths, "local\n");
+                let output = repository.path().join(target.filename());
+                let referent = repository.path().join("referent");
+                if !dangling {
+                    fs::write(&referent, "local\n").unwrap();
+                }
+                symlink(&referent, &output).unwrap();
+                let exclusion = repository.path().join(".git/info/exclude");
+                let before_exclusion = fs::read(&exclusion).unwrap();
+                assert!(repo.adopt_managed(target, "local").is_err());
+                assert!(repo.create_managed(target, "local").is_err());
+                assert!(!repo.local_manifest_path().exists());
+                assert!(!repo.state_path.exists());
+                fs::remove_file(&output).unwrap();
+                repo.create_managed(target, "local").unwrap();
+                let plan = repo.managed_plan(target).unwrap();
+                repo.apply_managed(&plan).unwrap();
+                let plan = repo.managed_plan(target).unwrap();
+                let manifest = fs::read(repo.local_manifest_path()).unwrap();
+                let state = fs::read(&repo.state_path).unwrap();
+                let owned_exclusion = fs::read(&exclusion).unwrap();
+                assert_ne!(owned_exclusion, before_exclusion);
+                fs::remove_file(&output).unwrap();
+                symlink(&referent, &output).unwrap();
+                assert!(repo.inspect_managed(target).is_err());
+                assert!(repo.managed_plan(target).is_err());
+                assert!(repo.apply_managed(&plan).is_err());
+                assert_eq!(fs::read_link(&output).unwrap(), referent);
+                if dangling {
+                    assert!(!referent.exists());
+                } else {
+                    assert_eq!(fs::read(&referent).unwrap(), b"local\n");
+                }
+                assert_eq!(fs::read(repo.local_manifest_path()).unwrap(), manifest);
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(fs::read(exclusion).unwrap(), owned_exclusion);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ownership_blocks_local_mutations_before_any_effect() {
+        let (_home, repository, repo) = repository();
+        personal_section(&repo.paths, "local\n");
+        let source = repository.path().join("CLAUDE.md");
+        fs::write(&source, "shared\n").unwrap();
+        fs::write(
+            repository.path().join(".git/info/exclude"),
+            "/CLAUDE.local.md\n",
+        )
+        .unwrap();
+        let disable_plan = repo.disable_plan(DisableRuntime::Claude, &source).unwrap();
+        repo.apply_disable(&disable_plan).unwrap();
+        repo.create_managed(ManagedTarget::Agents, "local").unwrap();
+        let managed_plan = repo.managed_plan(ManagedTarget::Agents).unwrap();
+        let valid = fs::read_to_string(&repo.state_path).unwrap();
+        let manifest = fs::read(repo.local_manifest_path()).unwrap();
+        let settings = fs::read(&disable_plan.output).unwrap();
+        let exclusion_path = repository.path().join(".git/info/exclude");
+        let exclusion = fs::read(&exclusion_path).unwrap();
+        for case in 0..8 {
+            let mut raw: RawState = toml::from_str(&valid).unwrap();
+            let owned = raw.disables.get_mut("claude").unwrap();
+            match case {
+                0 => owned.disabled_source = None,
+                1 => owned.exclusion_path = None,
+                2 => owned.exclusion_pattern = None,
+                3 => owned.created_container = false,
+                4 => owned.original_content = Some("{}".into()),
+                5 => {
+                    owned.created_container = false;
+                    owned.original_content = Some("invalid JSON".into());
+                }
+                6 => {
+                    let owned = owned.clone();
+                    raw.managed
+                        .insert(repo.managed_state_key(ManagedTarget::Agents), owned);
+                }
+                7 => {
+                    let owned = owned.clone();
+                    raw.disables
+                        .insert(repo.disable_state_key(DisableRuntime::Pi), owned);
+                }
+                _ => unreachable!(),
+            }
+            let malformed = toml::to_string_pretty(&raw).unwrap();
+            fs::write(&repo.state_path, &malformed).unwrap();
+            assert!(
+                repo.restore_disable(DisableRuntime::Claude).is_err(),
+                "case {case}"
+            );
+            assert!(repo.apply_disable(&disable_plan).is_err(), "case {case}");
+            assert!(repo.apply_managed(&managed_plan).is_err(), "case {case}");
+            assert!(
+                repo.create_managed(ManagedTarget::Claude, "local").is_err(),
+                "case {case}"
+            );
+            let adopt_output = repository.path().join("CLAUDE.local.md");
+            fs::write(&adopt_output, "local\n").unwrap();
+            assert!(
+                repo.adopt_managed(ManagedTarget::Claude, "local").is_err(),
+                "case {case}"
+            );
+            assert_eq!(fs::read(&adopt_output).unwrap(), b"local\n");
+            fs::remove_file(adopt_output).unwrap();
+            assert!(!managed_plan.view.path.exists());
+            assert_eq!(fs::read(repo.local_manifest_path()).unwrap(), manifest);
+            assert_eq!(fs::read(&disable_plan.output).unwrap(), settings);
+            assert_eq!(fs::read(&exclusion_path).unwrap(), exclusion);
+            assert_eq!(fs::read_to_string(&repo.state_path).unwrap(), malformed);
+        }
+        fs::write(&repo.state_path, valid).unwrap();
+        fs::remove_file(&exclusion_path).unwrap();
+        assert!(repo.restore_disable(DisableRuntime::Claude).is_err());
+        assert_eq!(fs::read(&disable_plan.output).unwrap(), settings);
+    }
+
     #[test]
     fn managed_status_distinguishes_stale_and_modified() {
         let home = TempDir::new().unwrap();
@@ -1965,6 +2281,10 @@ mod tests {
         assert_eq!(plan.view.status, LocalTargetStatus::Current);
         assert!(plan.exclusion_write().is_some());
         repo.apply_managed(&plan).unwrap();
+        let owned_state = fs::read(&repo.state_path).unwrap();
+        let current = repo.managed_plan(ManagedTarget::Agents).unwrap();
+        repo.apply_managed(&current).unwrap();
+        assert_eq!(fs::read(&repo.state_path).unwrap(), owned_state);
         assert!(
             fs::read_to_string(exclusion)
                 .unwrap()

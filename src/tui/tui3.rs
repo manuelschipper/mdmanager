@@ -5219,7 +5219,10 @@ mod tests {
         );
         assert!(matches!(app.view, View::Diff(_)));
 
-        app.project.as_ref().unwrap().apply("agents").unwrap();
+        let workspace = app.project.as_ref().unwrap();
+        workspace
+            .apply(&workspace.inspect("agents").unwrap())
+            .unwrap();
         app.reload_from_disk();
 
         assert!(matches!(app.view, View::Managed(_)));

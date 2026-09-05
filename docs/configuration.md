@@ -148,8 +148,10 @@ The `agents` composition renders `AGENTS.override.md`; `claude` renders `CLAUDE.
 The agent authors or selects a personal Section, then creates or adopts the Local composition. It can
 edit each ordered list to add Sections. Missing referenced Sections make the composition invalid.
 
-Generated ownership records live in `~/.mdmanager/state/`; recovery copies live in
-`~/.mdmanager/backups/`. Do not hand-edit them; `mdmanager doctor` repairs invalid generated state.
+State: `~/.mdmanager/state/`; Global backups: `~/.mdmanager/backups/`.
+Do not hand-edit state. `doctor` repairs Global state. Recover invalid Local `overlays.toml`
+from backup before writes. Local restore preserves unrelated settings edits;
+restore can partially fail.
 Runtime configuration observed by Context remains outside these manifests.
 
 ## Sharing a personal Section

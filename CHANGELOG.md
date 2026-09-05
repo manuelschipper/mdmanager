@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Reviewed Project writes** — Apply retains the displayed review and refuses changed
+  targets or source paths before writing, including when using `--yes`.
+- **Local ownership safety** — Managed outputs reject resolving and dangling symlinks.
+  Local writes validate recovery records first; restore prepares settings and owned
+  exclusion edits before changing files, and repeated Apply retains exclusion ownership.
+
 ## mdmanager 0.1.0 — Sep 5, 2026
 
 - **Runtime Context** — Inspect persistent Markdown instructions for Claude Code,
