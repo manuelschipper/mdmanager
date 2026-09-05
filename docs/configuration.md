@@ -70,20 +70,20 @@ Global requirements:
 - Target paths remain beneath home and end with `AGENTS.md` or `CLAUDE.md`.
 - Section IDs and expanded target paths are unique.
 - `[targets.*]` is the shared catalog. Each Profile names a non-empty subset of those Targets.
-  Each named list is non-empty and duplicate-free. Unknown Target keys fail. An empty Profile
-  fails.
+  Lists are non-empty and duplicate-free; unknown Target keys fail.
 
-Omitting a catalog Target from a Profile stops that Profile from deploying it and does not
-delete an existing file. Removing `[targets.pi]` from the catalog drops Pi fleet-wide.
+Omitted Targets stay untouched; removing a catalog Target drops it fleet-wide.
+The TUI edits only `[ui].theme`; agents edit compositions and use `render`, `status`, and Apply.
 
-The TUI writes only `[ui].theme`. A coding agent edits compositions, validates them with `render`
-and `status`, and applies them through the CLI.
+Apply owns regular files. Configure canonical paths; approve external symlink aliases
+separately. mdmanager only reports aliases. Configured symlinks are unmanaged or changed and
+require replacement review.
 
-A Global Target is a regular file owned by mdmanager after Apply. If multiple runtime paths should
-read exactly the same document, keep only the canonical path in `targets` and let a coding agent
-offer explicitly approved symlinks from the other paths. Those aliases are external: mdmanager
-reports them but does not create or maintain them. A configured Target found as a symlink is instead
-protected as an unmanaged or changed deployment and Apply replaces it only after replacement review.
+Apply saves ownership per target, sequentially. Failure keeps prior writes and active Profile;
+activation needs all writes and its final save. Fix the I/O error; retry `mdmanager apply PROFILE`.
+A failed state save may leave unowned/changed output, even with matching bytes. Review the diff
+and preserve edits, then approve replacement or use `mdmanager apply PROFILE --force`;
+protected output is backed up first. Never edit state to bypass ownership protection.
 
 ## Committed project composition
 
