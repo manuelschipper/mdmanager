@@ -20,16 +20,32 @@ pub(super) struct ReloadInput<'a> {
 }
 
 fn hash_tree(path: &Path, hasher: &mut DefaultHasher, project_tree: bool) {
+    hash_dependency_tree(path, hasher, project_tree, false);
+}
+
+fn hash_dependency_tree(
+    path: &Path,
+    hasher: &mut DefaultHasher,
+    project_tree: bool,
+    rule_directory: bool,
+) {
     if !path.exists() {
         path.hash(hasher);
         0_u8.hash(hasher);
         return;
     }
     let walker = WalkDir::new(path)
-        .follow_links(false)
+        .follow_links(rule_directory)
         .into_iter()
         .filter_entry(|entry| !ignored_watch_entry(entry));
     for entry in walker.flatten() {
+        // Claude and Cursor rule directories share the resolver's linked traversal.
+        if !rule_directory
+            && (entry.path().ends_with(".claude/rules") || entry.path().ends_with(".cursor/rules"))
+            && entry.path().is_dir()
+        {
+            hash_dependency_tree(entry.path(), hasher, false, true);
+        }
         if entry.file_type().is_file() && project_tree && !relevant_project_file(entry.path()) {
             continue;
         }
@@ -37,7 +53,12 @@ fn hash_tree(path: &Path, hasher: &mut DefaultHasher, project_tree: bool) {
         if entry.file_type().is_symlink() {
             fs::read_link(entry.path()).ok().hash(hasher);
         }
-        if let Ok(metadata) = fs::metadata(entry.path()) {
+        let metadata = if entry.file_type().is_symlink() && entry.path().is_dir() {
+            fs::symlink_metadata(entry.path())
+        } else {
+            fs::metadata(entry.path())
+        };
+        if let Ok(metadata) = metadata {
             metadata.len().hash(hasher);
             metadata
                 .modified()
@@ -159,7 +180,16 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
     ] {
         hash_tree(&path, &mut hasher, false);
     }
-    hash_tree(&claude_config.join("rules"), &mut hasher, true);
+    hash_dependency_tree(&claude_config.join("rules"), &mut hasher, false, true);
+    if let Ok(main_checkout) = crate::git_worktree::worktree_root(&input.audit.directory)
+        .and_then(|root| crate::git_worktree::main_worktree(&root))
+    {
+        hash_tree(
+            &main_checkout.join(".claude/settings.local.json"),
+            &mut hasher,
+            false,
+        );
+    }
     if let Some(root) = &input.watch_root {
         hash_tree(root, &mut hasher, true);
     }
@@ -281,54 +311,222 @@ mod tests {
 
     #[test]
     fn watcher_discovers_new_cursor_rules() {
+        use crate::context::SourceState;
+
+        for git_repository in [false, true] {
+            let home = TempDir::new().unwrap();
+            let repository = TempDir::new().unwrap();
+            if git_repository {
+                assert!(
+                    Command::new("git")
+                        .args(["init", "-q"])
+                        .current_dir(repository.path())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            let rules = repository.path().join(".cursor/rules");
+            fs::create_dir_all(&rules).unwrap();
+            let candidates = vec![rules.join("new.mdc")];
+            #[cfg(unix)]
+            let (_external, candidates) = {
+                use std::os::unix::fs::symlink;
+
+                let mut candidates = candidates;
+                let external = TempDir::new().unwrap();
+                fs::create_dir_all(external.path().join("existing/deep")).unwrap();
+                symlink(external.path(), rules.join("shared")).unwrap();
+                symlink(external.path(), external.path().join("existing/cycle")).unwrap();
+                candidates.push(rules.join("shared/added.mdc"));
+                candidates.push(rules.join("shared/existing/deep/new.mdc"));
+                (external, candidates)
+            };
+            let mut app = App::new_at(
+                Paths::for_home(home.path()),
+                None,
+                repository.path().to_owned(),
+            )
+            .unwrap();
+            app.select_runtime(
+                ContextRuntime::ALL
+                    .iter()
+                    .position(|runtime| *runtime == ContextRuntime::Cursor)
+                    .unwrap(),
+            );
+            let signature = |app: &App| {
+                current_watch_signature(&ReloadInput {
+                    audit: &app.inspection.context,
+                    paths: &app.paths,
+                    watch_root: &app.watch_root,
+                })
+            };
+            let state = |app: &App, path: &Path| {
+                app.context
+                    .audit
+                    .sources
+                    .iter()
+                    .find(|source| source.path == path)
+                    .map(|source| source.state.clone())
+            };
+            for rule in candidates {
+                for content in [
+                    Some("---\nalwaysApply: true\n---\nNew rule\n"),
+                    Some("---\nglobs: ['src/**']\n---\nChanged rule\n"),
+                    None,
+                ] {
+                    let before = signature(&app);
+                    let previous = state(&app, &rule);
+                    if let Some(content) = content {
+                        fs::write(&rule, content).unwrap();
+                    } else {
+                        fs::remove_file(&rule).unwrap();
+                    }
+                    assert_ne!(signature(&app), before, "undetected change: {rule:?}");
+                    assert_eq!(state(&app, &rule), previous);
+                    app.reload_from_disk();
+                    match content {
+                        Some(content) if content.contains("alwaysApply") => {
+                            assert_eq!(state(&app, &rule), Some(SourceState::Startup));
+                        }
+                        Some(_) => assert!(matches!(
+                            state(&app, &rule),
+                            Some(SourceState::Conditional(_))
+                        )),
+                        None => assert_eq!(state(&app, &rule), None),
+                    }
+                    assert_eq!(app.watcher.signature, signature(&app));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_refreshes_linked_worktree_settings_and_external_claude_rules() {
+        use crate::context::SourceState;
+        use std::os::unix::fs::symlink;
+
         let home = TempDir::new().unwrap();
-        let repository = TempDir::new().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(repository.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::create_dir_all(repository.path().join(".cursor/rules")).unwrap();
-        let mut app = App::new_at(
-            Paths::for_home(home.path()),
-            None,
-            repository.path().to_owned(),
-        )
-        .unwrap();
-        app.select_runtime(
-            ContextRuntime::ALL
-                .iter()
-                .position(|runtime| *runtime == ContextRuntime::Cursor)
-                .unwrap(),
-        );
-        let initial = current_watch_signature(&ReloadInput {
-            audit: &app.inspection.context,
-            paths: &app.paths,
-            watch_root: &app.watch_root,
-        });
-        let rule = repository.path().join(".cursor/rules/new.mdc");
+        let workspace = TempDir::new().unwrap();
+        let main = workspace.path().join("main");
+        let linked = workspace.path().join("linked");
+        fs::create_dir(&main).unwrap();
+        for arguments in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "initial",
+            ],
+            vec!["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&main)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let source = linked.join("CLAUDE.md");
+        fs::write(&source, "shared").unwrap();
+        fs::create_dir_all(main.join(".claude")).unwrap();
+        fs::create_dir_all(linked.join(".claude/rules")).unwrap();
+        let external = workspace.path().join("external");
+        fs::create_dir_all(external.join("existing/deep")).unwrap();
+        symlink(&external, linked.join(".claude/rules/shared")).unwrap();
+        symlink(&external, external.join("existing/cycle")).unwrap();
+        let unrelated = workspace.path().join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        symlink(&unrelated, linked.join("ordinary-link")).unwrap();
+        for ignored in [".git", "target", "node_modules"] {
+            fs::create_dir_all(linked.join("controls").join(ignored).join("watch-control"))
+                .unwrap();
+        }
 
-        fs::write(&rule, "---\nalwaysApply: true\n---\nNew rule\n").unwrap();
-
-        assert_ne!(
+        let mut app = App::new_at(Paths::for_home(home.path()), None, linked.clone()).unwrap();
+        let signature = |app: &App| {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
-        app.reload_from_disk();
-        assert!(
+                watch_root: &app.watch_root,
+            })
+        };
+        let state = |app: &App, path: &Path| {
             app.context
                 .audit
                 .sources
                 .iter()
-                .any(|source| source.path == rule)
-        );
+                .find(|source| source.path == path)
+                .map(|source| source.state.clone())
+        };
+        assert_eq!(state(&app, &source), Some(SourceState::Startup));
+        let initial = signature(&app);
+        fs::write(unrelated.join("CLAUDE.md"), "unrelated").unwrap();
+        for ignored in [".git", "target", "node_modules"] {
+            fs::write(
+                linked
+                    .join("controls")
+                    .join(ignored)
+                    .join("watch-control/CLAUDE.md"),
+                "ignored",
+            )
+            .unwrap();
+        }
+        assert_eq!(signature(&app), initial);
+        let settings = main.join(".claude/settings.local.json");
+        fs::write(
+            &settings,
+            serde_json::json!({"claudeMdExcludes": [source]}).to_string(),
+        )
+        .unwrap();
+        assert_ne!(signature(&app), initial);
+        assert_eq!(state(&app, &source), Some(SourceState::Startup));
+        app.reload_from_disk();
+        assert!(matches!(
+            state(&app, &source),
+            Some(SourceState::Excluded(_))
+        ));
+        assert_eq!(app.watcher.signature, signature(&app));
+
+        let rule = linked.join(".claude/rules/shared/existing/deep/new.md");
+        for content in [
+            Some("new rule"),
+            Some("---\npaths: ['src/**']\n---\nchanged rule"),
+            None,
+        ] {
+            let before = signature(&app);
+            let previous = state(&app, &rule);
+            if let Some(content) = content {
+                fs::write(&rule, content).unwrap();
+            } else {
+                fs::remove_file(&rule).unwrap();
+            }
+            assert_ne!(signature(&app), before);
+            assert_eq!(state(&app, &rule), previous);
+            app.reload_from_disk();
+            match content {
+                Some("new rule") => assert_eq!(state(&app, &rule), Some(SourceState::Startup)),
+                Some(_) => assert!(matches!(
+                    state(&app, &rule),
+                    Some(SourceState::Conditional(_))
+                )),
+                None => assert_eq!(state(&app, &rule), None),
+            }
+            assert_eq!(app.watcher.signature, signature(&app));
+        }
+        let before = signature(&app);
+        fs::remove_file(settings).unwrap();
+        assert_ne!(signature(&app), before);
+        app.reload_from_disk();
+        assert_eq!(state(&app, &source), Some(SourceState::Startup));
     }
 
     #[test]

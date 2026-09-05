@@ -2237,7 +2237,6 @@ fn help_anchor_area(app: &App, screen: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use unicode_width::UnicodeWidthStr;
 
     use super::overview::home_group;
 
@@ -2379,6 +2378,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(!app.inspection.context.warnings.is_empty());
+        app.inspection.context.sources.clear();
         app.inspection.context.summary = "Summary without diagnostic text".into();
         app.inspection.context.warnings = vec!["diagnostic-data-marker".into()];
         app.open(View::Context);
@@ -2386,41 +2386,34 @@ mod tests {
     }
 
     #[test]
-    fn help_overlays_a_muted_page_with_contextual_content() {
+    fn help_blocks_navigation_until_cancelled() {
         let (_home, _repository, _paths, mut app) = fixture();
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
         );
-        let backend = TestBackend::new(160, 50);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let help = terminal.backend().to_string();
-        assert!(help.contains("mdmanager.ai · Help · Overview"));
-        assert!(help.contains("WHAT THIS PAGE SHOWS"));
-        assert!(help.contains("HOW MDMANAGER WORKS"));
-        assert!(!help.contains("NAVIGATION"));
-
-        assert_eq!(
-            terminal.backend().buffer().cell((0, 0)).unwrap().fg,
-            active_theme().muted
-        );
-        let (row, line) = help
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains("The TUI does not edit"))
-            .unwrap();
-        let column = UnicodeWidthStr::width(&line[..line.find("The TUI").unwrap()]);
-        let body = terminal
-            .backend()
-            .buffer()
-            .cell((u16::try_from(column).unwrap(), u16::try_from(row).unwrap()))
-            .unwrap();
-        assert_eq!(body.fg, active_theme().text);
-        assert!(!body.modifier.contains(Modifier::DIM));
-
+        assert!(app.help);
+        assert!(draw(&mut app).contains("Help"));
+        for code in [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Enter,
+            KeyCode::Right,
+            KeyCode::Char('d'),
+            KeyCode::Char('r'),
+            KeyCode::Char('t'),
+        ] {
+            handle_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(matches!(app.view, View::Home));
+            assert_eq!(app.home_index, 0);
+            assert!(app.picker.is_none());
+            assert!(app.theme_picker.is_none());
+            assert!(app.help);
+        }
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(draw_at(&mut app, 160, 50).contains("PROJECT INSTRUCTIONS"));
+        assert!(!app.help);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.home_index, 1);
     }
 
     #[test]
@@ -2672,29 +2665,127 @@ mod tests {
     }
 
     #[test]
-    fn managed_document_diff_back_navigation_returns_to_home() {
-        let (_home, repository, paths, _app) = fixture();
+    fn browsing_navigation_preserves_instruction_and_configuration_files() {
+        let (home, repository, paths, mut app) = global_fixture();
+        fs::write(repository.path().join("AGENTS.md"), "# Existing\n").unwrap();
         let project = project::adopt(repository.path(), "agents").unwrap();
         fs::write(
             project.section_path("agents").unwrap(),
             "# Changed by agent\n",
         )
         .unwrap();
-        let mut app = App::new_at(paths, None, repository.path().to_owned()).unwrap();
-        app.open(View::Managed(ManagedRef::Project("agents".into())));
+        let local = local::LocalRepository::discover(repository.path(), &paths).unwrap();
+        local
+            .create_managed(local::ManagedTarget::Agents, "common")
+            .unwrap();
+        let global = app.global.as_ref().unwrap();
+        let target = home.path().join(".claude/CLAUDE.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "# Before deployment\n").unwrap();
+        let report = deploy::apply(global, "default", None, true, true).unwrap();
+        assert!(report.iter().any(|item| item.backup.is_some()));
+        app.reload_from_disk();
+        finish_context_scan(&mut app);
 
+        // Include all files, including absent-to-created paths, ownership, exclusions,
+        // manifests and backups in both fixture roots.
+        let snapshot = || {
+            [home.path(), repository.path()]
+                .into_iter()
+                .flat_map(|root| {
+                    walkdir::WalkDir::new(root).into_iter().map(|entry| {
+                        let entry = entry.unwrap();
+                        let path = entry.path().to_owned();
+                        let bytes = if entry.file_type().is_symlink() {
+                            fs::read_link(&path)
+                                .unwrap()
+                                .as_os_str()
+                                .as_encoded_bytes()
+                                .to_vec()
+                        } else if entry.file_type().is_file() {
+                            fs::read(&path).unwrap()
+                        } else {
+                            Vec::new()
+                        };
+                        (path, (entry.file_type(), bytes))
+                    })
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        let browse_keys = |app: &mut App| {
+            draw(app);
+            for character in ['a', 's', 'c', 'x', ' ', 'y'] {
+                handle_key(
+                    app,
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                );
+            }
+        };
+        browse_keys(&mut app);
+        assert!(matches!(app.view, View::Home));
+        open_library(&mut app);
+        browse_keys(&mut app);
+        assert!(matches!(app.view, View::LibraryBrowser));
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::GlobalProfile(_)));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::Home));
+
+        app.home_index = app
+            .home_items()
+            .iter()
+            .position(|item| matches!(item, HomeItem::ProjectTarget(id) if id == "agents"))
+            .unwrap();
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::Managed(_)));
+        browse_keys(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::ManagedDocument(_)));
+        browse_keys(&mut app);
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
         );
         assert!(matches!(app.view, View::Diff(_)));
+        browse_keys(&mut app);
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.view, View::ManagedDocument(_)));
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.view, View::Managed(_)));
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.view, View::Home));
+
+        app.open(View::Context);
+        browse_keys(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::Source));
+        browse_keys(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::Context));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        browse_keys(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.help);
+        assert!(matches!(app.view, View::Context));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::Home));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        draw(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.theme_picker.is_none());
+        assert_eq!(snapshot(), before);
     }
 
     #[test]

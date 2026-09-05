@@ -66,14 +66,36 @@ fn mdmanager(home: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mdmanager"))
         .args(arguments)
         .env("HOME", home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
         .output()
         .unwrap()
 }
 
+#[cfg(unix)]
+fn runtime_path() -> TempDir {
+    let bin = TempDir::new().unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(git, bin.path().join("git")).unwrap();
+    bin
+}
+
 fn mdmanager_in(home: &Path, directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+    #[cfg(unix)]
+    let bin = runtime_path();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mdmanager"));
+    #[cfg(unix)]
+    command.env("PATH", bin.path());
+    command
         .args(arguments)
         .env("HOME", home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
         .current_dir(directory)
         .output()
         .unwrap()
@@ -498,6 +520,66 @@ fn context_honors_claude_and_pi_user_directories() {
             source["path"].as_str() == Some(pi_dir.join("AGENTS.md").to_str().unwrap())
         })
     }));
+}
+
+#[test]
+fn codex_context_honors_custom_home_root_candidates_and_shared_budget() {
+    let home = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let codex = home.path().join("custom-codex");
+    let root = workspace.path().join("root");
+    let child = root.join("child");
+    let cwd = child.join("deep");
+    fs::create_dir_all(&codex).unwrap();
+    fs::create_dir_all(cwd.join(".git")).unwrap();
+    fs::write(root.join(".instructions-root"), "").unwrap();
+    fs::write(workspace.path().join("AGENTS.md"), "above root").unwrap();
+    fs::write(codex.join("config.toml"),
+        "project_root_markers = ['.instructions-root']\nproject_doc_fallback_filenames = ['FIRST.md', 'SECOND.md']\nproject_doc_max_bytes = 5\n").unwrap();
+    fs::write(
+        codex.join("AGENTS.md"),
+        "home is outside the project budget",
+    )
+    .unwrap();
+    for (path, content) in [
+        (root.join("AGENTS.override.md"), ""),
+        (root.join("AGENTS.md"), "123"),
+        (root.join("FIRST.md"), "shadowed"),
+        (child.join("FIRST.md"), "4567"),
+        (child.join("SECOND.md"), "shadowed"),
+        (cwd.join("AGENTS.override.md"), "override"),
+        (cwd.join("AGENTS.md"), "shadowed"),
+    ] {
+        fs::write(path, content).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+        .args(["context", "--runtime", "codex", "--json"])
+        .env("HOME", home.path())
+        .env("CODEX_HOME", &codex)
+        .env("PATH", home.path())
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sources = json["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 8);
+    for (path, status) in [
+        (codex.join("AGENTS.md"), "at startup"),
+        (root.join("AGENTS.override.md"), "empty"),
+        (root.join("AGENTS.md"), "at startup"),
+        (root.join("FIRST.md"), "not selected"),
+        (child.join("FIRST.md"), "partial"),
+        (child.join("SECOND.md"), "not selected"),
+        (cwd.join("AGENTS.override.md"), "partial"),
+        (cwd.join("AGENTS.md"), "not selected"),
+    ] {
+        let source = sources
+            .iter()
+            .find(|source| source["path"] == path.to_str().unwrap())
+            .unwrap();
+        assert_eq!(source["status"], status, "{path:?}");
+    }
 }
 
 #[test]
@@ -1284,6 +1366,64 @@ fn managed_local_apply_preserves_a_preexisting_ignore_rule() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn pi_disable_classifies_child_codex_version_probes() {
+    use std::os::unix::fs::PermissionsExt;
+    for (probe, verified) in [
+        (Some("printf 'codex-cli 0.147.0\\n'"), true),
+        (Some("printf 'codex-cli 9.99.0\\n'"), false),
+        (None, false),
+        (Some("exit 1"), false),
+        (Some("printf 'malformed\\n'"), false),
+    ] {
+        let home = TempDir::new().unwrap();
+        let repository = TempDir::new().unwrap();
+        let bin = runtime_path();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repository.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repository.path().join("AGENTS.md"), "shared").unwrap();
+        if let Some(probe) = probe {
+            let executable = bin.path().join("codex");
+            fs::write(
+                &executable,
+                format!("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n{probe}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .args(["local", "disable", "pi", "--yes"])
+            .env("HOME", home.path())
+            .env("CODEX_HOME", home.path().join("codex"))
+            .env("PATH", bin.path())
+            .current_dir(repository.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let plan = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            plan.lines().any(|line| line == "Codex compatibility"),
+            verified
+        );
+        assert_eq!(
+            plan.lines()
+                .any(|line| line == "Codex compatibility warning"),
+            !verified
+        );
+        assert_eq!(
+            fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
+            b""
+        );
+    }
+}
+
 #[test]
 fn pi_disable_adds_and_restores_its_exclusion() {
     let home = TempDir::new().unwrap();
@@ -1420,6 +1560,75 @@ fn claude_disable_preserves_source_and_restores_owned_settings() {
             .lines()
             .any(|line| line == "/.claude/settings.local.json")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_disable_preserves_matching_logical_pwd_and_rejects_mismatches() {
+    for matching in [true, false] {
+        let home = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let repository = workspace.path().join("physical");
+        let other = workspace.path().join("other");
+        let alias = workspace.path().join("logical");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(if matching { &repository } else { &other }, &alias).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repository.join("CLAUDE.md"), "shared").unwrap();
+        fs::write(other.join("CLAUDE.md"), "other").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .args(["local", "disable", "claude", "--yes"])
+            .env("HOME", home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("PWD", &alias)
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let expected = if matching { &alias } else { &repository }.join("CLAUDE.md");
+        let settings: serde_json::Value = serde_json::from_slice(
+            &fs::read(repository.join(".claude/settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["claudeMdExcludes"], serde_json::json!([expected]));
+        let owned = files(home.path())
+            .into_iter()
+            .find(|(path, _)| path.file_name().unwrap() == "overlays.toml")
+            .unwrap()
+            .1;
+        let owned: toml::Value = toml::from_str(std::str::from_utf8(&owned).unwrap()).unwrap();
+        assert_eq!(
+            owned["disables"]["claude"]["disabled_source"].as_str(),
+            expected.to_str()
+        );
+        let context = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .args(["context", "--runtime", "claude", "--json"])
+            .env("HOME", home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("PWD", &alias)
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(context.status.success(), "{context:?}");
+        let context: serde_json::Value = serde_json::from_slice(&context.stdout).unwrap();
+        assert!(
+            context["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source["status"] == "excluded"
+                    && source["path"] == repository.join("CLAUDE.md").to_str().unwrap())
+        );
+        assert!(!other.join(".claude").exists());
+    }
 }
 
 #[cfg(unix)]

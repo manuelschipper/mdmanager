@@ -532,14 +532,36 @@ mod tests {
 
     #[test]
     fn library_section_opens_with_usage_metadata() {
-        let (_home, _repository, _paths, mut app) = global_fixture();
+        let (_home, _repository, paths, mut app) = global_fixture();
+        let nested = format!(
+            "sections/{}scratch.md",
+            "deliberately-long-source-directory/".repeat(20)
+        );
+        let source = paths.config.parent().unwrap().join(&nested);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "# Scratch\n").unwrap();
+        let manifest = fs::read_to_string(&paths.config).unwrap();
+        fs::write(
+            &paths.config,
+            manifest.replace("sections/scratch.md", &nested),
+        )
+        .unwrap();
+        app.reload_from_disk();
         open_library(&mut app);
         app.section_index = 4;
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.view, View::SectionDocument { .. }));
-        let screen = draw(&mut app);
-        assert!(screen.contains("Used by: not currently used"));
-        assert!(screen.contains("# Scratch"));
+        for (width, height) in [(100, 36), (80, 24), (60, 20)] {
+            let screen = draw_at(&mut app, width, height);
+            assert!(screen.contains("Personal Section"), "{screen}");
+            assert!(screen.contains("Used by: not currently used"), "{screen}");
+            assert!(screen.contains("# Scratch"), "{screen}");
+        }
+        assert!(
+            matches!(&app.view, View::SectionDocument { path, about, .. }
+            if path == &source && about.contains(&source.display().to_string()))
+        );
+        assert!(app.searchable_text().unwrap().contains("# Scratch"));
     }
 
     #[test]
@@ -549,12 +571,25 @@ mod tests {
         project::adopt(repository.path(), "agents").unwrap();
         let manifest = repository.path().join(".mdmanager/project.toml");
         let mut source = fs::read_to_string(&manifest).unwrap();
-        source.push_str(
-            "\n[[sections]]\nid = \"draft\"\nname = \"Draft\"\npath = \"sections/draft.md\"\n",
+        let nested = format!(
+            "sections/{}draft.md",
+            "deliberately-long-source-directory/".repeat(20)
         );
+        source.push_str(&format!(
+            "\n[[sections]]\nid = \"draft\"\nname = \"Draft\"\npath = \"{nested}\"\n",
+        ));
+        fs::create_dir_all(
+            repository
+                .path()
+                .join(".mdmanager")
+                .join(&nested)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
         fs::write(&manifest, source).unwrap();
         fs::write(
-            repository.path().join(".mdmanager/sections/draft.md"),
+            repository.path().join(".mdmanager").join(&nested),
             "# Draft\n",
         )
         .unwrap();
@@ -579,9 +614,23 @@ mod tests {
             - 1;
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.view, View::SectionDocument { .. }));
-        let screen = draw(&mut app);
-        assert!(screen.contains(".mdmanager/sections/draft.md"));
-        assert!(screen.contains("Used by: not currently used"));
+        for (width, height) in [(100, 36), (80, 24), (60, 20)] {
+            let screen = draw_at(&mut app, width, height);
+            assert!(screen.contains("Project Section"), "{screen}");
+            assert!(screen.contains("Used by: not currently used"), "{screen}");
+            assert!(screen.contains("# Draft"), "{screen}");
+        }
+        let source = repository.path().join(".mdmanager").join(&nested);
+        assert!(
+            matches!(&app.view, View::SectionDocument { path, about, .. }
+            if path == &source && about.contains(&source.display().to_string()))
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let screen = draw_at(&mut app, 60, 20);
+        assert!(screen.contains("Used by: AGENTS.md"), "{screen}");
+        assert!(screen.contains("# Project agents"), "{screen}");
     }
 
     #[test]

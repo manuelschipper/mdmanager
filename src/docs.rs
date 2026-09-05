@@ -65,7 +65,7 @@ const TOPICS: &[Topic] = &[
         "configuration",
         "Define Global, Project, and Local compositions plus UI preferences.",
         "../docs/configuration.md",
-        5_120
+        8_192
     ),
     topic!(
         "tui",
