@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Local recovery and concurrency** — Validate owned destinations and Claude settings
+  file types before mutation, serialize linked-worktree writers with an advisory lock,
+  and report partial-write recovery guidance without claiming multi-file atomicity.
+
 - **Reviewed Project writes** — Apply retains the displayed review and refuses changed
   targets or source paths before writing, including when using `--yes`.
 - **Local ownership safety** — Managed outputs reject resolving and dangling symlinks.

@@ -150,8 +150,43 @@ edit each ordered list to add Sections. Missing referenced Sections make the com
 
 Do not hand-edit `~/.mdmanager/state/`. Global backups are in `~/.mdmanager/backups/`.
 Invalid `overlays.toml` blocks writes; use your valid copy or recover manually.
-Local has no backup or repair; `doctor` repairs Global only. Local restore preserves
-other edits but can partially fail.
+Local has no backup or repair; `doctor` repairs Global only. Local writers in the same
+repository (including linked worktrees) serialize through `overlays.lock` beside
+`overlays.toml`. Waiting begins after review; the plan is checked again under the lock.
+Read-only inspection creates no lock. The lock coordinates mdmanager writers, not
+external editors, and does not make output, Git exclusion and state writes atomic.
+
+After a Local I/O failure, inspect the output, common Git `info/exclude`, and
+`overlays.toml` before retrying. Preserve copies of all three and stop other Local
+writers before manual recovery:
+
+- If only the exclusion was written and the output is unchanged, remove the I/O
+  obstruction, review a fresh plan, and retry. The existing exclusion is now treated as
+  user-owned and will remain after restore; remove that exact line manually only if it
+  is no longer needed by any worktree.
+- If the output was written but ownership was not saved, status reports an external
+  managed output or no owned disable. Apply/disable refuses to claim it on retry.
+  Preserve any subsequent user edits. Reconcile the output manually (remove only the
+  known empty Pi suppression, or remove only the selected logical source string from
+  Claude's `claudeMdExcludes`; retain all unrelated settings). For a managed output,
+  move it aside for comparison before reviewing a fresh Apply. Do not adopt a partial
+  output merely to bypass the refusal. A failed adoption can also leave `local.toml`
+  without ownership; preserve that composition and move the unowned output aside
+  before reviewing Apply.
+- If restore replaced or removed the output but exclusion/state persistence failed,
+  the recovery record remains. Status reports missing or modified suppression and
+  ordinary restore refuses. Do not recreate an output from stale recovery content over
+  user edits. Manually finish only the recorded suppression removal, retain exclusions
+  still needed by other worktrees, and remove only that operation's ownership entry
+  from `overlays.toml` after its output and exclusion effects are reconciled. Preserve
+  every unrelated entry. This is the exceptional manual state recovery path; there is
+  no automatic rollback or Local repair command.
+
+Restore validates recorded destinations and source scope without requiring the source
+file still to exist. Claude ownership is shared across the repository's worktrees;
+Pi and managed outputs belong to their recorded worktree. Invalid destinations are
+refused, never rewritten. Claude settings must be an ordinary file: resolving and
+dangling symlinks are refused during review, Apply and restore.
 Context runtime settings remain outside these manifests.
 
 ## Sharing a personal Section
