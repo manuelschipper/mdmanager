@@ -1,2 +1,4 @@
 /target/
 
+/homepage/dist/
+/homepage/.venv/

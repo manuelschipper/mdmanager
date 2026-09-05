@@ -1,0 +1,488 @@
+<title>mdmanager.ai — Manage your agent instructions</title>
+<style>
+@font-face {
+  font-family:'Space Mono';
+  font-style:normal;
+  font-weight:400;
+  font-display:swap;
+  src:url('/assets/SpaceMono-Regular.ttf') format('truetype')
+}
+@font-face {
+  font-family:'Space Mono';
+  font-style:normal;
+  font-weight:700;
+  font-display:swap;
+  src:url('/assets/SpaceMono-Bold.ttf') format('truetype')
+}
+* {
+  box-sizing:border-box
+}
+html {
+  --bg:#282828;
+  --surface:#32302b;
+  --text:#ebdbb2;
+  --muted:#bdae93;
+  --border:#665c54;
+  --accent:#d79921;
+  color-scheme:dark;
+  background:var(--bg);
+  color:var(--text);
+  font:14px/1.65 'Space Mono',ui-monospace,monospace
+}
+html.light {
+  --bg:#fbf1c7;
+  --surface:#f2e5bc;
+  --text:#3c3836;
+  --muted:#665c54;
+  --border:#bdae93;
+  --accent:#9d600c;
+  color-scheme:light
+}
+body {
+  margin:0;
+  padding:34px 24px
+}
+button {
+  font:inherit;
+  color:inherit
+}
+button,a {
+  cursor:pointer
+}
+a {
+  color:var(--accent);
+  text-decoration:none
+}
+a:hover {
+  text-decoration:underline
+}
+button {
+  border:0;
+  background:none;
+  padding:0
+}
+button:hover {
+  color:var(--accent)
+}
+:focus-visible {
+  outline:2px solid var(--accent);
+  outline-offset:4px
+}
+a[aria-current=page] {
+  color:var(--accent)
+}
+.shell {
+  max-width:1000px;
+  margin:auto;
+  border:1px solid var(--border)
+}
+.bar {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:24px;
+  padding:13px 23px;
+  border-bottom:1px solid var(--border)
+}
+.brand {
+  color:var(--accent);
+  white-space:nowrap
+}
+.bar nav {
+  display:flex;
+  gap:22px
+}
+.bar a {
+  color:var(--muted);
+  font-size:13px
+}
+.bar a[aria-current=page] {
+  color:var(--accent)
+}
+.hero {
+  padding:35px 32px 22px;
+  text-align:center
+}
+.mark {
+  display:block;
+  width:180px;
+  height:90px;
+  margin:0 auto 25px;
+  color:var(--accent)
+}
+.hero h1 {
+  text-wrap:balance;
+  font-size:25px;
+  line-height:1.35;
+  font-weight:700;
+  margin:0 0 18px
+}
+.hero p {
+  max-width:680px;
+  margin:0 auto 12px
+}
+.runtimes {
+  color:var(--muted);
+  font-size:12px
+}
+.install {
+  margin:0 40px;
+  padding:16px 20px;
+  border:1px solid var(--border);
+  min-width:0
+}
+.install legend {
+  color:var(--muted);
+  padding:0 9px;
+  font-size:12px
+}
+.command {
+  display:flex;
+  gap:20px;
+  align-items:center;
+  justify-content:space-between
+}
+.command code {
+  font:13px/1.9 'Space Mono',monospace;
+  white-space:pre;
+  overflow:auto
+}
+.command button {
+  flex-shrink:0;
+  white-space:nowrap;
+  font-size:12px;
+  color:var(--accent)
+}
+.workflow {
+  padding:20px 32px 8px;
+  text-align:center
+}
+.workflow p {
+  margin:0 auto;
+  max-width:750px
+}
+.workflow code {
+  color:var(--accent);
+  font:inherit
+}
+.actions {
+  display:flex;
+  justify-content:center;
+  gap:32px;
+  padding:20px 16px 29px
+}
+.actions a {
+  color:var(--accent)
+}
+footer {
+  display:flex;
+  justify-content:space-between;
+  gap:20px;
+  padding:11px 23px;
+  border-top:1px solid var(--border);
+  font-size:12px;
+  color:var(--muted)
+}
+.docs {
+  display:grid;
+  grid-template-columns:190px minmax(0,1fr)
+}
+aside {
+  padding:24px 16px;
+  border-right:1px solid var(--border)
+}
+.group {
+  color:var(--muted);
+  font-size:11px;
+  margin:20px 8px 5px
+}
+.group:first-child {
+  margin-top:0
+}
+aside a {
+  display:block;
+  width:100%;
+  text-align:left;
+  padding:4px 8px;
+  color:inherit
+}
+aside a[aria-current=page] {
+  background:var(--surface);
+  color:var(--accent)
+}
+aside a[aria-current=page]:before {
+  content:'▸ ';
+}
+aside a:not([aria-current=page]) {
+  padding-left:24px
+}
+.document {
+  padding:23px 30px 35px;
+  min-width:0
+}
+.doc-path {
+  color:var(--muted);
+  font-size:12px;
+  margin-bottom:19px
+}
+.article h1 {
+  font-size:25px;
+  font-weight:700;
+  margin:0 0 18px;
+  line-height:1.4
+}
+.article h2 {
+  font-size:17px;
+  font-weight:700;
+  color:var(--accent);
+  margin:27px 0 12px
+}
+.article h3 {
+  font-size:15px;
+  font-weight:700
+}
+.article p {
+  margin:12px 0
+}
+.article ul,.article ol {
+  padding-left:25px
+}
+.article li {
+  margin:5px 0
+}
+.article pre {
+  background:var(--surface);
+  border:1px solid var(--border);
+  padding:14px 16px;
+  overflow:auto;
+  font:13px/1.7 'Space Mono',monospace
+}
+.article code {
+  font-family:inherit
+}
+.article table {
+  display:block;
+  overflow:auto;
+  border-collapse:collapse
+}
+.article th,.article td {
+  border:1px solid var(--border);
+  padding:8px
+}
+.article strong {
+  font-weight:700
+}
+.mobile-topics {
+  display:none
+}
+.release .document {
+  max-width:820px;
+  margin:auto
+}
+.demo-image {
+  display:block;
+  width:100%;
+  height:auto
+}
+.demo-panel {
+  padding:20px
+}
+.demo-panel p {
+  color:var(--muted);
+  margin:16px 0 0;
+  font-size:12px
+}
+[hidden] {
+  display:none!important
+}
+.demo-panel h1 {
+  font-size:20px;
+  font-weight:700;
+  margin:0 0 17px
+}
+.back {
+  font-size:12px;
+  margin-bottom:15px;
+  color:var(--accent)
+}
+@media(max-width:650px) {
+  body {
+    padding:14px 10px
+  }
+  .bar {
+    align-items:flex-start;
+    gap:10px;
+    flex-wrap:wrap;
+    padding:12px 15px
+  }
+  .bar nav {
+    gap:16px;
+    flex-wrap:wrap
+  }
+  .hero {
+    padding:29px 18px 18px
+  }
+  .hero h1 {
+    font-size:21px
+  }
+  .hero p {
+    font-size:13px
+  }
+  .install {
+    margin:0 16px;
+    padding:13px
+  }
+  .command {
+    align-items:flex-start;
+    gap:9px
+  }
+  .command code {
+    font-size:11px;
+    line-height:1.8
+  }
+  .workflow {
+    padding:20px 18px 4px;
+    font-size:13px
+  }
+  .actions {
+    flex-direction:column;
+    gap:12px;
+    align-items:center;
+    padding:19px 12px 25px
+  }
+  footer {
+    padding:10px 15px;
+    font-size:11px
+  }
+  .docs {
+    display:block
+  }
+  aside {
+    display:none
+  }
+  .document {
+    padding:20px 18px
+  }
+  .mobile-topics {
+    display:block;
+    padding:14px 18px;
+    border-bottom:1px solid var(--border)
+  }
+  .mobile-topics summary {
+    cursor:pointer;
+    color:var(--accent)
+  }
+  .mobile-topics nav {
+    padding-top:10px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px 20px
+  }
+  .article {
+    font-size:13px
+  }
+  .article h1 {
+    font-size:22px
+  }
+  .article pre {
+    font-size:11px
+  }
+  .doc-path {
+    font-size:11px
+  }
+}
+.article {
+  overflow-wrap:anywhere
+}
+.article pre {
+  overflow-wrap:normal
+}
+.article a {
+  text-decoration:underline;
+  text-underline-offset:3px
+}
+.back {
+  display:inline-block
+}
+.bar .brand {
+  color:var(--accent)
+}
+.skip {
+  position:absolute;
+  left:-9999px
+}
+.skip:focus {
+  left:24px;
+  top:4px;
+  background:var(--bg)
+}
+</style>
+<a class="skip" href="#content">Skip to content</a>
+<div class="shell">
+  <header class="bar">
+    <a class="brand" href="/">mdmanager.ai</a>
+    <nav aria-label="Main">{{NAV}}</nav>
+  </header>
+  <main id="content">
+    <section class="hero">
+      {{MARK}}
+      <h1>Manage your CLAUDE.md and AGENTS.md across machines and runtimes.</h1>
+      <p>Reuse Markdown sections and choose a profile for each setup.</p>
+      <div class="runtimes">Claude Code · Codex · Cursor · Pi</div>
+    </section>
+    <fieldset class="install">
+      <legend>Install from source · Rust {{RUST_VERSION}}+</legend>
+      <div class="command">
+        <code id="install-command">git clone https://github.com/manuelschipper/mdmanager.git
+cd mdmanager
+cargo install --path .</code>
+        <button id="copy-install" aria-label="Copy installation commands" aria-live="polite" hidden>[ copy ]</button>
+      </div>
+    </fieldset>
+    <section class="workflow">
+      <p>Ask your coding agent to read <code>mdmanager docs start</code>.<br>
+      Tell it what to organize, then open <code>mdmanager</code> to review its changes.</p>
+    </section>
+    <div class="actions">
+      <a href="/docs/start/">Read the start guide →</a>
+      <a href="/demo/">Watch the 21-second demo ▷</a>
+    </div>
+  </main>
+  <footer>
+    <span>v{{VERSION}} · <a href="https://github.com/manuelschipper/mdmanager/blob/main/LICENSE">MIT</a></span>
+    <button id="theme-toggle" aria-label="Switch to light theme" hidden>[ light ]</button>
+  </footer>
+</div>
+<script>
+const themeButton = document.getElementById('theme-toggle');
+function updateThemeButton() {
+  const next = document.documentElement.classList.contains('light') ? 'dark' : 'light';
+  themeButton.textContent = `[ ${next} ]`;
+  themeButton.setAttribute('aria-label', `Switch to ${next} theme`);
+}
+themeButton.hidden = false;
+updateThemeButton();
+themeButton.addEventListener('click', () => {
+  const light = document.documentElement.classList.toggle('light');
+  updateThemeButton();
+  try {
+    localStorage.setItem('mdmanager-theme', light ? 'light' : 'dark');
+  } catch {
+    // Storage can be blocked by browser privacy settings.
+  }
+});
+
+const copyButton = document.getElementById('copy-install');
+if (copyButton && navigator.clipboard) {
+  copyButton.hidden = false;
+  copyButton.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById('install-command').textContent);
+      copyButton.textContent = '[ copied ]';
+    } catch {
+      copyButton.textContent = '[ select to copy ]';
+    }
+    setTimeout(() => { copyButton.textContent = '[ copy ]'; }, 1800);
+  });
+}
+</script>

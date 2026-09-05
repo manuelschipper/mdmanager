@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Website** — Add the mdmanager.ai homepage, with the existing documentation and release changelog rendered as static pages.
 - **Claude worktree settings** — Context uses the same Git-reported settings worktree as Local disables, including separate Git directories and submodules, and no longer reads settings from Git metadata parents.
 - **Malformed rule headers** — Claude and Cursor rules with unterminated frontmatter are reported as ambiguous with a reason instead of inferring loading from incomplete metadata.
 
