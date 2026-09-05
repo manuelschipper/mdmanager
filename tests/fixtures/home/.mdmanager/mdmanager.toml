@@ -1,0 +1,30 @@
+[[sections]]
+id = "common"
+name = "Common"
+path = "sections/common.md"
+
+[[sections]]
+id = "claude"
+name = "Claude"
+path = "sections/claude.md"
+
+[[sections]]
+id = "web"
+name = "Web Access"
+path = "sections/web.md"
+
+[targets.claude]
+path = "~/.claude/CLAUDE.md"
+title = "Global Claude"
+
+[targets.agents]
+path = "~/.codex/AGENTS.md"
+title = "Global Agents"
+
+[profiles.default]
+claude = ["common", "claude"]
+agents = ["common"]
+
+[profiles.work]
+claude = ["common", "claude", "web"]
+agents = ["common", "web"]
