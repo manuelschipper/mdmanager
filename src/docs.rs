@@ -142,7 +142,9 @@ mod tests {
 
     #[test]
     fn topic_names_are_exact() {
-        assert!(render(Some("migrate")).unwrap().starts_with("# Migrate"));
+        for topic in TOPICS {
+            assert_eq!(render(Some(topic.name)).unwrap(), topic.contents);
+        }
         assert!(render(Some("missing")).is_err());
         assert!(render(Some("../start")).is_err());
     }

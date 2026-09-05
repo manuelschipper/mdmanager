@@ -682,9 +682,14 @@ mod tests {
         assert!(screen.contains("PROJECT INSTRUCTIONS"));
         assert!(screen.contains("LOCAL INSTRUCTIONS"));
         assert!(screen.contains("GLOBAL INSTRUCTIONS"));
-        assert!(screen.contains("AGENTS.md           ◇ existing · not managed by mdmanager.ai"));
-        assert!(screen.contains("AGENTS.override.md  ○ not found"));
-        assert!(screen.contains("CLAUDE.local.md     ○ not found"));
+        for (path, marker) in [
+            ("AGENTS.md", "◇"),
+            ("AGENTS.override.md", "○"),
+            ("CLAUDE.local.md", "○"),
+        ] {
+            let row = screen.lines().find(|line| line.contains(path)).unwrap();
+            assert!(row.contains(marker), "{row}");
+        }
         assert!(!screen.contains("would replace"));
         assert!(!screen.contains("would load after"));
         assert!(screen.contains("mdmanager docs start"));
@@ -723,7 +728,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("~/.claude/CLAUDE.md"))
             .unwrap();
-        assert!(global.contains("existing · not managed by mdmanager.ai"));
+        assert!(global.contains(GlobalTargetStatus::Unmanaged.label()));
     }
 
     #[test]
@@ -815,9 +820,15 @@ mod tests {
             .position(|item| home_item_key(item) == "global:claude")
             .unwrap();
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.view, View::Info { .. }));
-        let screen = draw(&mut app);
-        assert!(screen.contains("No Global Profile is active"));
+        let View::Info { kind, title, text } = &app.view else {
+            panic!("expected unapplied target information");
+        };
+        assert!(*kind == DiagnosticKind::General);
+        assert_eq!(
+            title,
+            &format!("{} · not applied yet", target_display_name("claude"))
+        );
+        assert_eq!(text, &no_active_profile_text());
     }
 
     #[test]

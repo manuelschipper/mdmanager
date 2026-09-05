@@ -159,6 +159,7 @@ pub(crate) struct ContextSource {
 }
 
 #[derive(Clone, Debug)]
+/// Runtime load-chain observation; managed ownership annotates sources without granting write authority.
 pub(crate) struct Audit {
     pub(crate) runtime: ContextRuntime,
     pub(crate) directory: PathBuf,

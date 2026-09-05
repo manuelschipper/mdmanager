@@ -2348,15 +2348,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_local_details_explain_runtime_behavior() {
-        assert!(missing_local_text(local::ManagedTarget::Agents).contains("instead of AGENTS.md"));
-        assert!(
-            missing_local_text(local::ManagedTarget::Claude)
-                .contains("after CLAUDE.md as additive")
-        );
-    }
-
-    #[test]
     fn runtime_picker_filters_and_selects() {
         let (_home, _repository, _paths, mut app) = fixture();
         handle_key(
@@ -2455,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_help_explains_the_cross_runtime_composition() {
+    fn profile_help_uses_the_browsed_profile() {
         let (_home, _repository, _paths, mut app) = global_fixture();
         open_library(&mut app);
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2466,9 +2457,6 @@ mod tests {
 
         let help = draw_at(&mut app, 160, 50);
         assert!(help.contains("Help · Profile default"));
-        assert!(help.contains("filtered"));
-        assert!(help.contains("Context Runtime"));
-        assert!(help.contains("An inactive Profile is only being inspected"));
     }
 
     #[test]
@@ -2478,9 +2466,43 @@ mod tests {
         assert!(matches!(app.view, View::Context));
         finish_context_scan(&mut app);
         let screen = draw(&mut app);
-        assert!(screen.contains("resolved load chain"));
+        assert!(screen.contains(app.context.audit.runtime.label()));
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.view, View::Home));
+    }
+
+    #[test]
+    fn missing_local_targets_open_their_runtime_guidance() {
+        let (_home, _repository, _paths, mut app) = fixture();
+        for (target, runtimes) in [
+            (
+                local::ManagedTarget::Agents,
+                &[ContextRuntime::Pi, ContextRuntime::Codex][..],
+            ),
+            (local::ManagedTarget::Claude, &[ContextRuntime::Claude][..]),
+        ] {
+            app.home_index = app
+                .home_items()
+                .iter()
+                .position(|item| matches!(item, HomeItem::LocalMissing(value) if *value == target))
+                .unwrap();
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let View::Info { kind, title, text } = &app.view else {
+                panic!("expected missing Local target diagnostic");
+            };
+            assert!(matches!(kind, DiagnosticKind::General));
+            assert_eq!(title, &format!("{} · not found", target.filename()));
+            assert_eq!(text, &missing_local_text(target));
+            for runtime in [
+                ContextRuntime::Pi,
+                ContextRuntime::Codex,
+                ContextRuntime::Claude,
+            ] {
+                assert_eq!(text.contains(runtime.label()), runtimes.contains(&runtime));
+            }
+            handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(matches!(app.view, View::Home));
+        }
     }
 
     #[test]
@@ -2846,12 +2868,15 @@ mod tests {
                 .contains("mdmanager doctor")
         );
         let screen = draw(&mut app);
-        assert!(screen.contains("Deployment state needs attention"));
         assert!(screen.contains("mdmanager doctor"));
+        let View::Info { kind, title, .. } = &app.view else {
+            panic!("expected Global deployment diagnostic");
+        };
+        assert!(*kind == DiagnosticKind::Global);
+        let deployment_title = title.clone();
 
         assert!(app.back() == SessionAction::Continue);
         let home = draw(&mut app);
-        assert!(home.contains("Deployment state needs attention"));
         assert!(home.contains("Claude"));
         assert!(home.contains("Browse Profiles & Sections"));
 
@@ -2861,10 +2886,25 @@ mod tests {
             .position(|item| matches!(item, HomeItem::GlobalInvalid))
             .unwrap();
         enter_home(&mut app);
-        if let View::Info { kind, title, .. } = &mut app.view {
-            assert!(*kind == DiagnosticKind::Global);
-            *title = "Renamed diagnostic".into();
-        }
+        let View::Info { kind, title, .. } = &app.view else {
+            panic!("expected Global deployment diagnostic");
+        };
+        assert!(*kind == DiagnosticKind::Global);
+        assert_eq!(title, &deployment_title);
+        assert!(app.back() == SessionAction::Continue);
+        fs::write(
+            app.paths.state_dir.join("state.toml"),
+            "active_profile = \"also-removed\"\n",
+        )
+        .unwrap();
+        app.reload_from_disk();
+        let View::Info { kind, title, text } = &mut app.view else {
+            panic!("expected reloaded Global deployment diagnostic");
+        };
+        assert!(*kind == DiagnosticKind::Global);
+        assert_eq!(title, &deployment_title);
+        assert!(text.contains("also-removed"));
+        *title = "Renamed diagnostic".into();
         fs::write(
             app.paths.state_dir.join("state.toml"),
             "active_profile = \"default\"\n",

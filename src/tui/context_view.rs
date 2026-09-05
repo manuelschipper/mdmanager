@@ -669,7 +669,7 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let stacked = draw_at(&mut app, 90, 36);
         assert!(stacked.contains("child/CLAUDE.md"));
-        assert!(stacked.contains("Claude can load this"));
+        assert!(stacked.contains("About"));
 
         app.context_entry_index = 0;
         let backend = TestBackend::new(100, 36);
