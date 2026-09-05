@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Recovery after source removal** — Local status and restore no longer require the
+  disabled source directory to exist. Shared Claude settings can be restored after
+  removing their originating linked worktree, preserving unrelated settings edits.
+
 - **Local recovery and concurrency** — Validate owned destinations and Claude settings
   file types before mutation, serialize linked-worktree writers with an advisory lock,
   and report partial-write recovery guidance without claiming multi-file atomicity.

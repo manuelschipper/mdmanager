@@ -522,14 +522,13 @@ impl LocalRepository {
             return Err("invalid Local ownership source scope".into());
         }
         let parent = source.parent().ok_or("invalid Local ownership source")?;
-        let owner = Self::discover(parent, &self.paths)?;
         let filename = source
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
         let (worktree, output) = match disable {
             DisableOwned::Pi { .. } => {
-                if owner.root != self.root
+                if !source.starts_with(&self.root)
                     || filename == "AGENTS.override.md"
                     || !PI_INSTRUCTION_CANDIDATES.contains(&filename)
                 {
@@ -538,8 +537,7 @@ impl LocalRepository {
                 (self.root.clone(), parent.join("AGENTS.override.md"))
             }
             DisableOwned::Claude { recovery, .. } => {
-                if owner.common_git_dir != self.common_git_dir
-                    || !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md")
+                if !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md")
                     || source
                         .ancestors()
                         .any(|ancestor| ancestor.ends_with(".claude/rules"))
@@ -559,6 +557,18 @@ impl LocalRepository {
                 }
                 let root = crate::git_worktree::main_worktree(&self.root)?;
                 let output = root.join(".claude/settings.local.json");
+                // Creation validates the source's repository. Replay its exact logical
+                // source and recovery bytes to check that binding after a source directory
+                // or linked worktree disappears; recovery never accesses the source.
+                let original = match recovery {
+                    ClaudeRecovery::Created => "{}\n",
+                    ClaudeRecovery::Existing(original) => original,
+                };
+                let rendered =
+                    claude_settings::insert_exclusion(original, &output, disable.source())?;
+                if sha256_hex(rendered.as_bytes()) != disable.owned().hash {
+                    return Err("invalid Claude ownership source or recovery; inspect overlays.toml and recover manually".into());
+                }
                 (root, output)
             }
         };
@@ -2337,6 +2347,39 @@ mod tests {
             fs::write(&repo.state_path, valid).unwrap();
             fs::remove_file(&source).unwrap();
             repo.restore_disable(runtime).unwrap();
+
+            let subdirectory = directory.path().join("sub");
+            fs::create_dir(&subdirectory).unwrap();
+            let source = subdirectory.join(source.file_name().unwrap());
+            fs::write(&source, "shared\n").unwrap();
+            let plan = repo.disable_plan(runtime, &source).unwrap();
+            repo.apply_disable(&plan).unwrap();
+            let state = fs::read(&repo.state_path).unwrap();
+            let exclusion = fs::read(&exclude_path).unwrap();
+            fs::remove_dir_all(&subdirectory).unwrap();
+            let fresh = LocalRepository::discover(directory.path(), &repo.paths).unwrap();
+            if runtime == DisableRuntime::Claude {
+                assert_eq!(fresh.disable_status(runtime).unwrap(), DisableStatus::Owned);
+                fresh.restore_disable(runtime).unwrap();
+                assert!(!plan.output.exists());
+                assert_eq!(fresh.disable_status(runtime).unwrap(), DisableStatus::None);
+                assert!(
+                    !fs::read_to_string(&exclude_path)
+                        .unwrap()
+                        .lines()
+                        .any(|line| line == "/.claude/settings.local.json")
+                );
+            } else {
+                assert_eq!(
+                    fresh.disable_status(runtime).unwrap(),
+                    DisableStatus::Missing
+                );
+                let error = fresh.restore_disable(runtime).unwrap_err();
+                assert!(error.contains("manual recovery"));
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(fs::read(&exclude_path).unwrap(), exclusion);
+                assert!(!subdirectory.exists());
+            }
         }
         for target in [ManagedTarget::Agents, ManagedTarget::Claude] {
             let (_home, directory, repo) = repository();
@@ -2926,5 +2969,72 @@ mod tests {
         main_repo.restore_disable(DisableRuntime::Claude).unwrap();
         assert!(!plan.output.exists());
         assert_eq!(main_repo.load_state().unwrap().managed.len(), 3);
+
+        for settings_case in 0..3 {
+            if settings_case > 0 {
+                git(
+                    main.path(),
+                    &["worktree", "add", linked.to_str().unwrap(), "linked"],
+                )
+                .unwrap();
+            }
+            let original = "{\"user\": 1, \"claudeMdExcludes\": [\"/unrelated.md\"]}\n";
+            if settings_case > 0 {
+                fs::write(&plan.output, original).unwrap();
+            }
+            fs::write(&claude, "claude\n").unwrap();
+            let plan = linked_repo
+                .disable_plan(DisableRuntime::Claude, &claude)
+                .unwrap();
+            linked_repo.apply_disable(&plan).unwrap();
+            if settings_case == 2 {
+                let settings = fs::read_to_string(&plan.output).unwrap();
+                fs::write(&plan.output, settings.replace("\"user\": 1", "\"user\": 2")).unwrap();
+            }
+            let managed = fs::read_to_string(&main_repo.state_path).unwrap();
+            let managed: RawState = toml::from_str(&managed).unwrap();
+            let managed = toml::to_string(&managed.managed).unwrap();
+            let exclusion = fs::read_to_string(main_repo.common_git_dir.join("info/exclude"))
+                .unwrap()
+                .replace("/.claude/settings.local.json\n", "");
+            git(
+                main.path(),
+                &["worktree", "remove", "--force", linked.to_str().unwrap()],
+            )
+            .unwrap();
+            let fresh = LocalRepository::discover(main.path(), &paths).unwrap();
+            assert_eq!(
+                fresh.disable_status(DisableRuntime::Claude).unwrap(),
+                DisableStatus::Owned
+            );
+            assert_eq!(
+                fresh.disable_status(DisableRuntime::Pi).unwrap(),
+                DisableStatus::None
+            );
+            fresh.restore_disable(DisableRuntime::Claude).unwrap();
+            if settings_case == 0 {
+                assert!(!plan.output.exists());
+            } else {
+                assert_eq!(
+                    fs::read_to_string(&plan.output).unwrap(),
+                    original.replace(
+                        "\"user\": 1",
+                        if settings_case == 2 {
+                            "\"user\": 2"
+                        } else {
+                            "\"user\": 1"
+                        }
+                    )
+                );
+            }
+            let restored = fs::read_to_string(&fresh.state_path).unwrap();
+            let restored: RawState = toml::from_str(&restored).unwrap();
+            assert!(restored.disables.is_empty());
+            assert_eq!(toml::to_string(&restored.managed).unwrap(), managed);
+            assert_eq!(
+                fs::read_to_string(fresh.common_git_dir.join("info/exclude")).unwrap(),
+                exclusion
+            );
+        }
     }
 }

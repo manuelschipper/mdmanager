@@ -182,9 +182,14 @@ writers before manual recovery:
   every unrelated entry. This is the exceptional manual state recovery path; there is
   no automatic rollback or Local repair command.
 
-Restore validates recorded destinations and source scope without requiring the source
-file still to exist. Claude ownership is shared across the repository's worktrees;
-Pi and managed outputs belong to their recorded worktree. Invalid destinations are
+Restore validates recorded destinations and source ownership without requiring the source
+file or directory still to exist. Claude ownership is shared across the repository's
+worktrees and can be restored even after removing the originating linked worktree;
+its recorded source and original settings must reproduce the saved output hash.
+Pi and managed outputs belong to their recorded worktree. If deleting a Pi source
+directory also removed its override, status reports it missing and restore requires
+the manual state recovery above; it does not recreate the directory or output.
+Invalid destinations are
 refused, never rewritten. Claude settings must be an ordinary file: resolving and
 dangling symlinks are refused during review, Apply and restore.
 Context runtime settings remain outside these manifests.
