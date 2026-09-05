@@ -173,7 +173,8 @@ Only sources that actually load at startup are numbered. Conditional, excluded, 
 nested sources have no sequence number. Reasons use plain language and name the setting or winning
 candidate where known.
 
-Below 100 columns, Context shows the chain only and Enter opens the source full-screen. Claude
+Below 100 columns, Context stacks the preview below the chain when the page body has at least
+30 rows; shorter bodies show only the chain. Enter opens the source full-screen in every layout. Claude
 descendant scanning has no entry cap. It skips **.git** and non-rule symlinked directories; symlinked
 Claude rule files and directories are followed. Cursor Context resolves `AGENTS.md` plus
 `.cursor/rules/**/*.mdc` from the nearest Git root through the launch directory; it does not scan
@@ -231,6 +232,32 @@ focus.
 
 Recursive discovery reload is limited to Git worktrees. Outside Git, known instruction candidates
 remain watched, but newly created nested instruction files require a restart.
+
+## TUI module contracts
+
+`src/tui.rs` starts the session and owns its thread-local palette. `src/tui/app.rs` composes
+the domain modules with explicit borrowed inputs, sequences refresh and keyboard events,
+and owns view history and dispatch. Its child modules live beside it:
+
+- `inspection.rs` observes one refresh generation of instruction content, comparisons,
+  diagnostics, file ownership, and Home identities. Its input includes document paths from
+  the current view and history; it does not depend on App or navigation variants.
+- `document.rs` owns viewport dimensions, wrapping, search and line-jump prompts, temporary
+  highlights, and document rendering shared by the pages.
+- `reload.rs` owns watch signatures and the polling clock. It requests refresh; App accepts
+  the new signature after rebuilding observations.
+- `context_view.rs` owns the source chain and detail browser, including wide, stacked, and
+  chain-only layouts. `context_ui.rs` separately owns the asynchronous Context scan receiver
+  and runtime selection.
+- `managed_view.rs` renders managed compositions and differences; `library_view.rs` owns the
+  cross-scope Library and Global Profile inspector; `overview.rs` owns Home rows and summary.
+
+Page inputs borrow accepted observations and configuration and receive only their cursor and
+document state for mutation. Pages do not borrow App or call another page's private helpers.
+Rendering and document navigation perform no filesystem observation. Context workers return
+scan results through the session-owned receiver and never access the rendering palette.
+Behavioral tests live with their domain owners; App retains cross-page navigation, refresh,
+theme, and intro integration tests.
 
 ## Keys
 

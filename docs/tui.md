@@ -60,9 +60,9 @@ active.
 
 ## Context
 
-Context resolves one runtime at a time. A wide terminal shows the source chain beside a
-non-focusable preview: Up/Down selects, Shift+Up/Down scrolls the preview. A narrow terminal shows
-only the chain; Enter opens the source full-screen.
+Context resolves one runtime at a time. Wide terminals show the chain beside a non-focusable
+preview; narrower ones stack it below when height permits, or show only the chain. Up/Down
+selects, Shift+Up/Down scrolls the preview, and Enter opens the source full-screen.
 
 Only startup sources are numbered to show load order. Conditional rules say when they load.
 Excluded, skipped, empty, truncated, and unreadable candidates stay visible with plain-language
