@@ -12,6 +12,7 @@ pub struct Pty {
     child: Child,
     terminal: File,
     output: String,
+    _runtime_path: tempfile::TempDir,
 }
 
 impl Pty {
@@ -21,9 +22,14 @@ impl Pty {
         // Clones are close-on-exec, keeping PTYs out of parallel CLI children.
         let terminal = File::from(pair.master).try_clone().unwrap();
         let slave = File::from(pair.slave).try_clone().unwrap();
+        let runtime_path = super::runtime_path();
         let child = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
             .args(arguments)
             .env("HOME", home)
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env("PATH", runtime_path.path())
             .current_dir(directory)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
@@ -34,6 +40,7 @@ impl Pty {
             child,
             terminal,
             output: String::new(),
+            _runtime_path: runtime_path,
         }
     }
 
