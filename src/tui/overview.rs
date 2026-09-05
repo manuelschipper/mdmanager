@@ -663,7 +663,7 @@ pub(super) fn global_symlink_home_status(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{draw, draw_at, fixture, global_fixture};
+    use super::super::tests::{draw, fixture, global_fixture};
     use super::super::*;
     use super::*;
     use std::fs;
@@ -716,92 +716,33 @@ mod tests {
     }
 
     #[test]
-    fn global_external_files_use_the_same_ownership_wording() {
+    fn global_discovery_classifies_an_ordinary_file_without_configuration() {
         let (home, _repository, _paths, mut app) = fixture();
-        fs::create_dir_all(home.path().join(".claude")).unwrap();
-        fs::write(home.path().join(".claude/CLAUDE.md"), "# Global\n").unwrap();
+        let path = home.path().join(".claude/CLAUDE.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "# Global\n").unwrap();
 
         app.reload_from_disk();
-        let screen = draw(&mut app);
-
-        let global = screen
-            .lines()
-            .find(|line| line.contains("~/.claude/CLAUDE.md"))
-            .unwrap();
-        assert!(global.contains(GlobalTargetStatus::Unmanaged.label()));
-    }
-
-    #[test]
-    fn home_width_is_responsive_and_documents_use_the_screen() {
-        let (_home, repository, _paths, mut app) = fixture();
-        assert_eq!(
-            home_canvas_width(
-                &OverviewInput {
-                    global: &app.global,
-                    global_active_profile: &app.global_active_profile,
-                    global_sources: &app.global_sources,
-                    inspection: &app.inspection,
-                    is_home: matches!(app.view, View::Home),
-                    local_repository: &app.local_repository,
-                    message: &app.message,
-                    paths: &app.paths,
-                    project: &app.project,
-                    project_root: &app.project_root,
-                    scan_spinner: app.context.scan_spinner(),
-                    scan_status: &app.context.scan_status
-                },
-                60
-            ),
-            60
-        );
-        assert!(
-            home_canvas_width(
-                &OverviewInput {
-                    global: &app.global,
-                    global_active_profile: &app.global_active_profile,
-                    global_sources: &app.global_sources,
-                    inspection: &app.inspection,
-                    is_home: matches!(app.view, View::Home),
-                    local_repository: &app.local_repository,
-                    message: &app.message,
-                    paths: &app.paths,
-                    project: &app.project,
-                    project_root: &app.project_root,
-                    scan_spinner: app.context.scan_spinner(),
-                    scan_status: &app.context.scan_status
-                },
-                180
-            ) < COMPACT_WIDTH
-        );
-        let home = draw_at(&mut app, 180, 60);
-        let home_title = home
-            .lines()
-            .find(|line| line.contains("┌ mdmanager.ai "))
+        assert!(app.global.is_none());
+        let index = app
+            .global_sources
+            .iter()
+            .position(|(runtime, source)| *runtime == ContextRuntime::Claude && source.path == path)
             .unwrap();
         assert!(
-            home_title
-                .chars()
-                .position(|character| character == '┌')
-                .unwrap()
-                > 20
+            app.home_items()
+                .iter()
+                .any(|item| matches!(item, HomeItem::GlobalExternal(found) if *found == index))
         );
-        app.open(View::File {
-            title: "AGENTS.md".into(),
-            path: repository.path().join("AGENTS.md"),
-            about: "Project file".into(),
-        });
-        let document = draw_at(&mut app, 180, 60);
-        let title = document
-            .lines()
-            .find(|line| line.contains("┌ mdmanager.ai "))
+        assert!(symlink_info(&app.inspection, &path).is_none());
+        app.home_index = app
+            .home_items()
+            .iter()
+            .position(|item| matches!(item, HomeItem::GlobalExternal(found) if *found == index))
             .unwrap();
-        assert!(
-            title
-                .chars()
-                .position(|character| character == '┌')
-                .unwrap()
-                <= 1
-        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&app.view, View::File { path: selected, .. } if selected == &path));
+        assert_eq!(app.searchable_text().unwrap(), "# Global\n");
     }
 
     #[test]

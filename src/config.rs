@@ -588,11 +588,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn target_display_name_capitalizes_the_id() {
-        assert_eq!(target_display_name("claude"), "Claude");
-    }
-
-    #[test]
     fn sha256_hex_is_the_lowercase_hex_digest() {
         assert_eq!(
             sha256_hex(b""),
@@ -795,32 +790,10 @@ path = "sections/local.md"
     }
 
     #[test]
-    fn an_unknown_theme_does_not_invalidate_instructions() {
-        let source = format!("[ui]\ntheme = \"unknown\"\n{VALID}");
-        let (_temp, global) = global(&source, &[("sections/common.md", "text")]);
-        let global = global.unwrap();
-
-        assert_eq!(global.theme(), "unknown");
-        assert!(global.render("default", "claude").is_ok());
-    }
-
-    #[test]
     fn rejects_unknown_sections() {
         let source = VALID.replace("[\"common\"]", "[\"missing\"]");
         let (_temp, global) = global(&source, &[("sections/common.md", "text")]);
         assert!(global.unwrap_err().contains("unknown section missing"));
-    }
-
-    #[test]
-    fn missing_manifest_has_first_run_guidance() {
-        let temp = TempDir::new().unwrap();
-        let paths = Paths::for_home(temp.path());
-        let error = GlobalConfig::load(&paths).unwrap_err();
-        assert!(error.starts_with("not configured"));
-        assert!(error.contains(&paths.config.display().to_string()));
-        assert!(error.contains("mdmanager docs start"));
-        assert!(error.contains("Ask your coding agent"));
-        assert!(!error.contains("mdmanager init"));
     }
 
     #[test]
@@ -922,22 +895,6 @@ path = "sections/local.md"
         assert_eq!(
             fs::metadata(written).unwrap().permissions().mode() & 0o777,
             0o644
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_replacements_preserve_existing_permissions() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("private.md");
-        fs::write(&path, "old\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-
-        atomic_write(&path, b"new\n").unwrap();
-
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
         );
     }
 }

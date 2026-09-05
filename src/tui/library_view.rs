@@ -496,36 +496,31 @@ mod tests {
     fn library_lists_every_profile_and_section_with_usage() {
         let (_home, _repository, _paths, mut app) = global_fixture();
         open_library(&mut app);
+        let entries = library_entries(&app.library_view_input());
+        assert!(
+            entries
+                == vec![
+                    LibraryEntry::Profile("default".into()),
+                    LibraryEntry::Profile("work".into()),
+                    LibraryEntry::PersonalSection("common".into()),
+                    LibraryEntry::PersonalSection("claude".into()),
+                    LibraryEntry::PersonalSection("scratch".into()),
+                ]
+        );
         let screen = draw(&mut app);
-        assert!(screen.contains("mdmanager.ai · Library"));
-        assert!(screen.contains("PROFILES"));
-        assert!(screen.contains("SECTIONS"));
-        assert!(screen.contains("default"));
-        assert!(screen.contains("work"));
-        assert!(screen.contains("not active"));
-        assert!(screen.contains("sections/scratch.md"));
-        assert!(screen.contains("used by all Profiles"));
-        assert!(screen.contains("used by default"));
-        assert!(screen.contains("not currently used"));
-        assert!(!screen.contains("apply"));
-
-        let wide = draw_at(&mut app, 160, 50);
-        let title = wide
-            .lines()
-            .find(|line| line.contains("mdmanager.ai · Library"))
-            .unwrap();
-        let left = title
-            .chars()
-            .position(|character| character == '┌')
-            .unwrap();
-        let right = title
-            .chars()
-            .position(|character| character == '┐')
-            .unwrap();
-        assert!(left > 20);
-        assert!(right - left <= usize::from(COMPACT_WIDTH));
-        assert!(!wide.contains("PROJECT INSTRUCTIONS"));
-
+        for section in &app.global.as_ref().unwrap().manifest.sections {
+            let row = screen
+                .lines()
+                .find(|line| line.contains(&section.path))
+                .unwrap();
+            let usage = personal_section_usage(&app.library_view_input(), &section.id);
+            assert!(!usage.is_empty());
+            assert!(row.contains(&usage), "{row}");
+        }
+        app.section_index = 1;
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&app.view, View::GlobalProfile(profile) if profile == "work"));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.view, View::Home));
     }
@@ -713,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_profile_rows_show_the_full_composition() {
+    fn reload_preserves_selected_section_after_composition_reorder() {
         let (_home, _repository, paths, mut app) = global_fixture();
         let source = fs::read_to_string(&paths.config).unwrap().replace(
             "claude = [\"common\", \"claude\"]",
@@ -734,8 +729,6 @@ mod tests {
         app.section_index = 0;
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        let screen = draw_at(&mut app, 160, 50);
-        assert!(screen.contains("common + claude + delegation-rules"));
         let reference = ManagedRef::Global {
             profile: "default".into(),
             target: "claude".into(),

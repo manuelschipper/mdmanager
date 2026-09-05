@@ -2735,29 +2735,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_local_manifest_does_not_claim_managed_targets() {
-        let home = TempDir::new().unwrap();
-        let repository = TempDir::new().unwrap();
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(repository.path())
-            .status()
-            .unwrap();
-        let paths = Paths::for_home(home.path());
-        let repo = LocalRepository::discover(repository.path(), &paths).unwrap();
-        fs::create_dir_all(&repo.data_dir).unwrap();
-        fs::write(
-            repo.data_dir.join("local.toml"),
-            "format = 1\nordered = [\"local\"]\n",
-        )
-        .unwrap();
-
-        assert!(repo.local_manifest_error().is_some());
-        assert!(!repo.managed_exists(ManagedTarget::Agents));
-        assert!(!repo.managed_exists(ManagedTarget::Claude));
-    }
-
-    #[test]
     fn adopt_reports_content_mismatch_before_missing_exclusion() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();

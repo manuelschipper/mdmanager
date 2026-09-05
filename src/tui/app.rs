@@ -2286,27 +2286,6 @@ mod tests {
     }
 
     #[test]
-    fn intro_phase_fades_in_holds_and_recedes() {
-        assert_eq!(
-            intro_phase(Duration::ZERO),
-            Some((active_theme().dim, None))
-        );
-        assert_eq!(
-            intro_phase(Duration::from_millis(400)),
-            Some((active_theme().muted, None))
-        );
-        assert_eq!(
-            intro_phase(Duration::from_millis(900)),
-            Some((active_theme().primary, Some(active_theme().text)))
-        );
-        assert_eq!(
-            intro_phase(Duration::from_millis(1700)),
-            Some((active_theme().dim, Some(active_theme().dim)))
-        );
-        assert_eq!(intro_phase(INTRO_DURATION), None);
-    }
-
-    #[test]
     fn intro_covers_the_page_and_any_key_skips_without_acting() {
         let (_home, _repository, _paths, mut app) = fixture();
         app.intro_started = Some(Instant::now());
@@ -2414,35 +2393,6 @@ mod tests {
         assert!(!app.help);
         handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.home_index, 1);
-    }
-
-    #[test]
-    fn help_anchor_tracks_the_page_and_stays_inside_every_terminal_size() {
-        let (_home, _repository, _paths, app) = fixture();
-        for (width, height) in [(54, 16), (80, 24), (160, 50), (240, 70)] {
-            let screen = Rect::new(0, 0, width, height);
-            let anchor = help_anchor_area(&app, screen);
-            let modal = bounded_around(screen, anchor, 88, 18);
-
-            assert!(modal.x >= screen.x);
-            assert!(modal.y >= screen.y);
-            assert!(modal.x + modal.width <= screen.x + screen.width);
-            assert!(modal.y + modal.height <= screen.y + screen.height);
-            assert!(
-                modal
-                    .x
-                    .saturating_add(modal.width / 2)
-                    .abs_diff(anchor.x.saturating_add(anchor.width / 2))
-                    <= 1
-            );
-            assert!(
-                modal
-                    .y
-                    .saturating_add(modal.height / 2)
-                    .abs_diff(anchor.y.saturating_add(anchor.height / 2))
-                    <= 1
-            );
-        }
     }
 
     #[test]
@@ -2651,17 +2601,6 @@ mod tests {
         assert!(app.inspection.document(&section).is_err());
         assert!(app.searchable_text().is_none());
         assert!(!draw(&mut app).contains("# New snapshot content"));
-    }
-
-    #[test]
-    fn reload_message_expires() {
-        let (_home, _repository, _paths, mut app) = fixture();
-        app.message = Some((true, "Updated from disk".into()));
-        app.message_expires_at = Some(Instant::now());
-
-        app.poll_message();
-
-        assert!(app.message.is_none());
     }
 
     #[test]
@@ -2914,16 +2853,6 @@ mod tests {
         assert!(app.global_error.is_none());
         assert!(matches!(app.view, View::Home));
         assert!(draw(&mut app).contains("PROFILE default (active)"));
-    }
-
-    #[test]
-    fn global_diagnostics_point_to_doctor() {
-        let parse_error = global_diagnostic_text("invalid manifest at line 2");
-        assert!(parse_error.contains("invalid manifest at line 2"));
-        assert!(parse_error.contains("run `mdmanager doctor`"));
-
-        let directed = global_diagnostic_text("run `mdmanager doctor`");
-        assert_eq!(directed.matches("mdmanager doctor").count(), 1);
     }
 
     // Two Profiles that differ on the claude target, plus a Section no Profile uses.

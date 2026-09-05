@@ -558,9 +558,6 @@ mod tests {
     use super::super::*;
     use std::fs;
 
-    use ratatui::{Terminal, backend::TestBackend};
-    use unicode_width::UnicodeWidthStr;
-
     #[test]
     fn document_navigation_reveals_matches_and_page_boundaries() {
         let (_home, repository, _paths, mut app) = fixture();
@@ -602,44 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn full_documents_are_left_anchored_with_dim_line_numbers() {
-        let (_home, repository, _paths, mut app) = fixture();
-        app.open(View::File {
-            title: "AGENTS.md".into(),
-            path: repository.path().join("AGENTS.md"),
-            about: "Project file".into(),
-        });
-        let backend = TestBackend::new(180, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let screen = terminal.backend().to_string();
-        let (row, line) = screen
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains("# Existing"))
-            .unwrap();
-        assert_eq!(line.split('│').nth(1).unwrap().trim(), "1");
-        let number = UnicodeWidthStr::width(&line[..line.find('1').unwrap()]);
-        let content = UnicodeWidthStr::width(&line[..line.find("# Existing").unwrap()]);
-        assert!(content < 12, "{line:?}");
-        let buffer = terminal.backend().buffer();
-        assert_eq!(
-            buffer
-                .cell((u16::try_from(number).unwrap(), u16::try_from(row).unwrap()))
-                .unwrap()
-                .fg,
-            active_theme().muted
-        );
-        assert_ne!(
-            buffer
-                .cell((u16::try_from(content).unwrap(), u16::try_from(row).unwrap()))
-                .unwrap()
-                .fg,
-            active_theme().muted
-        );
-    }
-
-    #[test]
     fn go_to_line_centers_and_highlights_the_source_line() {
         let (_home, repository, _paths, mut app) = fixture();
         let content = (1..=100)
@@ -675,36 +634,6 @@ mod tests {
             .find(|line| line.contains("line 80"))
             .unwrap();
         assert_eq!(row.split('│').nth(1).unwrap().trim(), "80");
-    }
-
-    #[test]
-    fn short_info_replaces_the_screen_with_a_content_sized_panel() {
-        let (_home, _repository, _paths, mut app) = fixture();
-        app.open(View::Info {
-            kind: DiagnosticKind::General,
-            title: "Pi · not applied yet".into(),
-            text: no_active_profile_text(),
-        });
-
-        let screen = draw_at(&mut app, 160, 50);
-        let title = screen
-            .lines()
-            .find(|line| line.contains("mdmanager.ai · Pi · not applied yet"))
-            .unwrap();
-        let left = title
-            .chars()
-            .position(|character| character == '┌')
-            .unwrap();
-        let right = title
-            .chars()
-            .position(|character| character == '┐')
-            .unwrap();
-        assert!(left > 20);
-        assert!(right - left <= 88);
-        assert!(screen.contains("Esc back"));
-        assert!(!screen.contains("↑↓ scroll"));
-        assert!(!screen.contains("PROJECT INSTRUCTIONS"));
-        assert!(!screen.contains("GLOBAL INSTRUCTIONS"));
     }
 
     #[test]

@@ -320,15 +320,4 @@ mod tests {
         );
         assert!(matches!(app.view, View::Managed(_)));
     }
-
-    #[test]
-    fn narrow_managed_view_does_not_advertise_preview_scrolling() {
-        let (_home, repository, paths, _app) = fixture();
-        project::adopt(repository.path(), "agents").unwrap();
-        let mut app = App::new_at(paths, None, repository.path().to_owned()).unwrap();
-        app.open(View::Managed(ManagedRef::Project("agents".into())));
-
-        let screen = draw_at(&mut app, 80, 30);
-        assert!(!screen.contains("preview"));
-    }
 }

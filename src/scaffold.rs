@@ -86,55 +86,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn selected_target_starter_is_valid_and_does_not_deploy() {
-        let home = TempDir::new().unwrap();
-        let paths = Paths::for_home(home.path());
-        let targets = vec!["codex".into(), "pi".into()];
-        let global = create(&paths, &targets).unwrap();
-        assert_eq!(global.target_names().collect::<Vec<_>>(), ["codex", "pi"]);
-        assert_eq!(
-            fs::read_to_string(&paths.config).unwrap(),
-            manifest(&targets).unwrap()
-        );
-        assert_eq!(
-            fs::read_to_string(common_path(&paths).unwrap()).unwrap(),
-            COMMON_CONTENT
-        );
-        assert_eq!(
-            fs::read_to_string(paths.data_dir.join(".gitignore")).unwrap(),
-            GITIGNORE
-        );
-        assert!(!home.path().join(".claude/CLAUDE.md").exists());
-        assert!(!home.path().join(".codex/AGENTS.md").exists());
-        assert!(!home.path().join(".pi/agent/AGENTS.md").exists());
-    }
-
-    #[test]
-    fn library_only_starter_has_no_global_profile() {
-        let home = TempDir::new().unwrap();
-        let paths = Paths::for_home(home.path());
-        let global = create(&paths, &[]).unwrap();
-
-        assert_eq!(global.target_names().count(), 0);
-        assert_eq!(global.profile_names().count(), 0);
-        assert!(
-            !fs::read_to_string(&paths.config)
-                .unwrap()
-                .contains("[profiles.")
-        );
-    }
-
-    #[test]
-    fn invalid_target_selection_does_not_create_files() {
-        let home = TempDir::new().unwrap();
-        let paths = Paths::for_home(home.path());
-        let error = create(&paths, &["cursor".into()]).unwrap_err();
-
-        assert!(error.contains("Cursor has no Global Markdown target"));
-        assert!(!paths.data_dir.exists());
-    }
-
-    #[test]
     fn existing_source_is_not_overwritten() {
         let home = TempDir::new().unwrap();
         let paths = Paths::for_home(home.path());

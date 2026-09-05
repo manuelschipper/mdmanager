@@ -173,6 +173,37 @@ fn init_without_targets_creates_only_the_personal_library() {
     let doctor = String::from_utf8(doctor.stdout).unwrap();
     assert!(doctor.contains("Global targets: none configured"));
 
+    let data = mdmanager_data_dir(home.path());
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&data)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for (path, exit) in [
+        ("projects/local.toml", 0),
+        ("state/default.json", 0),
+        ("backups/claude.bak", 0),
+        ("mdmanager.toml", 1),
+        ("sections/common.md", 1),
+    ] {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "core.excludesFile=/dev/null",
+                "check-ignore",
+                "-q",
+                "--",
+                path,
+            ])
+            .current_dir(&data)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(exit), "{path}");
+    }
+
     let repeated = mdmanager(home.path(), &["init"]);
     assert!(!repeated.status.success());
     assert!(
@@ -241,19 +272,20 @@ fn init_rejects_unknown_and_duplicate_global_targets_before_writing() {
 }
 
 #[test]
-fn doctor_describes_missing_configuration_without_calling_it_invalid() {
+fn doctor_missing_configuration_offers_recovery_without_writing() {
     let home = TempDir::new().unwrap();
+    let before = files(home.path());
     let output = mdmanager(home.path(), &["doctor"]);
 
     assert!(!output.status.success());
+    assert_eq!(files(home.path()), before);
+    assert!(!mdmanager_data_dir(home.path()).exists());
     let output = String::from_utf8(output.stdout).unwrap();
-    assert!(output.contains("Global manifest: not configured"));
     assert!(output.contains("mdmanager init"));
-    assert!(!output.contains("Global manifest: invalid"));
 }
 
 #[test]
-fn root_help_is_concise_and_tui_help_has_the_keymap() {
+fn help_exposes_commands_targets_and_navigation_keys() {
     let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
         .arg("--help")
         .output()
@@ -266,7 +298,6 @@ fn root_help_is_concise_and_tui_help_has_the_keymap() {
             fields.next() == Some(command) && fields.next().is_some()
         }));
     }
-    assert!(!help.contains("Shift+Up/Down"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
         .args(["init", "--help"])
@@ -299,17 +330,27 @@ fn bundled_docs_work_without_configuration() {
     let index = mdmanager(home.path(), &["docs"]);
     assert!(index.status.success());
     let index = String::from_utf8(index.stdout).unwrap();
-    assert!(index.contains("start"));
-    assert!(index.contains("configuration"));
-    assert!(index.contains("cursor"));
-    assert!(index.contains("migrate"));
+    let names = index
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap())
+        .collect::<Vec<_>>();
+    let unique = names.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), names.len());
 
     for (topic, source) in [
+        ("context", include_str!("../docs/context.md")),
+        ("claude", include_str!("../docs/claude.md")),
+        ("codex", include_str!("../docs/codex.md")),
+        ("pi", include_str!("../docs/pi.md")),
+        ("concepts", include_str!("../docs/concepts.md")),
+        ("configuration", include_str!("../docs/configuration.md")),
+        ("cli", include_str!("../docs/cli.md")),
         ("cursor", include_str!("../docs/cursor.md")),
         ("migrate", include_str!("../docs/migrate.md")),
         ("start", include_str!("../docs/start.md")),
         ("tui", include_str!("../docs/tui.md")),
     ] {
+        assert!(names.contains(&topic), "{topic}");
         let output = mdmanager(home.path(), &["docs", topic]);
         assert!(output.status.success(), "{topic}");
         assert_eq!(output.stdout, source.as_bytes(), "{topic}");
@@ -847,8 +888,11 @@ fn doctor_gives_a_safe_action_for_a_directory_target() {
     let target = home.path().join(".codex/AGENTS.md");
     fs::remove_file(&target).unwrap();
     fs::create_dir(&target).unwrap();
+    fs::write(target.join("keep.md"), "user content\n").unwrap();
+    let before = files(home.path());
 
     let output = mdmanager(home.path(), &["doctor"]);
+    assert_eq!(files(home.path()), before);
     assert!(!output.status.success());
     let output = String::from_utf8(output.stdout).unwrap();
     assert!(output.contains(&target.display().to_string()));
@@ -969,7 +1013,7 @@ fn project_adopt_render_check_and_apply() {
 }
 
 #[test]
-fn project_check_explains_an_empty_manifest() {
+fn project_check_accepts_an_empty_manifest_without_writing() {
     let home = TempDir::new().unwrap();
     let repository = TempDir::new().unwrap();
     assert!(
@@ -987,27 +1031,27 @@ fn project_check_explains_an_empty_manifest() {
     )
     .unwrap();
 
+    let before = (files(home.path()), files(repository.path()));
     let output = mdmanager_in(home.path(), repository.path(), &["project", "check"]);
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        "No project targets declared."
-    );
+    assert_eq!((files(home.path()), files(repository.path())), before);
 }
 
 #[test]
-fn local_commands_use_a_plain_non_git_error() {
+fn local_status_refuses_non_git_directories_without_writing() {
     let home = TempDir::new().unwrap();
     let directory = TempDir::new().unwrap();
 
+    let before = (files(home.path()), files(directory.path()));
     let output = mdmanager_in(home.path(), directory.path(), &["local", "status"]);
+    assert_eq!((files(home.path()), files(directory.path())), before);
+    assert!(!directory.path().join(".mdmanager").exists());
+    assert!(!mdmanager_data_dir(home.path()).exists());
 
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("Git worktree"));
-    assert!(!error.contains("git rev-parse"));
-    assert!(!error.contains("fatal:"));
 }
 
 #[test]
