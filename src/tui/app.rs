@@ -2744,6 +2744,11 @@ mod tests {
         );
         let screen = draw(&mut app);
         assert!(screen.contains("mdmanager doctor"));
+        let View::Info { kind, title, .. } = &app.view else {
+            panic!("expected Global deployment diagnostic");
+        };
+        assert!(*kind == DiagnosticKind::Global);
+        let deployment_title = title.clone();
 
         assert!(app.back() == SessionAction::Continue);
         let home = draw(&mut app);
@@ -2756,10 +2761,25 @@ mod tests {
             .position(|item| matches!(item, HomeItem::GlobalInvalid))
             .unwrap();
         enter_home(&mut app);
-        if let View::Info { kind, title, .. } = &mut app.view {
-            assert!(*kind == DiagnosticKind::Global);
-            *title = "Renamed diagnostic".into();
-        }
+        let View::Info { kind, title, .. } = &app.view else {
+            panic!("expected Global deployment diagnostic");
+        };
+        assert!(*kind == DiagnosticKind::Global);
+        assert_eq!(title, &deployment_title);
+        assert!(app.back() == SessionAction::Continue);
+        fs::write(
+            app.paths.state_dir.join("state.toml"),
+            "active_profile = \"also-removed\"\n",
+        )
+        .unwrap();
+        app.reload_from_disk();
+        let View::Info { kind, title, text } = &mut app.view else {
+            panic!("expected reloaded Global deployment diagnostic");
+        };
+        assert!(*kind == DiagnosticKind::Global);
+        assert_eq!(title, &deployment_title);
+        assert!(text.contains("also-removed"));
+        *title = "Renamed diagnostic".into();
         fs::write(
             app.paths.state_dir.join("state.toml"),
             "active_profile = \"default\"\n",

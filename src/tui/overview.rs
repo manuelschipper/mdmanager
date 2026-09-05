@@ -823,7 +823,15 @@ mod tests {
             .position(|item| home_item_key(item) == "global:claude")
             .unwrap();
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.view, View::Info { .. }));
+        let View::Info { kind, title, text } = &app.view else {
+            panic!("expected unapplied target information");
+        };
+        assert!(*kind == DiagnosticKind::General);
+        assert_eq!(
+            title,
+            &format!("{} · not applied yet", target_display_name("claude"))
+        );
+        assert_eq!(text, &no_active_profile_text());
     }
 
     #[test]
