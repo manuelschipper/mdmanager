@@ -153,7 +153,7 @@ def write_page(path, html):
 if OUT.exists():
     shutil.rmtree(OUT)
 shutil.copytree(HERE / "assets", OUT / "assets")
-for filename in ["workflow.gif", "context.png"]:
+for filename in ["workflow.gif", "workflow-light.gif", "context.png"]:
     shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
 (OUT / "assets/favicon.svg").write_text(
     mark.replace('class="mark"', 'color="#d79921"').replace('44 16 282 141', '34 -64 302 302')
@@ -193,13 +193,18 @@ content = f'''<main id="content" class="release"><div class="document">
 write_page("/news/", page("Changelog · mdmanager.ai", "mdmanager releases and changes.", "/news/", "/news/", content))
 paths.append("/news/")
 
-content = '''<main id="content" class="demo-panel">
+DEMO_ALT = (
+    "Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared "
+    "Section, review the difference in CLAUDE.md and AGENTS.md, then apply it"
+)
+content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
-  <h1>Review an instruction change</h1>
-  <img class="demo-image" src="/assets/workflow.gif" alt="A source edit reloads in the TUI; review the difference, then apply it through the CLI">
-  <p>Recorded from a clean Docker installation. The source edit and CLI Apply are scripted.</p>
+  <h1>The workflow in one minute</h1>
+  <img class="demo-image dark" src="/assets/workflow.gif" alt="{DEMO_ALT}">
+  <img class="demo-image light" src="/assets/workflow-light.gif" alt="{DEMO_ALT}">
+  <p>Recorded from a clean Docker installation with a scripted agent transcript; the CLI commands and TUI are real.</p>
 </main>'''
-write_page("/demo/", page("Demo · mdmanager.ai", "Review an instruction change in mdmanager's TUI.", "/demo/", "", content))
+write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context, review a shared Section change, and apply it with mdmanager.", "/demo/", "", content))
 paths.append("/demo/")
 
 (OUT / "404.html").write_text(page(

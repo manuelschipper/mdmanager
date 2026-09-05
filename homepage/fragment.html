@@ -282,7 +282,13 @@ aside a:not([aria-current=page]) {
 .demo-image {
   display:block;
   width:100%;
-  height:auto
+  max-height:calc(100vh - 220px);
+  height:auto;
+  object-fit:contain;
+  margin:auto
+}
+html.light .demo-image.dark,html:not(.light) .demo-image.light {
+  display:none
 }
 .demo-panel {
   padding:20px
@@ -445,7 +451,7 @@ cargo install --path .</code>
     </section>
     <div class="actions">
       <a href="/docs/start/">Read the start guide →</a>
-      <a href="/demo/">Watch the 21-second demo ▷</a>
+      <a href="/demo/">Watch the one-minute demo ▷</a>
     </div>
   </main>
   <footer>

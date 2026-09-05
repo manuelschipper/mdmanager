@@ -25,3 +25,21 @@ root of `mdmanager.ai`, with directory indexes and `404.html` as the error page.
 Rebuild after changing docs, the changelog, or site sources. Generated output is
 ignored by Git. The site needs no application server; only the theme toggle and
 copy button use JavaScript. Clipboard access requires HTTPS or localhost.
+
+## Re-record the demo
+
+`demo/` records the workflow demo from a clean Docker installation with VHS. The
+fixture is a Personal library with an applied Global Profile and a `harbor` Project
+whose `CLAUDE.md` and `AGENTS.md` share one Section. `scenes.sh` drives the TUI in
+tmux and writes the narration into a status band styled like the site; `agent.sh`
+plays the coding-agent pane with a scripted transcript around real CLI commands.
+
+```sh
+homepage/demo/record.sh
+cp homepage/demo/out/workflow-gruvbox-dark.gif assets/workflow.gif
+cp homepage/demo/out/workflow-gruvbox-light.gif assets/workflow-light.gif
+```
+
+Both GIFs come from the same tape; the site shows the one matching its theme.
+Building the image compiles mdmanager from the checkout, so the recording always
+matches the source it ships with.

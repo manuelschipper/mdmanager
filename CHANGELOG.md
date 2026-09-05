@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Website** — Add the mdmanager.ai homepage, with the existing documentation and release changelog rendered as static pages.
+- **Workflow demo** — Re-record the README and website demo from a scripted Docker session: it now starts at the splash, walks Home and Context for Claude and Codex, shows a coding agent editing a shared Section, and reviews and applies the difference in both targets. The site shows a matching light or dark recording, sized to fit the viewport.
 - **TUI metadata and diagnostics** — Source About panels account for wrapped paths and
   compact the displayed path when needed to keep usage metadata and Contents visible.
   Empty Context views retain configuration warnings and scan failures.
