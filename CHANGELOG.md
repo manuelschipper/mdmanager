@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Claude worktree settings** — Context uses the same Git-reported settings worktree as Local disables, including separate Git directories and submodules, and no longer reads settings from Git metadata parents.
+- **Malformed rule headers** — Claude and Cursor rules with unterminated frontmatter are reported as ambiguous with a reason instead of inferring loading from incomplete metadata.
+
 ## mdmanager 0.1.0 — Sep 5, 2026
 
 - **Runtime Context** — Inspect persistent Markdown instructions for Claude Code,

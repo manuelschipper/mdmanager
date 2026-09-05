@@ -14,6 +14,10 @@ Markdown imports beneath the parent source but does not own the imported file. P
 Sections when mdmanager owns the target; preserve imports in external files unless the user asks to
 change them.
 
+mdmanager models complete `---` frontmatter headers and simple inline or block lists, not general
+YAML. A leading `---` without a closing delimiter is reported as ambiguous; close the header
+before relying on the reported loading behavior.
+
 ## Disable a rule for this repository
 
 To disable a shared Claude rule only on this machine, the user's coding agent should:
