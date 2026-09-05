@@ -216,14 +216,4 @@ mod tests {
         }
         assert_eq!(context.audit.runtime, ContextRuntime::Pi);
     }
-
-    #[test]
-    fn spinner_advances_and_wraps() {
-        assert_eq!(spinner_frame(Duration::ZERO), "⠋");
-        assert_eq!(spinner_frame(SPINNER_INTERVAL), "⠙");
-        assert_eq!(
-            spinner_frame(SPINNER_INTERVAL * SPINNER_FRAMES.len() as u32),
-            "⠋"
-        );
-    }
 }

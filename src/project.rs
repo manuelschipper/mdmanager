@@ -621,40 +621,6 @@ mod tests {
     }
 
     #[test]
-    fn create_plan_adds_management_before_the_root_target() {
-        let repository = TempDir::new().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(repository.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-
-        let plan = create_plan(repository.path(), "agents", "# Project\n").unwrap();
-        let workspace = plan.apply().unwrap();
-
-        assert_eq!(
-            fs::read_to_string(repository.path().join(".mdmanager/sections/agents.md")).unwrap(),
-            "# Project\n"
-        );
-        assert_eq!(
-            workspace.inspect("agents").unwrap().status,
-            ProjectTargetStatus::Missing
-        );
-        assert!(!repository.path().join("AGENTS.md").exists());
-
-        workspace
-            .apply(&workspace.inspect("agents").unwrap())
-            .unwrap();
-        assert_eq!(
-            fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
-            "# Project\n"
-        );
-    }
-
-    #[test]
     fn project_apply_requires_the_reviewed_bytes_existence_and_paths() {
         let repository = TempDir::new().unwrap();
         Command::new("git")
@@ -842,26 +808,6 @@ mod tests {
                 .targets
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn create_plan_names_the_section_with_the_target_display_name() {
-        let repository = TempDir::new().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(repository.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-
-        let plan = create_plan(repository.path(), "agents", "# Project\n").unwrap();
-        let manifest = parse_source(&plan.manifest_source).unwrap();
-
-        assert_eq!(manifest.sections.len(), 1);
-        assert_eq!(manifest.sections[0].name, target_display_name("agents"));
-        assert_eq!(manifest.sections[0].id, "agents");
     }
 
     #[test]

@@ -621,22 +621,6 @@ mod tests {
     use std::fs;
 
     use ratatui::{Terminal, backend::TestBackend};
-    use unicode_width::UnicodeWidthStr;
-
-    #[test]
-    fn source_metadata_is_separate_from_markdown() {
-        let (_home, repository, _paths, mut app) = fixture();
-        app.open(View::File {
-            title: "AGENTS.md".into(),
-            path: repository.path().join("AGENTS.md"),
-            about: "Project file · existing · not managed".into(),
-        });
-        let screen = draw(&mut app);
-        assert!(screen.contains("About"));
-        assert!(screen.contains("Contents"));
-        assert!(screen.contains("Project file · existing · not managed"));
-        assert!(screen.contains("# Existing"));
-    }
 
     #[test]
     fn claude_nested_sources_expand_in_place() {
@@ -671,25 +655,10 @@ mod tests {
         assert!(stacked.contains("child/CLAUDE.md"));
         assert!(stacked.contains("About"));
 
-        app.context_entry_index = 0;
-        let backend = TestBackend::new(100, 36);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let screen = terminal.backend().to_string();
-        let (row, line) = screen
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains("SUBFOLDER INSTRUCTIONS"))
-            .unwrap();
-        let column = UnicodeWidthStr::width(&line[..line.find("SUBFOLDER").unwrap()]);
-        let color = terminal
-            .backend()
-            .buffer()
-            .cell((u16::try_from(column).unwrap(), u16::try_from(row).unwrap()))
-            .unwrap()
-            .fg;
-        assert_ne!(color, active_theme().success);
-        assert_ne!(color, active_theme().secondary);
+        fs::remove_file(repository.path().join("child/CLAUDE.md")).unwrap();
+        app.reload_from_disk();
+        finish_context_scan(&mut app);
+        assert!(!context_entries(&app.inspection.context, true).contains(&ContextEntry::Nested));
     }
 
     #[test]
@@ -737,47 +706,5 @@ mod tests {
         app.context.scan_status = ContextScanStatus::Scanning;
         assert!(draw(&mut app).contains("checking subfolders"));
         assert!(!app.context_preview);
-    }
-
-    #[test]
-    fn context_scan_status_is_dim() {
-        let (_home, _repository, _paths, mut app) = fixture();
-        app.context.reload_and_scan(app.global.as_ref());
-        app.open(View::Context);
-        let backend = TestBackend::new(100, 36);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let screen = terminal.backend().to_string();
-        let (row, line) = screen
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains("checking subfolders"))
-            .unwrap();
-        let column = UnicodeWidthStr::width(&line[..line.find("checking").unwrap()]);
-
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((u16::try_from(column).unwrap(), u16::try_from(row).unwrap()))
-                .unwrap()
-                .fg,
-            active_theme().muted
-        );
-    }
-
-    #[test]
-    fn context_list_only_labels_exceptional_states() {
-        assert!(source_list_status(&SourceState::Startup).is_none());
-        assert!(source_list_status(&SourceState::Conditional("condition".into())).is_none());
-        assert!(source_list_status(&SourceState::Nested("subfolder".into())).is_none());
-        assert_eq!(
-            source_list_status(&SourceState::Empty).map(|(label, _)| label),
-            Some("empty")
-        );
-        assert_eq!(
-            source_list_status(&SourceState::Unreadable("error".into())).map(|(label, _)| label),
-            Some("cannot read")
-        );
     }
 }

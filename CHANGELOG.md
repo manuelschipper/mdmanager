@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Bundled docs** — Remove private page-size limits so documentation growth cannot
+  panic when reading a topic in a debug build.
+
 - **TUI metadata and diagnostics** — Source About panels account for wrapped paths and
   compact the displayed path when needed to keep usage metadata and Contents visible.
   Empty Context views retain configuration warnings and scan failures.
