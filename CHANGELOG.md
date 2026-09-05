@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Reviewed Project writes** — Apply retains the displayed review and refuses changed
+  targets or source paths before writing, including when using `--yes`.
+- **Local ownership safety** — Managed outputs reject resolving and dangling symlinks.
+  Local writes validate recovery records first; restore prepares settings and owned
+  exclusion edits before changing files, and repeated Apply retains exclusion ownership.
 - **Consistent TUI inspection** — Pages, search, and difference controls use explicit inspection snapshots, keeping file observations stable between reloads and reporting current refresh errors. Differences follow content comparison independently of deployment status, and Context diagnostics no longer depend on display wording.
 
 - **Claude worktree settings** — Context uses the same Git-reported settings worktree as Local disables, including separate Git directories and submodules, and no longer reads settings from Git metadata parents.

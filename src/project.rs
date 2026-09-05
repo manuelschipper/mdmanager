@@ -47,7 +47,7 @@ impl ProjectTargetStatus {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TargetView {
     pub(crate) id: String,
     pub(crate) path: PathBuf,
@@ -55,6 +55,7 @@ pub(crate) struct TargetView {
     pub(crate) deployed: String,
     pub(crate) status: ProjectTargetStatus,
     pub(crate) diff: String,
+    section_paths: Vec<PathBuf>,
     // Content comparison is independent of deployment ownership and CLI labels.
     pub(crate) difference: Option<String>,
 }
@@ -263,6 +264,11 @@ impl Workspace {
             deployed,
             status,
             diff,
+            section_paths: self
+                .composition(id)?
+                .iter()
+                .map(|id| self.section_path(id).unwrap())
+                .collect(),
             difference,
         })
     }
@@ -271,13 +277,9 @@ impl Workspace {
         self.target_names().map(|id| self.inspect(id)).collect()
     }
 
-    pub(crate) fn apply(&self, id: &str) -> Result<ProjectTargetStatus, String> {
-        let reviewed = self.inspect(id)?;
-        let current = Self::load(&self.manifest_path)?.inspect(id)?;
-        if reviewed.status != current.status
-            || reviewed.expected != current.expected
-            || reviewed.deployed != current.deployed
-        {
+    pub(crate) fn apply(&self, reviewed: &TargetView) -> Result<ProjectTargetStatus, String> {
+        let current = Self::load(&self.manifest_path)?.inspect(&reviewed.id)?;
+        if *reviewed != current {
             return Err("project target changed after review; inspect and confirm again".into());
         }
         if current.status != ProjectTargetStatus::Current {
@@ -462,7 +464,11 @@ fn reject_target_symlink(path: &Path) -> Result<(), String> {
             "project target {} is a symlink; mdmanager.ai will not replace it",
             path.display()
         )),
-        Ok(_) => Ok(()),
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "project target {} is not an ordinary file",
+            path.display()
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
             "cannot inspect project target {}: {error}",
@@ -612,10 +618,75 @@ mod tests {
         );
         assert!(!repository.path().join("AGENTS.md").exists());
 
-        workspace.apply("agents").unwrap();
+        workspace
+            .apply(&workspace.inspect("agents").unwrap())
+            .unwrap();
         assert_eq!(
             fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
             "# Project\n"
+        );
+    }
+
+    #[test]
+    fn project_apply_requires_the_reviewed_bytes_existence_and_paths() {
+        let repository = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap();
+        fs::write(repository.path().join("AGENTS.md"), "original\n").unwrap();
+        let workspace = adopt(repository.path(), "agents").unwrap();
+        let reviewed = workspace.inspect("agents").unwrap();
+        let path = &reviewed.path;
+        fs::write(path, "edited during confirmation\n").unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "edited during confirmation\n"
+        );
+        fs::remove_file(path).unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        assert!(!path.exists());
+        let missing = workspace.inspect("agents").unwrap();
+        fs::write(path, "").unwrap();
+        assert!(workspace.apply(&missing).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"");
+        fs::remove_file(path).unwrap();
+        fs::create_dir(path).unwrap();
+        assert!(workspace.apply(&missing).is_err());
+        assert!(path.is_dir());
+        fs::remove_dir(path).unwrap();
+        workspace.apply(&missing).unwrap();
+        let section = workspace.section_path("agents").unwrap();
+        fs::write(&section, "changed source\n").unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        fs::write(&section, "original\n").unwrap();
+        let renamed = section.with_file_name("renamed.md");
+        fs::rename(&section, renamed).unwrap();
+        fs::write(
+            &workspace.manifest_path,
+            workspace
+                .source
+                .replace("sections/agents.md", "sections/renamed.md"),
+        )
+        .unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
+
+        // Identical contents at a different project root do not authorize that output.
+        let other = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(other.path())
+            .status()
+            .unwrap();
+        fs::write(other.path().join("AGENTS.md"), "original\n").unwrap();
+        let other_workspace = adopt(other.path(), "agents").unwrap();
+        assert!(other_workspace.apply(&reviewed).is_err());
+        assert_eq!(
+            fs::read_to_string(other.path().join("AGENTS.md")).unwrap(),
+            "original\n"
         );
     }
 
@@ -684,10 +755,11 @@ mod tests {
         fs::remove_file(repository.path().join("CLAUDE.md")).unwrap();
         fs::write(repository.path().join("CLAUDE.md"), "claude\n").unwrap();
         let workspace = adopt(repository.path(), "claude").unwrap();
+        let reviewed = workspace.inspect("claude").unwrap();
         fs::remove_file(repository.path().join("CLAUDE.md")).unwrap();
         symlink("AGENTS.md", repository.path().join("CLAUDE.md")).unwrap();
 
-        let error = workspace.apply("claude").unwrap_err();
+        let error = workspace.apply(&reviewed).unwrap_err();
         assert!(error.contains("CLAUDE.md is a symlink"));
         assert!(
             fs::symlink_metadata(repository.path().join("CLAUDE.md"))

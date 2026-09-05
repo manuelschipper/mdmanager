@@ -380,6 +380,8 @@ fn expand_target_path(raw: &str, home: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Replacement atomic file writes replace the destination, preserving ordinary-file permissions (Unix: 0644 for new files).
+/// Callers must establish ownership and validate symlinks. Syncs the file, not the parent directory.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
@@ -434,6 +436,8 @@ pub(crate) fn set_theme(paths: &Paths, theme: &str) -> Result<(), String> {
     atomic_write(&paths.config, document.to_string().as_bytes())
 }
 
+/// No-clobber atomic file writes fail if the destination exists; new files use 0644 on Unix.
+/// Callers own ownership and symlink validation. Syncs the file, not the parent directory.
 pub(crate) fn atomic_create(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()

@@ -1105,6 +1105,25 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
     assert!(error.contains("refusing to overwrite"));
     assert!(error.contains("sections/local.md"));
     assert!(error.contains("move intended edits into that Section"));
+
+    #[cfg(unix)]
+    {
+        let output = repository.path().join("AGENTS.override.md");
+        fs::remove_file(&output).unwrap();
+        std::os::unix::fs::symlink("missing.md", &output).unwrap();
+        let exclusion = fs::read(&exclude).unwrap();
+        let refused = mdmanager_in(
+            home.path(),
+            repository.path(),
+            &["local", "apply", "agents", "--yes"],
+        );
+        assert!(!refused.status.success());
+        assert_eq!(
+            fs::read_link(output).unwrap(),
+            std::path::Path::new("missing.md")
+        );
+        assert_eq!(fs::read(&exclude).unwrap(), exclusion);
+    }
 }
 
 #[test]

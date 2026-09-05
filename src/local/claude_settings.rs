@@ -23,7 +23,8 @@ pub(super) fn remove_exclusion(source: &str, value: &str) -> Result<String, Stri
     remove_json_array_string(source, "claudeMdExcludes", value)
 }
 
-fn parse_json_object(source: &str, path: &Path) -> Result<Map<String, Value>, String> {
+/// Claude recovery requires an original settings object before Local writes any files.
+pub(super) fn parse_json_object(source: &str, path: &Path) -> Result<Map<String, Value>, String> {
     let value: Value = serde_json::from_str(source)
         .map_err(|error| format!("invalid {}: {error}", path.display()))?;
     value
