@@ -13,6 +13,14 @@
 - **Project creation safety** — Reviewed creation rejects newly introduced target symlinks
   and preserves intervening Section replacements when a manifest commit fails.
 
+- **Recovery after source removal** — Local status and restore no longer require the
+  disabled source directory to exist. Shared Claude settings can be restored after
+  removing their originating linked worktree, preserving unrelated settings edits.
+
+- **Local recovery and concurrency** — Validate owned destinations and Claude settings
+  file types before mutation, serialize linked-worktree writers with an advisory lock,
+  and report partial-write recovery guidance without claiming multi-file atomicity.
+
 - **Reviewed Project writes** — Apply retains the displayed review and refuses changed
   targets or source paths before writing, including when using `--yes`.
 - **Local ownership safety** — Managed outputs reject resolving and dangling symlinks.
