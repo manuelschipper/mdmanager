@@ -4,6 +4,36 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "support/pty.rs"]
+mod pty;
+
+// Capture all fixture files, including manifests, ownership, backups and Git exclusions.
+fn files(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            (
+                entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn assert_pipe_refuses(home: &Path, repository: &Path, arguments: &[&str]) {
+    let before = (files(home), files(repository));
+    let output = mdmanager_in(home, repository, arguments);
+    assert!(!output.status.success(), "{arguments:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires --yes"),
+        "{arguments:?}: {output:?}"
+    );
+    assert_eq!((files(home), files(repository)), before, "{arguments:?}");
+}
+
 fn setup() -> TempDir {
     let temp = TempDir::new().unwrap();
     let config = temp.path().join(".mdmanager");
@@ -201,23 +231,6 @@ fn doctor_describes_missing_configuration_without_calling_it_invalid() {
     assert!(output.contains("mdmanager init"));
     assert!(!output.contains("Global manifest: invalid"));
     assert!(!output.contains("repair the manifest"));
-}
-
-#[test]
-fn non_interactive_apply_prints_the_plan_before_requiring_yes() {
-    let home = setup();
-    let output = mdmanager(home.path(), &["apply", "default"]);
-
-    assert!(!output.status.success());
-    let plan = String::from_utf8(output.stdout).unwrap();
-    assert!(plan.contains("Profile: default"));
-    assert!(plan.contains("not found"));
-    assert!(plan.contains("+++ expected: default/claude"));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("non-interactive apply requires --yes")
-    );
 }
 
 #[test]
@@ -561,13 +574,14 @@ fn render_apply_status_and_modified_recovery() {
             .contains("no active profile")
     );
 
+    let before_refusal = files(home.path());
     let needs_yes = mdmanager(home.path(), &["apply", "default"]);
     assert!(!needs_yes.status.success());
-    assert!(
-        String::from_utf8(needs_yes.stdout)
-            .unwrap()
-            .contains("Profile: default")
-    );
+    let plan = String::from_utf8(needs_yes.stdout).unwrap();
+    assert!(plan.contains("Profile: default"));
+    assert!(plan.contains("not found"));
+    assert!(plan.contains("+++ expected: default/claude"));
+    assert_eq!(files(home.path()), before_refusal);
     assert!(
         String::from_utf8(needs_yes.stderr)
             .unwrap()
@@ -786,6 +800,12 @@ fn project_adopt_render_check_and_apply() {
             .success()
     );
 
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &["project", "adopt", "agents"],
+    );
+
     let adopted = mdmanager_in(
         home.path(),
         repository.path(),
@@ -838,6 +858,12 @@ fn project_adopt_render_check_and_apply() {
             .status
             .success()
     );
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &["project", "apply", "agents"],
+    );
+
     assert!(
         mdmanager_in(
             home.path(),
@@ -909,6 +935,18 @@ fn project_create_authors_management_then_applies_the_root_file() {
     );
     let draft = repository.path().join("draft.md");
     fs::write(&draft, "# New project instructions\n").unwrap();
+
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &[
+            "project",
+            "create",
+            "agents",
+            "--from",
+            draft.to_str().unwrap(),
+        ],
+    );
 
     let created = mdmanager_in(
         home.path(),
@@ -1060,6 +1098,12 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
         String::from_utf8(repeated.stderr)
             .unwrap()
             .contains("managed agents instructions already exist")
+    );
+
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &["local", "apply", "agents"],
     );
 
     let applied = mdmanager_in(
@@ -1249,6 +1293,8 @@ fn pi_disable_adds_and_restores_its_exclusion() {
     fs::write(repository.path().join("AGENTS.md"), "# Shared\n").unwrap();
     let exclude = repository.path().join(".git/info/exclude");
 
+    assert_pipe_refuses(home.path(), repository.path(), &["local", "disable", "pi"]);
+
     let disabled = mdmanager_in(
         home.path(),
         repository.path(),
@@ -1272,6 +1318,8 @@ fn pi_disable_adds_and_restores_its_exclusion() {
             .lines()
             .any(|line| line == "/AGENTS.override.md")
     );
+
+    assert_pipe_refuses(home.path(), repository.path(), &["local", "restore", "pi"]);
 
     assert!(
         mdmanager_in(
@@ -1406,4 +1454,205 @@ fn claude_disable_refuses_a_claude_symlink_to_agents() {
             .join(".claude/settings.local.json")
             .exists()
     );
+}
+
+// Pipe tests cannot catch writes on default/decline/EOF or broken affirmative dispatch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn terminal_confirmation_guards_project_local_and_global_writes() {
+    let home = setup();
+    let repository = TempDir::new().unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(repository.path().join("draft.md"), "# Project\n").unwrap();
+    add_personal_section(home.path(), "local", "Local", "# Personal\n");
+    let exclude = repository.path().join(".git/info/exclude");
+    let original_exclude = fs::read(&exclude).unwrap();
+
+    let commands: &[&[&str]] = &[
+        &["project", "create", "agents", "--from", "draft.md"],
+        &["project", "apply", "agents"],
+        &["local", "disable", "pi"],
+        &["local", "restore", "pi"],
+        &["local", "apply", "agents"],
+        &["apply", "default"],
+    ];
+    for arguments in commands {
+        if *arguments == ["local", "apply", "agents"] {
+            let created = mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["local", "create", "agents", "local"],
+            );
+            assert!(created.status.success(), "{created:?}");
+        }
+        if *arguments == ["apply", "default"] {
+            // An external target would require force through pipes; review can authorize it.
+            fs::create_dir_all(home.path().join(".claude")).unwrap();
+            fs::write(home.path().join(".claude/CLAUDE.md"), "older external\n").unwrap();
+            assert!(
+                mdmanager(home.path(), &["apply", "default", "--yes", "--force"])
+                    .status
+                    .success()
+            );
+            fs::write(home.path().join(".claude/CLAUDE.md"), "external\n").unwrap();
+        }
+        let before = (files(home.path()), files(repository.path()));
+        for answer in [b"\n".as_slice(), b"n\n", b"\x04"] {
+            let mut terminal = pty::Pty::spawn(home.path(), repository.path(), arguments);
+            terminal.wait_for_prompt();
+            assert_eq!((files(home.path()), files(repository.path())), before);
+            // Canonical terminal VEOF on an empty input line makes read_line return EOF.
+            terminal.answer(answer);
+            let (status, output) = terminal.finish();
+            assert_eq!(status.code(), Some(1), "{arguments:?}: {output}");
+            assert_eq!(
+                (files(home.path()), files(repository.path())),
+                before,
+                "{arguments:?}, answer {answer:?}: {output}"
+            );
+        }
+        let mut terminal = pty::Pty::spawn(home.path(), repository.path(), arguments);
+        terminal.wait_for_prompt();
+        terminal.answer(b"yes\n");
+        let (status, output) = terminal.finish();
+        assert!(status.success(), "{arguments:?}: {output}");
+        assert_ne!((files(home.path()), files(repository.path())), before);
+        match *arguments {
+            ["project", "create", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join(".mdmanager/sections/agents.md")).unwrap(),
+                    b"# Project\n"
+                );
+                assert!(repository.path().join(".mdmanager/project.toml").is_file());
+                assert!(!repository.path().join("AGENTS.md").exists());
+            }
+            ["project", "apply", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join("AGENTS.md")).unwrap(),
+                    b"# Project\n"
+                );
+            }
+            ["local", "disable", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
+                    b""
+                );
+                assert!(
+                    fs::read_to_string(&exclude)
+                        .unwrap()
+                        .contains("/AGENTS.override.md")
+                );
+            }
+            ["local", "restore", ..] => {
+                assert!(!repository.path().join("AGENTS.override.md").exists());
+                assert_eq!(fs::read(&exclude).unwrap(), original_exclude);
+            }
+            ["local", "apply", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
+                    b"# Personal\n"
+                );
+                assert!(
+                    fs::read_to_string(&exclude)
+                        .unwrap()
+                        .contains("/AGENTS.override.md")
+                );
+                let status = mdmanager_in(home.path(), repository.path(), &["local", "status"]);
+                assert!(status.status.success(), "{status:?}");
+            }
+            ["apply", ..] => {
+                assert_eq!(
+                    fs::read(home.path().join(".mdmanager/backups/claude.bak")).unwrap(),
+                    b"older external\n"
+                );
+                assert_eq!(
+                    fs::read(home.path().join(".mdmanager/backups/claude.1.bak")).unwrap(),
+                    b"external\n"
+                );
+                assert!(mdmanager(home.path(), &["status"]).status.success());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+// A helper-level reviewed apply test misses a CLI that re-inspects after approval.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn terminal_apply_rejects_edits_after_review_but_accepts_edits_before_review() {
+    for project in [false, true] {
+        let home = setup();
+        let repository = TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repository.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (target, arguments) = if project {
+            fs::write(repository.path().join("AGENTS.md"), "# Original\n").unwrap();
+            let adopted = mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["project", "adopt", "agents", "--yes"],
+            );
+            assert!(adopted.status.success(), "{adopted:?}");
+            (
+                repository.path().join("AGENTS.md"),
+                vec!["project", "apply", "agents"],
+            )
+        } else {
+            assert!(
+                mdmanager(home.path(), &["apply", "default", "--yes"])
+                    .status
+                    .success()
+            );
+            (
+                home.path().join(".claude/CLAUDE.md"),
+                vec!["apply", "default"],
+            )
+        };
+        let expected = fs::read(&target).unwrap();
+        fs::write(&target, "edit before review\n").unwrap();
+        let before_prompt = (files(home.path()), files(repository.path()));
+        let mut terminal = pty::Pty::spawn(home.path(), repository.path(), &arguments);
+        terminal.wait_for_prompt();
+        assert_eq!(
+            (files(home.path()), files(repository.path())),
+            before_prompt
+        );
+        fs::write(&target, "edit during review\n").unwrap();
+        let after_edit = (files(home.path()), files(repository.path()));
+        terminal.answer(b"y\n");
+        let (status, output) = terminal.finish();
+        assert!(!status.success(), "{output}");
+        assert!(output.contains("changed after review"), "{output}");
+        assert_eq!((files(home.path()), files(repository.path())), after_edit);
+
+        // The same edit is acceptable when it is part of the displayed review.
+        let mut terminal = pty::Pty::spawn(home.path(), repository.path(), &arguments);
+        terminal.wait_for_prompt();
+        terminal.answer(b"y\n");
+        let (status, output) = terminal.finish();
+        assert!(status.success(), "{output}");
+        assert_eq!(fs::read(&target).unwrap(), expected);
+        if project {
+            assert!(!repository.path().join(".mdmanager/backups").exists());
+        } else {
+            assert_eq!(
+                fs::read(home.path().join(".mdmanager/backups/claude.bak")).unwrap(),
+                b"edit during review\n"
+            );
+            assert!(mdmanager(home.path(), &["status"]).status.success());
+        }
+    }
 }
