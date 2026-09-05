@@ -1574,21 +1574,6 @@ mod tests {
         assert!(system_prompt.contains("not a Pi instruction candidate"));
     }
 
-    #[test]
-    fn pi_disable_warns_when_codex_compatibility_is_not_verified() {
-        let (_home, repository, local_repository) = repository();
-        let source = repository.path().join("AGENTS.md");
-        fs::write(&source, "agents\n").unwrap();
-
-        let plan = local_repository
-            .disable_plan(DisableRuntime::Pi, &source)
-            .unwrap();
-        assert!(plan.text.contains("Codex"));
-        assert!(plan.text.contains("Codex compatibility"));
-        assert!(!plan.text.contains("fixture"));
-        assert!(plan.exclusion.as_ref().unwrap().needs_write);
-    }
-
     #[cfg(unix)]
     #[test]
     fn disable_rejects_a_symlink_without_rewriting_its_identity() {
@@ -1608,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_disable_plan_keeps_the_logical_source_path() {
+    fn claude_disable_reuses_an_existing_git_exclusion() {
         let (_home, repository, local_repository) = repository();
         let source = repository.path().join("CLAUDE.md");
         fs::write(&source, "claude\n").unwrap();

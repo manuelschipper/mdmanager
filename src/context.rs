@@ -1476,20 +1476,30 @@ mod tests {
         .unwrap();
         assert_eq!(codex_settings(&temp.path().join(".codex")).max_bytes, 5);
         fs::write(root.join("AGENTS.override.md"), "").unwrap();
-        fs::write(root.join("AGENTS.md"), "123456789").unwrap();
+        fs::write(root.join("AGENTS.md"), "123").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "456789").unwrap();
+        fs::write(temp.path().join(".codex/AGENTS.md"), "user instructions").unwrap();
 
         let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
+        for path in [root.join("AGENTS.md"), temp.path().join(".codex/AGENTS.md")] {
+            assert!(
+                audit
+                    .sources
+                    .iter()
+                    .any(|source| source.path == path && source.state == SourceState::Startup)
+            );
+        }
         assert!(audit.sources.iter().any(|source| {
             source.path == root.join("AGENTS.override.md")
                 && matches!(source.state, SourceState::Empty)
         }));
         assert!(audit.sources.iter().any(|source| {
-            source.path == root.join("AGENTS.md")
+            source.path == cwd.join("AGENTS.md")
                 && matches!(
                     source.state,
                     SourceState::Truncated {
-                        included: 5,
-                        total: 9
+                        included: 2,
+                        total: 6
                     }
                 )
         }));

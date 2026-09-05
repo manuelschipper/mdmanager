@@ -21,6 +21,8 @@
   file types before mutation, serialize linked-worktree writers with an advisory lock,
   and report partial-write recovery guidance without claiming multi-file atomicity.
 
+- **Context refresh dependencies** — Refresh detects main-worktree Claude exclusion settings and additions, edits, and removals in linked Claude and Cursor rule directories, including deeply nested external rules.
+
 - **Reviewed Project writes** — Apply retains the displayed review and refuses changed
   targets or source paths before writing, including when using `--yes`.
 - **Local ownership safety** — Managed outputs reject resolving and dangling symlinks.
