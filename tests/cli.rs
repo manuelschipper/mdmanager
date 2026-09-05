@@ -170,7 +170,11 @@ fn init_rejects_unknown_and_duplicate_global_targets_before_writing() {
     let unknown_home = TempDir::new().unwrap();
     let unknown = mdmanager(unknown_home.path(), &["init", "other"]);
     assert!(!unknown.status.success());
-    assert!(String::from_utf8(unknown.stderr).unwrap().contains("other"));
+    assert!(
+        String::from_utf8(unknown.stderr)
+            .unwrap()
+            .contains("target other")
+    );
     assert!(!unknown_home.path().join(".mdmanager").exists());
 
     let duplicate_home = TempDir::new().unwrap();
