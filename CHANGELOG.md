@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Context refresh dependencies** — Refresh detects main-worktree Claude exclusion settings and additions, edits, and removals in linked Claude rule directories, including deeply nested external rules.
+- **Context refresh dependencies** — Refresh detects main-worktree Claude exclusion settings and additions, edits, and removals in linked Claude and Cursor rule directories, including deeply nested external rules.
 
 - **Reviewed Project writes** — Apply retains the displayed review and refuses changed
   targets or source paths before writing, including when using `--yes`.
