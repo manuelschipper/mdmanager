@@ -134,6 +134,7 @@ impl CreatePlan {
 }
 
 #[derive(Clone, Debug)]
+/// Loaded Project manifest and Section contents; rendering uses these bytes until reloaded.
 pub(crate) struct Workspace {
     pub(crate) root: PathBuf,
     pub(crate) manifest_path: PathBuf,
@@ -277,6 +278,7 @@ impl Workspace {
         self.target_names().map(|id| self.inspect(id)).collect()
     }
 
+    /// Rechecks reviewed bytes, existence and source paths before replacing the root target.
     pub(crate) fn apply(&self, reviewed: &TargetView) -> Result<ProjectTargetStatus, String> {
         let current = Self::load(&self.manifest_path)?.inspect(&reviewed.id)?;
         if *reviewed != current {

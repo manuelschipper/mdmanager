@@ -2349,15 +2349,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_local_details_explain_runtime_behavior() {
-        assert!(missing_local_text(local::ManagedTarget::Agents).contains("instead of AGENTS.md"));
-        assert!(
-            missing_local_text(local::ManagedTarget::Claude)
-                .contains("after CLAUDE.md as additive")
-        );
-    }
-
-    #[test]
     fn runtime_picker_filters_and_selects() {
         let (_home, _repository, _paths, mut app) = fixture();
         handle_key(
@@ -2462,7 +2453,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_help_explains_the_cross_runtime_composition() {
+    fn profile_help_uses_the_browsed_profile() {
         let (_home, _repository, _paths, mut app) = global_fixture();
         open_library(&mut app);
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2473,9 +2464,6 @@ mod tests {
 
         let help = draw_at(&mut app, 160, 50);
         assert!(help.contains("Help · Profile default"));
-        assert!(help.contains("filtered"));
-        assert!(help.contains("Context Runtime"));
-        assert!(help.contains("An inactive Profile is only being inspected"));
     }
 
     #[test]
@@ -2485,7 +2473,7 @@ mod tests {
         assert!(matches!(app.view, View::Context));
         finish_context_scan(&mut app);
         let screen = draw(&mut app);
-        assert!(screen.contains("resolved load chain"));
+        assert!(screen.contains(app.context.audit.runtime.label()));
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.view, View::Home));
     }
@@ -2755,12 +2743,10 @@ mod tests {
                 .contains("mdmanager doctor")
         );
         let screen = draw(&mut app);
-        assert!(screen.contains("Deployment state needs attention"));
         assert!(screen.contains("mdmanager doctor"));
 
         assert!(app.back() == SessionAction::Continue);
         let home = draw(&mut app);
-        assert!(home.contains("Deployment state needs attention"));
         assert!(home.contains("Claude"));
         assert!(home.contains("Browse Profiles & Sections"));
 

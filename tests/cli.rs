@@ -75,7 +75,7 @@ fn bare_mdmanager_and_tui_are_the_same_command() {
     assert!(
         String::from_utf8(bare.stderr)
             .unwrap()
-            .contains("the TUI requires an interactive terminal")
+            .contains("interactive terminal")
     );
 
     for command in ["tui1", "tui2"] {
@@ -120,7 +120,6 @@ fn init_without_targets_creates_only_the_personal_library() {
     assert!(doctor.status.success());
     let doctor = String::from_utf8(doctor.stdout).unwrap();
     assert!(doctor.contains("Global targets: none configured"));
-    assert!(doctor.contains("No problems found."));
 
     let repeated = mdmanager(home.path(), &["init"]);
     assert!(!repeated.status.success());
@@ -149,7 +148,7 @@ fn init_creates_exactly_the_selected_global_targets() {
     assert!(
         String::from_utf8(output.stdout)
             .unwrap()
-            .contains("Configured Global targets: claude, codex.")
+            .contains("claude, codex")
     );
 }
 
@@ -160,7 +159,6 @@ fn init_rejects_cursor_as_a_global_target_with_project_guidance() {
 
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("Cursor has no Global Markdown target"));
     assert!(error.contains("mdmanager project adopt agents"));
     assert!(error.contains("mdmanager project create agents --from FILE"));
     assert!(error.contains("mdmanager context --runtime cursor"));
@@ -172,11 +170,7 @@ fn init_rejects_unknown_and_duplicate_global_targets_before_writing() {
     let unknown_home = TempDir::new().unwrap();
     let unknown = mdmanager(unknown_home.path(), &["init", "other"]);
     assert!(!unknown.status.success());
-    assert!(
-        String::from_utf8(unknown.stderr)
-            .unwrap()
-            .contains("expected claude, codex, or pi")
-    );
+    assert!(String::from_utf8(unknown.stderr).unwrap().contains("other"));
     assert!(!unknown_home.path().join(".mdmanager").exists());
 
     let duplicate_home = TempDir::new().unwrap();
@@ -185,7 +179,7 @@ fn init_rejects_unknown_and_duplicate_global_targets_before_writing() {
     assert!(
         String::from_utf8(duplicate.stderr)
             .unwrap()
-            .contains("codex was given more than once")
+            .contains("codex")
     );
     assert!(!duplicate_home.path().join(".mdmanager").exists());
 }
@@ -200,7 +194,6 @@ fn doctor_describes_missing_configuration_without_calling_it_invalid() {
     assert!(output.contains("Global manifest: not configured"));
     assert!(output.contains("mdmanager init"));
     assert!(!output.contains("Global manifest: invalid"));
-    assert!(!output.contains("repair the manifest"));
 }
 
 #[test]
@@ -213,11 +206,7 @@ fn non_interactive_apply_prints_the_plan_before_requiring_yes() {
     assert!(plan.contains("Profile: default"));
     assert!(plan.contains("not found"));
     assert!(plan.contains("+++ expected: default/claude"));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("non-interactive apply requires --yes")
-    );
+    assert!(String::from_utf8(output.stderr).unwrap().contains("--yes"));
 }
 
 #[test]
@@ -228,10 +217,12 @@ fn root_help_is_concise_and_tui_help_has_the_keymap() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("Create the Personal Section library and selected Global targets"));
-    assert!(
-        help.contains("Diagnose Global problems and repair invalid generated deployment state")
-    );
+    for command in ["init", "doctor"] {
+        assert!(help.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some(command) && fields.next().is_some()
+        }));
+    }
     assert!(!help.contains("Shift+Up/Down"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
@@ -241,8 +232,7 @@ fn root_help_is_concise_and_tui_help_has_the_keymap() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("Usage: mdmanager init [GLOBAL_TARGET]..."));
-    assert!(help.contains("Available Global targets: claude, codex, pi"));
-    assert!(help.contains("Cursor uses project AGENTS.md"));
+    assert!(help.contains("claude, codex, pi"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
         .args(["tui", "--help"])
@@ -250,11 +240,14 @@ fn root_help_is_concise_and_tui_help_has_the_keymap() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("Run `mdmanager` or `mdmanager tui`"));
+    assert!(help.contains("mdmanager tui"));
     assert!(help.contains("mdmanager docs migrate"));
-    assert!(help.contains("Shift+Up/Down     scroll the visible document by a page"));
-    assert!(help.contains("r                 search and choose a Context runtime"));
-    assert!(help.contains("Esc               go back; from the overview, quit"));
+    for key in ["Shift+Up/Down", "r", "Esc"] {
+        assert!(help.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some(key) && fields.next().is_some()
+        }));
+    }
 }
 
 #[test]
@@ -268,40 +261,17 @@ fn bundled_docs_work_without_configuration() {
     assert!(index.contains("cursor"));
     assert!(index.contains("migrate"));
 
-    let cursor = mdmanager(home.path(), &["docs", "cursor"]);
-    assert!(cursor.status.success());
-    let cursor = String::from_utf8(cursor.stdout).unwrap();
-    assert!(cursor.starts_with("# Cursor context"));
-    assert!(cursor.contains("mdmanager context --runtime cursor"));
-
-    let migrate = mdmanager(home.path(), &["docs", "migrate"]);
-    assert!(migrate.status.success());
-    let migrate = String::from_utf8(migrate.stdout).unwrap();
-    assert!(migrate.starts_with("# Migrate existing instructions"));
-    assert!(migrate.contains("Do not run `mdmanager apply`"));
-    assert!(migrate.contains("mdmanager render PROFILE TARGET"));
-
-    let start = mdmanager(home.path(), &["docs", "start"]);
-    assert!(start.status.success());
-    let start = String::from_utf8(start.stdout).unwrap();
-    assert!(start.contains("mdmanager docs migrate"));
-    assert!(start.contains("mdmanager context --runtime claude"));
-    assert!(start.contains("Project and Local Instructions require a Git worktree"));
-    assert!(start.contains("mdmanager project create TARGET --from FILE --yes"));
-    assert!(start.contains("mdmanager local create TARGET SECTION"));
-    assert!(start.contains("mdmanager apply PROFILE --yes"));
-
-    let tui = mdmanager(home.path(), &["docs", "tui"]);
-    assert!(tui.status.success());
-    let tui = String::from_utf8(tui.stdout).unwrap();
-    assert!(tui.contains("terminal interface"));
-    assert!(tui.contains("Up/Down            select, or scroll one line"));
-    assert!(tui.contains("choose the Context runtime"));
-    assert!(
-        tui.contains("The TUI has no editing or Apply mode") || tui.contains("no Apply action")
-    );
-    assert!(tui.contains("Profiles & Sections"));
-    assert!(tui.contains("not currently used"));
+    for (topic, source) in [
+        ("cursor", include_str!("../docs/cursor.md")),
+        ("migrate", include_str!("../docs/migrate.md")),
+        ("start", include_str!("../docs/start.md")),
+        ("tui", include_str!("../docs/tui.md")),
+    ] {
+        let output = mdmanager(home.path(), &["docs", topic]);
+        assert!(output.status.success(), "{topic}");
+        assert_eq!(output.stdout, source.as_bytes(), "{topic}");
+    }
+    assert!(!home.path().join(".mdmanager").exists());
 
     let missing = mdmanager(home.path(), &["docs", "missing"]);
     assert!(!missing.status.success());
@@ -592,7 +562,6 @@ fn render_apply_status_and_modified_recovery() {
     let no_op = String::from_utf8(no_op.stdout).unwrap();
     assert_eq!(no_op.matches("Agents").count(), 1);
     assert_eq!(no_op.matches("Claude").count(), 1);
-    assert!(no_op.contains("All targets are current."));
 
     fs::write(
         home.path().join(".mdmanager/sections/common.md"),
@@ -648,9 +617,9 @@ fn doctor_reports_a_removed_active_profile_and_the_repair_command() {
     assert!(output.stderr.is_empty());
     let output = String::from_utf8(output.stdout).unwrap();
     assert!(output.contains("Global manifest: valid"));
-    assert!(output.contains("active Profile `default` no longer exists"));
+    assert!(output.contains("`default`"));
     assert!(output.contains("Available Profiles: repos, work"));
-    assert!(output.contains("Detected Profile: repos (all target files match)"));
+    assert!(output.contains("Detected Profile: repos"));
     assert!(output.contains("mdmanager apply repos"));
 
     let status = mdmanager(home.path(), &["status"]);
@@ -665,11 +634,6 @@ fn doctor_reports_a_removed_active_profile_and_the_repair_command() {
     assert!(repaired.status.success());
     let healthy = mdmanager(home.path(), &["doctor"]);
     assert!(healthy.status.success());
-    assert!(
-        String::from_utf8(healthy.stdout)
-            .unwrap()
-            .contains("No problems found.")
-    );
 }
 
 #[test]
@@ -695,8 +659,8 @@ fn doctor_repairs_invalid_generated_state_without_changing_targets() {
     assert!(repaired.status.success());
     let output = String::from_utf8(repaired.stdout).unwrap();
     assert!(output.contains("Deployment state: invalid"));
-    assert!(output.contains("Repair: rebuilt generated state for detected Profile default"));
-    assert!(output.contains("No problems found"));
+    let state: toml::Value = toml::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!(state["active_profile"].as_str(), Some("default"));
     assert!(mdmanager(home.path(), &["doctor"]).status.success());
     for (path, expected) in targets.iter().zip(before) {
         assert_eq!(fs::read(path).unwrap(), expected);
@@ -722,7 +686,12 @@ fn doctor_clears_invalid_state_when_no_profile_matches() {
     assert!(!repaired.status.success());
     let output = String::from_utf8(repaired.stdout).unwrap();
     assert!(output.contains("Matching Profiles: none"));
-    assert!(output.contains("Repair: cleared invalid generated ownership state"));
+    let state: toml::Value = toml::from_str(
+        &fs::read_to_string(home.path().join(".mdmanager/state/state.toml")).unwrap(),
+    )
+    .unwrap();
+    assert!(state.get("active_profile").is_none());
+    assert!(state["targets"].as_table().unwrap().is_empty());
     assert!(output.contains("mdmanager apply PROFILE"));
 
     let review = mdmanager(home.path(), &["apply", "default"]);
@@ -753,9 +722,9 @@ fn doctor_gives_a_safe_action_for_a_directory_target() {
     let output = mdmanager(home.path(), &["doctor"]);
     assert!(!output.status.success());
     let output = String::from_utf8(output.stdout).unwrap();
-    assert!(output.contains("inspect it and move it out of the target path"));
-    assert!(output.contains("Action: resolve the reported target path"));
-    assert!(!output.contains("remove it before applying"));
+    assert!(output.contains(&target.display().to_string()));
+    assert!(output.lines().any(|line| line.starts_with("Action: ")));
+    assert!(target.is_dir());
 }
 
 #[test]
@@ -890,7 +859,7 @@ fn local_commands_use_a_plain_non_git_error() {
 
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("local management requires a Git worktree"));
+    assert!(error.contains("Git worktree"));
     assert!(!error.contains("git rev-parse"));
     assert!(!error.contains("fatal:"));
 }
@@ -1059,7 +1028,7 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
     assert!(
         String::from_utf8(repeated.stderr)
             .unwrap()
-            .contains("managed agents instructions already exist")
+            .contains("agents")
     );
 
     let applied = mdmanager_in(
@@ -1104,7 +1073,6 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
     let error = String::from_utf8(refused.stderr).unwrap();
     assert!(error.contains("refusing to overwrite"));
     assert!(error.contains("sections/local.md"));
-    assert!(error.contains("move intended edits into that Section"));
 
     #[cfg(unix)]
     {

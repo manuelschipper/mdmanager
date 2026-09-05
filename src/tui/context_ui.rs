@@ -11,6 +11,7 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 
 #[derive(Debug)]
+/// Scan completion belongs to the current receiver; unreadable descendants remain explicit.
 pub(crate) enum ContextScanStatus {
     NotApplicable,
     NotStarted,
@@ -19,6 +20,7 @@ pub(crate) enum ContextScanStatus {
     Failed,
 }
 
+/// Owns the runtime and scan receiver; replacing the receiver invalidates older worker results.
 pub(crate) struct ContextUi {
     pub(crate) paths: crate::config::Paths,
     pub(crate) audit: Audit,

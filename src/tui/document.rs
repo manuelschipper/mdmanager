@@ -563,7 +563,7 @@ mod tests {
             .enumerate()
             .find(|(_, line)| line.contains("# Existing"))
             .unwrap();
-        assert!(line.contains("  1 │ # Existing"));
+        assert_eq!(line.split('│').nth(1).unwrap().trim(), "1");
         let number = UnicodeWidthStr::width(&line[..line.find('1').unwrap()]);
         let content = UnicodeWidthStr::width(&line[..line.find("# Existing").unwrap()]);
         assert!(content < 12, "{line:?}");
@@ -614,7 +614,12 @@ mod tests {
 
         assert!(app.document.scroll > 0);
         assert!(matches!(app.document.highlighted_line, Some((80, _))));
-        assert!(draw_at(&mut app, 80, 24).contains(" 80 │ line 80"));
+        let screen = draw_at(&mut app, 80, 24);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("line 80"))
+            .unwrap();
+        assert_eq!(row.split('│').nth(1).unwrap().trim(), "80");
     }
 
     #[test]

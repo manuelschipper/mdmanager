@@ -580,7 +580,7 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.view, View::SectionDocument { .. }));
         let screen = draw(&mut app);
-        assert!(screen.contains("Project Section · committed with this repository"));
+        assert!(screen.contains(".mdmanager/sections/draft.md"));
         assert!(screen.contains("Used by: not currently used"));
     }
 

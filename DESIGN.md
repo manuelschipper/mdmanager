@@ -10,9 +10,10 @@ The interfaces have separate responsibilities:
 
 - Coding agents interpret intent and edit Markdown or manifests.
 - The CLI performs every create, adopt, validate, render, apply, disable, and restore operation.
-- The TUI is a read-only browser and verifier that reloads after disk changes.
+- The TUI browses and verifies instructions read-only, reloads after disk changes, and saves UI theme preferences.
 
-The TUI never stages composition changes and has no editing, save, confirmation, or Apply state.
+The TUI never stages composition changes or applies instructions. Its theme picker previews,
+saves on Enter, and restores the previous palette on Esc; see [TUI themes](docs/tui.md#theme-picker).
 
 ### Managed
 
@@ -144,7 +145,7 @@ remain full-width.
 
 Help is contextual instead: it opens as a modal centered on the current page's occupied canvas and
 clamped to the terminal. The whole page beneath it is muted, including its selection, while the
-modal uses the normal cyan focus color. Help explains what the visible page means, how to read it,
+modal uses the selected theme’s focus color. Help explains what the visible page means, how to read it,
 and the agent-driven change workflow; it does not duplicate the navigation reference already
 present in the footer.
 
@@ -174,7 +175,8 @@ nested sources have no sequence number. Reasons use plain language and name the 
 candidate where known.
 
 Below 100 columns, Context stacks the preview below the chain when the page body has at least
-30 rows; shorter bodies show only the chain. Enter opens the source full-screen in every layout. Claude
+30 rows; shorter bodies show only the chain. An empty source list has no preview. Enter opens
+the source full-screen in every layout. Claude
 descendant scanning has no entry cap. It skips **.git** and non-rule symlinked directories; symlinked
 Claude rule files and directories are followed. Cursor Context resolves `AGENTS.md` plus
 `.cursor/rules/**/*.mdc` from the nearest Git root through the launch directory; it does not scan
@@ -254,7 +256,7 @@ and owns view history and dispatch. Its child modules live beside it:
 
 Page inputs borrow accepted observations and configuration and receive only their cursor and
 document state for mutation. Pages do not borrow App or call another page's private helpers.
-Rendering and document navigation perform no filesystem observation. Context workers return
+Instruction rendering and document navigation perform no filesystem observation. Context workers return
 scan results through the session-owned receiver and never access the rendering palette.
 Behavioral tests live with their domain owners; App retains cross-page navigation, refresh,
 theme, and intro integration tests.
@@ -267,6 +269,7 @@ Shift+Up/Down      scroll the visible document by a page
 Enter              inspect
 Esc                back; quit only from Home
 r                  search and choose a Context runtime
+t                  search, preview, and save themes
 Left/Right         previous/next Context runtime
 /                  search an open document
 g                  go to a source line

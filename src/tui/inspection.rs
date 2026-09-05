@@ -49,6 +49,7 @@ impl InstructionStatus {
     }
 }
 
+/// Content and link identity observed together; paths are never reread while rendering.
 pub(super) struct FileObservation {
     content: Result<String, String>,
     pub(super) symlink: Option<SymlinkInfo>,
@@ -56,6 +57,7 @@ pub(super) struct FileObservation {
     pub(super) regular: bool,
 }
 
+/// Accepted instruction snapshot for rendering and navigation; only refresh observes disk.
 pub(super) struct InstructionInspection {
     pub(super) context: Audit,
     pub(super) home_items: Vec<HomeItem>,

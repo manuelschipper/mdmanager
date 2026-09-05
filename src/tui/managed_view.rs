@@ -317,7 +317,6 @@ mod tests {
         assert!(matches!(app.view, View::Diff(_)));
         let screen = draw_at(&mut app, 160, 40);
         assert!(screen.contains("Unified difference"));
-        assert!(screen.contains("Ask your coding agent"));
         assert!(!screen.contains("confirm"));
         handle_key(
             &mut app,

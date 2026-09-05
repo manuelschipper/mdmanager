@@ -237,6 +237,7 @@ struct OwnedExclusion {
 }
 
 #[derive(Clone, Debug)]
+/// Restore removes a settings container we created, or restores the original bytes when unchanged.
 enum ClaudeRecovery {
     Created,
     Existing(String),
@@ -293,6 +294,7 @@ impl RawOwned {
     }
 }
 
+// Validate recovery relationships at the serialized boundary so mutations receive coherent ownership.
 impl TryFrom<RawState> for State {
     type Error = String;
 
@@ -591,6 +593,7 @@ impl LocalRepository {
         Ok(source)
     }
 
+    /// Revalidates the reviewed output and Git exclusion before either is changed.
     pub(crate) fn apply_disable(&self, plan: &DisablePlan) -> Result<(), String> {
         let current = self.disable_plan(plan.runtime, &plan.source)?;
         if current.source != plan.source
@@ -666,6 +669,7 @@ impl LocalRepository {
         self.save_state(&state)
     }
 
+    /// Restores only owned disable data, preserving unrelated Claude settings edits.
     pub(crate) fn restore_disable(&self, runtime: DisableRuntime) -> Result<(), String> {
         let mut state = self.load_state()?;
         let state_key = self.disable_state_key(runtime);
