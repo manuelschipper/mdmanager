@@ -279,16 +279,50 @@ aside a:not([aria-current=page]) {
   max-width:820px;
   margin:auto
 }
-.demo-image {
+.demo {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 260px;
+  gap:20px;
+  align-items:start
+}
+.demo-video {
   display:block;
   width:100%;
-  max-height:calc(100vh - 220px);
   height:auto;
-  object-fit:contain;
-  margin:auto
+  border:1px solid var(--border)
 }
-html.light .demo-image.dark,html:not(.light) .demo-image.light {
-  display:none
+.steps {
+  list-style:none;
+  margin:0;
+  padding:0;
+  counter-reset:step
+}
+.steps li {
+  counter-increment:step;
+  border-left:2px solid var(--border);
+  margin:0 0 6px
+}
+.steps li.active {
+  border-left-color:var(--accent)
+}
+.steps button {
+  display:block;
+  width:100%;
+  text-align:left;
+  padding:4px 10px;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.5
+}
+.steps button:before {
+  content:counter(step) '. ';
+  color:var(--muted)
+}
+.steps li.active button {
+  color:var(--text)
+}
+.steps li.active button:before {
+  color:var(--accent)
 }
 .demo-panel {
   padding:20px
@@ -393,6 +427,9 @@ html.light .demo-image.dark,html:not(.light) .demo-image.light {
   .article pre {
     font-size:11px
   }
+  .demo {
+    grid-template-columns:1fr
+  }
   .doc-path {
     font-size:11px
   }
@@ -471,6 +508,7 @@ updateThemeButton();
 themeButton.addEventListener('click', () => {
   const light = document.documentElement.classList.toggle('light');
   updateThemeButton();
+  window.dispatchEvent(new Event('themechange'));
   try {
     localStorage.setItem('mdmanager-theme', light ? 'light' : 'dark');
   } catch {

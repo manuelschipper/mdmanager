@@ -3,6 +3,7 @@
 
 from html import escape
 from pathlib import Path
+import json
 import re
 import shutil
 import tomllib
@@ -153,7 +154,7 @@ def write_page(path, html):
 if OUT.exists():
     shutil.rmtree(OUT)
 shutil.copytree(HERE / "assets", OUT / "assets")
-for filename in ["workflow.gif", "workflow-light.gif", "context.png"]:
+for filename in ["workflow.mp4", "workflow-light.mp4", "context.png"]:
     shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
 (OUT / "assets/favicon.svg").write_text(
     mark.replace('class="mark"', 'color="#d79921"').replace('44 16 282 141', '34 -64 302 302')
@@ -197,13 +198,46 @@ DEMO_ALT = (
     "Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared "
     "Section, review the difference in CLAUDE.md and AGENTS.md, then apply it"
 )
+captions = json.loads((HERE / "demo/captions.json").read_text())
+steps = "".join(
+    f'<li data-start="{step["start"]}"><button type="button">{escape(step["text"])}</button></li>'
+    for step in captions
+)
 content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
   <h1>The workflow in one minute</h1>
-  <img class="demo-image dark" src="/assets/workflow.gif" alt="{DEMO_ALT}">
-  <img class="demo-image light" src="/assets/workflow-light.gif" alt="{DEMO_ALT}">
+  <div class="demo">
+    <video class="demo-video" autoplay muted loop playsinline controls
+      data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
+      aria-label="{escape(DEMO_ALT)}"></video>
+    <ol class="steps" aria-label="What the recording shows">{steps}</ol>
+  </div>
   <p>Recorded from a clean Docker installation with a scripted agent transcript; the CLI commands and TUI are real.</p>
-</main>'''
+</main>
+<script>
+const video = document.querySelector('.demo-video');
+const steps = [...document.querySelectorAll('.steps li')];
+function source() {{
+  const wanted = video.dataset[document.documentElement.classList.contains('light') ? 'light' : 'dark'];
+  if (video.getAttribute('src') === wanted) return;
+  const at = video.currentTime;
+  video.setAttribute('src', wanted);
+  video.currentTime = at;
+  video.play().catch(() => {{}});
+}}
+source();
+window.addEventListener('themechange', source);
+video.addEventListener('timeupdate', () => {{
+  let active = null;
+  for (const step of steps) if (video.currentTime >= Number(step.dataset.start)) active = step;
+  for (const step of steps) step.classList.toggle('active', step === active);
+}});
+for (const step of steps) step.querySelector('button').addEventListener('click', () => {{
+  video.currentTime = Number(step.dataset.start);
+  video.play().catch(() => {{}});
+}});
+</script>
+'''
 write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context, review a shared Section change, and apply it with mdmanager.", "/demo/", "", content))
 paths.append("/demo/")
 

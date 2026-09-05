@@ -126,7 +126,10 @@ Open `mdmanager` in your terminal to check the result. Browse the sources and re
 while the agent works; the TUI reloads automatically as files change.
 
 <p align="center">
-  <img src="assets/workflow.gif" alt="Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared Section, review the difference in CLAUDE.md and AGENTS.md, then apply it" width="960">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/workflow-light.gif">
+    <img src="assets/workflow.gif" alt="Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared Section, review the difference in CLAUDE.md and AGENTS.md, then apply it" width="960">
+  </picture>
 </p>
 
 When you're happy with the changes, ask the agent to apply them. You can also authorize it to apply

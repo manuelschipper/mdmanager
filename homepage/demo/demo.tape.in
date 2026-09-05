@@ -1,5 +1,5 @@
 # Rendered by record.sh for each theme; do not edit the generated demo.*.tape.
-Output workflow-@THEME@.gif
+Output workflow-@THEME@.mp4
 Set Shell bash
 Set FontFamily "DejaVu Sans Mono"
 Set FontSize 14
@@ -9,6 +9,7 @@ Set Padding 14
 Set Framerate 12
 Set Theme @THEME_JSON@
 Env MDMANAGER_THEME "@THEME@"
+Env CAPTIONS "/out/captions-@THEME@.tsv"
 Env COLUMNS "120"
 Env LINES "32"
 Hide

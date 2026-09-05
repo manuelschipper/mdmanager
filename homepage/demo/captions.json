@@ -1,0 +1,50 @@
+[
+ {
+  "start": 0.4,
+  "text": "Open mdmanager inside a repository."
+ },
+ {
+  "start": 5.0,
+  "text": "Home lists Context, Project, Local, Global and the Library."
+ },
+ {
+  "start": 8.6,
+  "text": "Context shows every file Claude loads, in order, and why."
+ },
+ {
+  "start": 12.6,
+  "text": "Rules that load only for matching paths are called out."
+ },
+ {
+  "start": 15.9,
+  "text": "Press \u2192 to compare runtimes. Codex loads a different chain."
+ },
+ {
+  "start": 20.9,
+  "text": "CLAUDE.md is built from Sections; one is shared with AGENTS.md."
+ },
+ {
+  "start": 24.8,
+  "text": "Ask your coding agent. It edits the Section through the CLI."
+ },
+ {
+  "start": 33.9,
+  "text": "The TUI reloads from disk while the agent works."
+ },
+ {
+  "start": 38.5,
+  "text": "Review the difference. Nothing has been applied yet."
+ },
+ {
+  "start": 43.9,
+  "text": "AGENTS.md gets the same line: both targets share the Section."
+ },
+ {
+  "start": 50.6,
+  "text": "Authorize Apply. The difference closes on its own."
+ },
+ {
+  "start": 54.1,
+  "text": "Every target is current. mdmanager.ai"
+ }
+]
