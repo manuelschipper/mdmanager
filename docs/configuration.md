@@ -70,20 +70,20 @@ Global requirements:
 - Target paths remain beneath home and end with `AGENTS.md` or `CLAUDE.md`.
 - Section IDs and expanded target paths are unique.
 - `[targets.*]` is the shared catalog. Each Profile names a non-empty subset of those Targets.
-  Each named list is non-empty and duplicate-free. Unknown Target keys fail. An empty Profile
-  fails.
+  Lists are non-empty and duplicate-free; unknown Target keys fail.
 
-Omitting a catalog Target from a Profile stops that Profile from deploying it and does not
-delete an existing file. Removing `[targets.pi]` from the catalog drops Pi fleet-wide.
+Omitted Targets stay untouched; removing a catalog Target drops it fleet-wide.
+The TUI edits only `[ui].theme`; agents edit compositions and use `render`, `status`, and Apply.
 
-The TUI writes only `[ui].theme`. A coding agent edits compositions, validates them with `render`
-and `status`, and applies them through the CLI.
+Apply owns regular files. Configure canonical paths; approve external symlink aliases
+separately. mdmanager only reports aliases. Configured symlinks are unmanaged or changed and
+require replacement review.
 
-A Global Target is a regular file owned by mdmanager after Apply. If multiple runtime paths should
-read exactly the same document, keep only the canonical path in `targets` and let a coding agent
-offer explicitly approved symlinks from the other paths. Those aliases are external: mdmanager
-reports them but does not create or maintain them. A configured Target found as a symlink is instead
-protected as an unmanaged or changed deployment and Apply replaces it only after replacement review.
+Apply saves ownership per target, sequentially. Failure keeps prior writes and active Profile;
+activation needs all writes and its final save. Fix the I/O error; retry `mdmanager apply PROFILE`.
+A failed state save may leave unowned/changed output, even with matching bytes. Review the diff
+and preserve edits, then approve replacement or use `mdmanager apply PROFILE --force`;
+protected output is backed up first. Never edit state to bypass ownership protection.
 
 ## Committed project composition
 
@@ -148,9 +148,51 @@ The `agents` composition renders `AGENTS.override.md`; `claude` renders `CLAUDE.
 The agent authors or selects a personal Section, then creates or adopts the Local composition. It can
 edit each ordered list to add Sections. Missing referenced Sections make the composition invalid.
 
-Generated ownership records live in `~/.mdmanager/state/`; recovery copies live in
-`~/.mdmanager/backups/`. Do not hand-edit them; `mdmanager doctor` repairs invalid generated state.
-Runtime configuration observed by Context remains outside these manifests.
+Do not hand-edit `~/.mdmanager/state/`. Global backups are in `~/.mdmanager/backups/`.
+Invalid `overlays.toml` blocks writes; use your valid copy or recover manually.
+Local has no backup or repair; `doctor` repairs Global only. Local writers in the same
+repository (including linked worktrees) serialize through `overlays.lock` beside
+`overlays.toml`. Waiting begins after review; the plan is checked again under the lock.
+Read-only inspection creates no lock. The lock coordinates mdmanager writers, not
+external editors, and does not make output, Git exclusion and state writes atomic.
+
+After a Local I/O failure, inspect the output, common Git `info/exclude`, and
+`overlays.toml` before retrying. Preserve copies of all three and stop other Local
+writers before manual recovery:
+
+- If only the exclusion was written and the output is unchanged, remove the I/O
+  obstruction, review a fresh plan, and retry. The existing exclusion is now treated as
+  user-owned and will remain after restore; remove that exact line manually only if it
+  is no longer needed by any worktree.
+- If the output was written but ownership was not saved, status reports an external
+  managed output or no owned disable. Apply/disable refuses to claim it on retry.
+  Preserve any subsequent user edits. Reconcile the output manually (remove only the
+  known empty Pi suppression, or remove only the selected logical source string from
+  Claude's `claudeMdExcludes`; retain all unrelated settings). For a managed output,
+  move it aside for comparison before reviewing a fresh Apply. Do not adopt a partial
+  output merely to bypass the refusal. A failed adoption can also leave `local.toml`
+  without ownership; preserve that composition and move the unowned output aside
+  before reviewing Apply.
+- If restore replaced or removed the output but exclusion/state persistence failed,
+  the recovery record remains. Status reports missing or modified suppression and
+  ordinary restore refuses. Do not recreate an output from stale recovery content over
+  user edits. Manually finish only the recorded suppression removal, retain exclusions
+  still needed by other worktrees, and remove only that operation's ownership entry
+  from `overlays.toml` after its output and exclusion effects are reconciled. Preserve
+  every unrelated entry. This is the exceptional manual state recovery path; there is
+  no automatic rollback or Local repair command.
+
+Restore validates recorded destinations and source ownership without requiring the source
+file or directory still to exist. Claude ownership is shared across the repository's
+worktrees and can be restored even after removing the originating linked worktree;
+its recorded source and original settings must reproduce the saved output hash.
+Pi and managed outputs belong to their recorded worktree. If deleting a Pi source
+directory also removed its override, status reports it missing and restore requires
+the manual state recovery above; it does not recreate the directory or output.
+Invalid destinations are
+refused, never rewritten. Claude settings must be an ordinary file: resolving and
+dangling symlinks are refused during review, Apply and restore.
+Context runtime settings remain outside these manifests.
 
 ## Sharing a personal Section
 

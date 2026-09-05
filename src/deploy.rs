@@ -6,7 +6,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 
-use crate::config::{GlobalConfig, atomic_write, sha256_hex};
+use crate::config::{
+    GlobalConfig, atomic_write, persist_atomic_create, prepare_atomic_create, sha256_hex,
+};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +67,8 @@ pub(crate) struct TargetView {
     pub(crate) expected: String,
     pub(crate) status: GlobalTargetStatus,
     pub(crate) diff: String,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
     fingerprint: Option<String>,
 }
 
@@ -196,7 +200,7 @@ fn inspect_target(
         Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
     };
 
-    let (status, old, fingerprint, symlink) = if let Some(metadata) = metadata {
+    let (status, old, fingerprint, symlink, matches_content) = if let Some(metadata) = metadata {
         if metadata.file_type().is_dir() {
             return Err(format!(
                 "target path {} is a directory; inspect it and move it out of the target path before applying",
@@ -253,9 +257,21 @@ fn inspect_target(
                 Some(_) => GlobalTargetStatus::Modified,
             }
         };
-        (status, old, Some(fingerprint), symlink)
+        (
+            status,
+            old,
+            Some(fingerprint),
+            symlink,
+            bytes == expected.as_bytes(),
+        )
     } else {
-        (GlobalTargetStatus::Missing, String::new(), None, None)
+        (
+            GlobalTargetStatus::Missing,
+            String::new(),
+            None,
+            None,
+            expected.is_empty(),
+        )
     };
 
     let old_label = if let Some((destination, dangling)) = symlink {
@@ -280,12 +296,14 @@ fn inspect_target(
             &format!("expected: {profile}/{target}"),
         )
     };
+    let difference = (!matches_content).then(|| diff.clone());
     Ok(TargetView {
         id: target.into(),
         path,
         expected,
         status,
         diff,
+        difference,
         fingerprint,
     })
 }
@@ -473,6 +491,8 @@ fn backup_target(global: &GlobalConfig, id: &str, path: &Path) -> Result<PathBuf
     let directory = global.paths.data_dir.join("backups");
     fs::create_dir_all(&directory)
         .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+    let mut temporary = prepare_atomic_create(&directory.join(format!("{id}.bak")), &bytes)
+        .map_err(|error| format!("cannot prepare backup in {}: {error}", directory.display()))?;
     for number in 0_u64.. {
         let name = if number == 0 {
             format!("{id}.bak")
@@ -480,14 +500,17 @@ fn backup_target(global: &GlobalConfig, id: &str, path: &Path) -> Result<PathBuf
             format!("{id}.{number}.bak")
         };
         let backup = directory.join(name);
-        match fs::symlink_metadata(&backup) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                atomic_write(&backup, &bytes)?;
-                return Ok(backup);
+        match persist_atomic_create(temporary, &backup) {
+            Ok(_) => return Ok(backup),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temporary = error.file;
             }
             Err(error) => {
-                return Err(format!("cannot inspect {}: {error}", backup.display()));
+                return Err(format!(
+                    "cannot create backup {}: {}",
+                    backup.display(),
+                    error.error
+                ));
             }
         }
     }
@@ -605,6 +628,51 @@ claude = ["common"]
         );
         assert!(paths.data_dir.join("backups/claude.bak").exists());
         assert!(paths.data_dir.join("backups/claude.1.bak").exists());
+    }
+
+    #[test]
+    fn interleaved_backup_reservations_preserve_both_snapshots() {
+        let (_temp, paths, global) = fixture();
+        let target = global.target_path("claude").unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "first snapshot").unwrap();
+        let first_slot = paths.data_dir.join("backups/claude.bak");
+        let second_global = global.clone();
+        let second_target = target.clone();
+        let slot = first_slot.clone();
+        let _hook = crate::config::write_hook::install(&first_slot, 0, move || {
+            fs::write(&second_target, "second snapshot")?;
+            assert_eq!(
+                backup_target(&second_global, "claude", &second_target).unwrap(),
+                slot
+            );
+            Ok(())
+        });
+        let first = backup_target(&global, "claude", &target).unwrap();
+        assert_eq!(first, paths.data_dir.join("backups/claude.1.bak"));
+        assert_eq!(fs::read(first_slot).unwrap(), b"second snapshot");
+        assert_eq!(fs::read(first).unwrap(), b"first snapshot");
+    }
+
+    #[test]
+    fn backup_failure_stops_replacement_without_retrying_another_slot() {
+        let (_temp, paths, global) = fixture();
+        let target = global.target_path("claude").unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "manual sentinel").unwrap();
+        let slot = paths.data_dir.join("backups/claude.bak");
+        let _hook = crate::config::write_hook::install(&slot, 0, || {
+            Err(std::io::Error::other("injected backup failure"))
+        });
+        assert!(
+            apply(&global, "default", None, true, true)
+                .unwrap_err()
+                .contains("injected")
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"manual sentinel");
+        assert!(!slot.exists());
+        assert!(!paths.data_dir.join("backups/claude.1.bak").exists());
+        assert!(!state_path(&global).exists());
     }
 
     #[test]
@@ -818,6 +886,124 @@ claude = ["common"]
         .unwrap();
         let global = GlobalConfig::load(&paths).unwrap();
         (temp, paths, global)
+    }
+
+    #[test]
+    fn partial_apply_reloads_durable_ownership_and_requires_protected_recovery() {
+        for previous_active in [false, true] {
+            for failure in ["later output", "first state", "later state", "activation"] {
+                let (_temp, paths, initial) = subset_fixture();
+                if previous_active {
+                    apply(&initial, "work", None, false, true).unwrap();
+                }
+                let before = load_state(&initial).unwrap();
+                let pi = initial.target_path("pi").unwrap();
+                let claude = initial.target_path("claude").unwrap();
+                let old_claude = fs::read(&claude).ok();
+                fs::write(
+                    paths.data_dir.join("sections/common.md"),
+                    "updated source\n",
+                )
+                .unwrap();
+                let global = GlobalConfig::load(&paths).unwrap();
+                let expected_pi = global.render("default", "pi").unwrap().into_bytes();
+                let expected_claude = global.render("default", "claude").unwrap().into_bytes();
+                let (path, skip) = match failure {
+                    "later output" => (claude.clone(), 0),
+                    "first state" => (state_path(&global), 0),
+                    "later state" => (state_path(&global), 1),
+                    "activation" => (state_path(&global), 2),
+                    _ => unreachable!(),
+                };
+                let hook = crate::config::write_hook::install(&path, skip, || {
+                    Err(std::io::Error::other("injected deployment failure"))
+                });
+                assert!(
+                    apply(&global, "default", None, false, true)
+                        .unwrap_err()
+                        .contains("injected")
+                );
+                drop(hook);
+                let fresh = GlobalConfig::load(&paths).unwrap();
+                let durable = load_state(&fresh).unwrap();
+                assert_eq!(durable.active_profile, before.active_profile);
+                assert_eq!(fs::read(&pi).unwrap(), expected_pi);
+                let wrote_claude = matches!(failure, "later state" | "activation");
+                assert_eq!(
+                    fs::read(&claude).ok(),
+                    if wrote_claude {
+                        Some(expected_claude.clone())
+                    } else {
+                        old_claude
+                    }
+                );
+                let mut expected_state = before;
+                if failure != "first state" {
+                    expected_state.targets.insert(
+                        "pi".into(),
+                        AppliedTarget {
+                            path: pi.display().to_string(),
+                            hash: sha256_hex(&expected_pi),
+                        },
+                    );
+                }
+                if failure == "activation" {
+                    expected_state.targets.insert(
+                        "claude".into(),
+                        AppliedTarget {
+                            path: claude.display().to_string(),
+                            hash: sha256_hex(&expected_claude),
+                        },
+                    );
+                }
+                assert_eq!(
+                    toml::to_string(&durable).unwrap(),
+                    toml::to_string(&expected_state).unwrap()
+                );
+                let durable_bytes = fs::read(state_path(&fresh)).ok();
+                let target_bytes = [fs::read(&pi).ok(), fs::read(&claude).ok()];
+                let retry = apply(&fresh, "default", None, false, true);
+                let needs_recovery =
+                    failure == "first state" || (failure == "later state" && !previous_active);
+                assert_eq!(
+                    retry.is_err(),
+                    needs_recovery,
+                    "{failure}, previous={previous_active}"
+                );
+                if needs_recovery {
+                    assert_eq!(fs::read(state_path(&fresh)).ok(), durable_bytes);
+                    assert_eq!([fs::read(&pi).ok(), fs::read(&claude).ok()], target_bytes);
+                    // A user edit after failure must also survive an ordinary retry.
+                    let unowned = if failure == "first state" {
+                        &pi
+                    } else {
+                        &claude
+                    };
+                    fs::write(unowned, "user recovery edit").unwrap();
+                    let fresh = GlobalConfig::load(&paths).unwrap();
+                    assert!(apply(&fresh, "default", None, false, true).is_err());
+                    assert_eq!(fs::read(unowned).unwrap(), b"user recovery edit");
+                    let reports = apply(&fresh, "default", None, true, true).unwrap();
+                    let backup = reports
+                        .iter()
+                        .find_map(|report| report.backup.as_ref())
+                        .unwrap();
+                    assert_eq!(fs::read(backup).unwrap(), b"user recovery edit");
+                }
+                let recovered = GlobalConfig::load(&paths).unwrap();
+                let state = load_state(&recovered).unwrap();
+                assert_eq!(state.active_profile.as_deref(), Some("default"));
+                assert_eq!(state.targets.len(), 2);
+                for (id, path, bytes) in [
+                    ("pi", &pi, &expected_pi),
+                    ("claude", &claude, &expected_claude),
+                ] {
+                    assert_eq!(fs::read(path).unwrap(), *bytes);
+                    assert_eq!(state.targets[id].path, path.display().to_string());
+                    assert_eq!(state.targets[id].hash, sha256_hex(bytes));
+                }
+            }
+        }
     }
 
     #[test]

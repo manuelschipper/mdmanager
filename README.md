@@ -3,12 +3,11 @@
 </p>
 
 <p align="center">
-  <strong>Know what your coding agent reads.</strong>
+  <strong>Manage your CLAUDE.md and AGENTS.md across machines and runtimes.</strong>
 </p>
 
 <p align="center">
-  Manage your <code>CLAUDE.md</code> and <code>AGENTS.md</code> files with reusable sections.<br>
-  Ask your coding agent to organize them, then review its changes in mdmanager.
+  Reuse Markdown sections and choose a profile for each setup.
 </p>
 
 <p align="center">

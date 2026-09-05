@@ -311,7 +311,7 @@ fn print_context(audit: &Audit, paths: &Paths) {
         "{} · {}\n{} · {relevant} load when relevant",
         audit.runtime.label(),
         audit.directory.display(),
-        audit.summary,
+        audit.formatted_summary(),
     );
     for group in [
         SourceGroup::Startup,
@@ -375,7 +375,7 @@ fn context_json(audit: &Audit, paths: &Paths) -> Result<String, String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "runtime": audit.runtime.id(),
         "directory": audit.directory,
-        "summary": audit.summary,
+        "summary": audit.formatted_summary(),
         "sources": sources,
     }))
     .map_err(|error| format!("cannot serialize Context: {error}"))
@@ -641,9 +641,13 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
             if targets.is_empty() {
                 return Err("project manifest declares no targets".into());
             }
+            let views = targets
+                .iter()
+                .map(|target| workspace.inspect(target))
+                .collect::<Result<Vec<_>, _>>()?;
             let mut changed = false;
-            for target in &targets {
-                let view = workspace.inspect(target)?;
+            for view in &views {
+                let target = &view.id;
                 println!(
                     "{:<12} {:<12} {}",
                     target_display_name(target),
@@ -664,8 +668,9 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
                 println!("Cancelled.");
                 return Ok(ExitCode::FAILURE);
             }
-            for target in &targets {
-                let previous = workspace.apply(target)?;
+            for view in &views {
+                let target = &view.id;
+                let previous = workspace.apply(view)?;
                 if previous != project::ProjectTargetStatus::Current {
                     println!(
                         "{}: applied (was {})",

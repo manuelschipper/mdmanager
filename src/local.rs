@@ -140,6 +140,16 @@ pub(crate) struct LocalRepository {
     pub(crate) state_path: PathBuf,
 }
 
+// Explicit unlock also releases the lock if a concurrently spawned Git process briefly
+// inherited the descriptor before exec. The stable lock file itself is never removed.
+struct LocalMutationLock(fs::File);
+
+impl Drop for LocalMutationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DisablePlan {
     pub(crate) runtime: DisableRuntime,
@@ -156,6 +166,8 @@ pub(crate) struct ManagedView {
     pub(crate) rendered: String,
     pub(crate) status: LocalTargetStatus,
     pub(crate) diff: String,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
     pub(crate) sections: Vec<LocalSection>,
     pub(crate) ordered: Vec<String>,
 }
@@ -195,7 +207,8 @@ struct LocalTarget {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct Owned {
+#[serde(deny_unknown_fields)]
+struct RawOwned {
     path: String,
     hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,11 +224,187 @@ struct Owned {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawState {
+    #[serde(default)]
+    disables: std::collections::BTreeMap<String, RawOwned>,
+    #[serde(default)]
+    managed: std::collections::BTreeMap<String, RawOwned>,
+}
+
+// Only validated ownership enters Local operations; RawState preserves overlays.toml's format.
+#[derive(Clone, Debug)]
+struct Owned {
+    path: String,
+    hash: String,
+    exclusion: Option<OwnedExclusion>,
+}
+
+#[derive(Clone, Debug)]
+struct OwnedExclusion {
+    path: String,
+    pattern: String,
+}
+
+#[derive(Clone, Debug)]
+enum ClaudeRecovery {
+    Created,
+    Existing(String),
+}
+
+#[derive(Clone, Debug)]
+enum DisableOwned {
+    Pi {
+        owned: Owned,
+        source: String,
+    },
+    Claude {
+        owned: Owned,
+        source: String,
+        recovery: ClaudeRecovery,
+    },
+}
+
+impl DisableOwned {
+    fn owned(&self) -> &Owned {
+        match self {
+            Self::Pi { owned, .. } | Self::Claude { owned, .. } => owned,
+        }
+    }
+
+    fn source(&self) -> &str {
+        match self {
+            Self::Pi { source, .. } | Self::Claude { source, .. } => source,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 struct State {
-    #[serde(default)]
-    disables: std::collections::BTreeMap<String, Owned>,
-    #[serde(default)]
+    disables: std::collections::BTreeMap<String, DisableOwned>,
     managed: std::collections::BTreeMap<String, Owned>,
+}
+
+impl RawOwned {
+    fn ownership(&self) -> Result<Owned, String> {
+        let exclusion = match (&self.exclusion_path, &self.exclusion_pattern) {
+            (Some(path), Some(pattern)) => Some(OwnedExclusion {
+                path: path.clone(),
+                pattern: pattern.clone(),
+            }),
+            (None, None) => None,
+            _ => return Err("overlay ownership requires both exclusion path and pattern".into()),
+        };
+        Ok(Owned {
+            path: self.path.clone(),
+            hash: self.hash.clone(),
+            exclusion,
+        })
+    }
+}
+
+impl TryFrom<RawState> for State {
+    type Error = String;
+
+    fn try_from(raw: RawState) -> Result<Self, String> {
+        let mut state = Self::default();
+        for (key, raw) in raw.managed {
+            if raw.disabled_source.is_some()
+                || raw.created_container
+                || raw.original_content.is_some()
+            {
+                return Err("managed overlay ownership contains disable recovery data".into());
+            }
+            state.managed.insert(key, raw.ownership()?);
+        }
+        for (key, raw) in raw.disables {
+            let owned = raw.ownership()?;
+            let source = raw
+                .disabled_source
+                .ok_or("overlay disable ownership requires its disabled source")?;
+            let disable = match key.split(':').next() {
+                Some("pi")
+                    if key.starts_with("pi:")
+                        && !raw.created_container
+                        && raw.original_content.is_none() =>
+                {
+                    DisableOwned::Pi { owned, source }
+                }
+                Some("claude") if key == "claude" => {
+                    let recovery = match (raw.created_container, raw.original_content) {
+                        (true, None) => ClaudeRecovery::Created,
+                        (false, Some(original)) => {
+                            claude_settings::parse_json_object(&original, Path::new(&owned.path))?;
+                            ClaudeRecovery::Existing(original)
+                        }
+                        _ => {
+                            return Err(
+                                "Claude overlay ownership has inconsistent settings recovery data"
+                                    .into(),
+                            );
+                        }
+                    };
+                    DisableOwned::Claude {
+                        owned,
+                        source,
+                        recovery,
+                    }
+                }
+                _ => return Err("invalid overlay disable ownership kind or recovery data".into()),
+            };
+            state.disables.insert(key, disable);
+        }
+        Ok(state)
+    }
+}
+
+impl From<&Owned> for RawOwned {
+    fn from(owned: &Owned) -> Self {
+        Self {
+            path: owned.path.clone(),
+            hash: owned.hash.clone(),
+            exclusion_path: owned
+                .exclusion
+                .as_ref()
+                .map(|exclusion| exclusion.path.clone()),
+            exclusion_pattern: owned
+                .exclusion
+                .as_ref()
+                .map(|exclusion| exclusion.pattern.clone()),
+            disabled_source: None,
+            created_container: false,
+            original_content: None,
+        }
+    }
+}
+
+impl From<&State> for RawState {
+    fn from(state: &State) -> Self {
+        Self {
+            managed: state
+                .managed
+                .iter()
+                .map(|(key, owned)| (key.clone(), owned.into()))
+                .collect(),
+            disables: state
+                .disables
+                .iter()
+                .map(|(key, disable)| {
+                    let mut raw = RawOwned::from(disable.owned());
+                    raw.disabled_source = Some(disable.source().into());
+                    if let DisableOwned::Claude { recovery, .. } = disable {
+                        match recovery {
+                            ClaudeRecovery::Created => raw.created_container = true,
+                            ClaudeRecovery::Existing(original) => {
+                                raw.original_content = Some(original.clone())
+                            }
+                        }
+                    }
+                    (key.clone(), raw)
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,6 +412,30 @@ struct Exclusion {
     path: PathBuf,
     pattern: String,
     needs_write: bool,
+}
+
+impl Exclusion {
+    fn owned(&self) -> Option<OwnedExclusion> {
+        self.needs_write.then(|| OwnedExclusion {
+            path: self.path.display().to_string(),
+            pattern: self.pattern.clone(),
+        })
+    }
+}
+
+fn validate_local_target(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "local target {} is not an ordinary file",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot inspect local target {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 impl LocalRepository {
@@ -256,6 +469,110 @@ impl LocalRepository {
                 .join("overlays.toml"),
             worktree_key,
         })
+    }
+
+    // A stable inode beside state serializes all Local read-modify-write operations.
+    // Dropping the handle releases the OS lock, including on failure or process exit.
+    fn lock_mutation(&self) -> Result<LocalMutationLock, String> {
+        let path = self.state_path.with_file_name("overlays.lock");
+        fs::create_dir_all(path.parent().unwrap())
+            .map_err(|error| format!("cannot create Local lock directory: {error}"))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| format!("cannot open Local lock {}: {error}", path.display()))?;
+        file.lock()
+            .map_err(|error| format!("cannot lock Local repository: {error}"))?;
+        let lock = LocalMutationLock(file);
+        #[cfg(test)]
+        local_commit_boundary("locked")?;
+        Ok(lock)
+    }
+
+    fn validate_owned_destination(
+        &self,
+        owned: &Owned,
+        worktree: &Path,
+        output: &Path,
+    ) -> Result<(), String> {
+        let relative = output
+            .strip_prefix(worktree)
+            .map_err(|_| "invalid Local ownership destination outside worktree".to_owned())?;
+        if Path::new(&owned.path) != output
+            || owned.exclusion.as_ref().is_some_and(|exclusion| {
+                Path::new(&exclusion.path) != self.common_git_dir.join("info/exclude")
+                    || exclusion.pattern != format!("/{}", relative.to_string_lossy())
+            })
+        {
+            return Err("invalid Local ownership destination; inspect overlays.toml and recover manually; stored paths will not be rewritten".into());
+        }
+        Ok(())
+    }
+
+    fn validate_disable_ownership(&self, disable: &DisableOwned) -> Result<(), String> {
+        let source = Path::new(disable.source());
+        if !source.is_absolute()
+            || source
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err("invalid Local ownership source scope".into());
+        }
+        let parent = source.parent().ok_or("invalid Local ownership source")?;
+        let filename = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let (worktree, output) = match disable {
+            DisableOwned::Pi { .. } => {
+                if !source.starts_with(&self.root)
+                    || filename == "AGENTS.override.md"
+                    || !PI_INSTRUCTION_CANDIDATES.contains(&filename)
+                {
+                    return Err("invalid Pi ownership source scope or filename".into());
+                }
+                (self.root.clone(), parent.join("AGENTS.override.md"))
+            }
+            DisableOwned::Claude { recovery, .. } => {
+                if !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md")
+                    || source
+                        .ancestors()
+                        .any(|ancestor| ancestor.ends_with(".claude/rules"))
+                {
+                    return Err("invalid Claude ownership source scope or filename".into());
+                }
+                if let ClaudeRecovery::Existing(original) = recovery
+                    && claude_settings::contains_exclusion(
+                        original,
+                        Path::new(&disable.owned().path),
+                        disable.source(),
+                    )?
+                {
+                    return Err(
+                        "invalid Claude ownership recovery: source was already excluded".into(),
+                    );
+                }
+                let root = crate::git_worktree::main_worktree(&self.root)?;
+                let output = root.join(".claude/settings.local.json");
+                // Creation validates the source's repository. Replay its exact logical
+                // source and recovery bytes to check that binding after a source directory
+                // or linked worktree disappears; recovery never accesses the source.
+                let original = match recovery {
+                    ClaudeRecovery::Created => "{}\n",
+                    ClaudeRecovery::Existing(original) => original,
+                };
+                let rendered =
+                    claude_settings::insert_exclusion(original, &output, disable.source())?;
+                if sha256_hex(rendered.as_bytes()) != disable.owned().hash {
+                    return Err("invalid Claude ownership source or recovery; inspect overlays.toml and recover manually".into());
+                }
+                (root, output)
+            }
+        };
+        self.validate_owned_destination(disable.owned(), &worktree, &output)
     }
 
     pub(crate) fn disable_plan(
@@ -295,12 +612,12 @@ impl LocalRepository {
         &self,
         runtime: DisableRuntime,
     ) -> Result<Option<PathBuf>, String> {
-        Ok(self
-            .load_state()?
-            .disables
-            .get(&self.disable_state_key(runtime))
-            .and_then(|owned| owned.disabled_source.as_deref())
-            .map(PathBuf::from))
+        let state = self.load_state()?;
+        let owned = state.disables.get(&self.disable_state_key(runtime));
+        if let Some(owned) = owned {
+            self.validate_disable_ownership(owned)?;
+        }
+        Ok(owned.map(|owned| PathBuf::from(owned.source())))
     }
 
     fn validate_disable_source(
@@ -378,10 +695,10 @@ impl LocalRepository {
                     let selected = selected
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|| "no candidate".into());
-                    return Err(format!(
+                    return Err(partial_recovery(format!(
                         "{} is not selected by Pi; {selected} takes priority",
                         source.display()
-                    ));
+                    )));
                 }
             }
         }
@@ -389,6 +706,7 @@ impl LocalRepository {
     }
 
     pub(crate) fn apply_disable(&self, plan: &DisablePlan) -> Result<(), String> {
+        let _lock = self.lock_mutation()?;
         let current = self.disable_plan(plan.runtime, &plan.source)?;
         if current.source != plan.source
             || current.output != plan.output
@@ -415,25 +733,18 @@ impl LocalRepository {
                 if let Some(exclusion) = &plan.exclusion {
                     apply_exclusion(exclusion, &self.root, &plan.output)?;
                 }
-                atomic_create(&plan.output, b"")?;
+                #[cfg(test)]
+                local_commit_boundary("disable-output").map_err(partial_recovery)?;
+                atomic_create(&plan.output, b"").map_err(partial_recovery)?;
                 state.disables.insert(
                     state_key.clone(),
-                    Owned {
-                        path: plan.output.display().to_string(),
-                        hash: sha256_hex(b""),
-                        disabled_source: Some(plan.source.display().to_string()),
-                        exclusion_path: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.path.display().to_string()),
-                        exclusion_pattern: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.pattern.clone()),
-                        created_container: false,
-                        original_content: None,
+                    DisableOwned::Pi {
+                        owned: Owned {
+                            path: plan.output.display().to_string(),
+                            hash: sha256_hex(b""),
+                            exclusion: plan.exclusion.as_ref().and_then(Exclusion::owned),
+                        },
+                        source: plan.source.display().to_string(),
                     },
                 );
             }
@@ -450,79 +761,91 @@ impl LocalRepository {
                 let created = plan.reviewed_output.is_none();
                 let source = plan.source.display().to_string();
                 let rendered = claude_settings::insert_exclusion(&old, &plan.output, &source)?;
-                atomic_write(&plan.output, rendered.as_bytes())?;
+                #[cfg(test)]
+                local_commit_boundary("disable-output").map_err(partial_recovery)?;
+                atomic_write(&plan.output, rendered.as_bytes()).map_err(partial_recovery)?;
                 state.disables.insert(
                     state_key,
-                    Owned {
-                        path: plan.output.display().to_string(),
-                        hash: sha256_hex(rendered.as_bytes()),
-                        disabled_source: Some(plan.source.display().to_string()),
-                        exclusion_path: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.path.display().to_string()),
-                        exclusion_pattern: plan
-                            .exclusion
-                            .as_ref()
-                            .filter(|exclusion| exclusion.needs_write)
-                            .map(|exclusion| exclusion.pattern.clone()),
-                        created_container: created,
-                        original_content: (!created).then_some(old),
+                    DisableOwned::Claude {
+                        owned: Owned {
+                            path: plan.output.display().to_string(),
+                            hash: sha256_hex(rendered.as_bytes()),
+                            exclusion: plan.exclusion.as_ref().and_then(Exclusion::owned),
+                        },
+                        source,
+                        recovery: if created {
+                            ClaudeRecovery::Created
+                        } else {
+                            ClaudeRecovery::Existing(old)
+                        },
                     },
                 );
             }
         }
-        self.save_state(&state)
+        self.save_state(&state).map_err(partial_recovery)
     }
 
     pub(crate) fn restore_disable(&self, runtime: DisableRuntime) -> Result<(), String> {
+        let _lock = self.lock_mutation()?;
         let mut state = self.load_state()?;
         let state_key = self.disable_state_key(runtime);
-        let owned = state
+        let disable = state
             .disables
             .get(&state_key)
-            .cloned()
             .ok_or_else(|| format!("no mdmanager.ai-owned {} disable", runtime.key()))?;
+        self.validate_disable_ownership(disable)?;
+        let owned = disable.owned();
         let path = PathBuf::from(&owned.path);
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("cannot read owned overlay {}: {error}", path.display()))?;
+        validate_local_target(&path)?;
+        let bytes = fs::read(&path).map_err(|error| {
+            partial_recovery(format!(
+                "cannot read owned overlay {}: {error}",
+                path.display()
+            ))
+        })?;
         let unchanged = sha256_hex(&bytes) == owned.hash;
-        match runtime {
-            DisableRuntime::Pi => {
+        let replacement = match disable {
+            DisableOwned::Pi { .. } => {
                 if !unchanged {
                     return Err(format!(
                         "{} changed after mdmanager.ai wrote it; refusing restore",
                         path.display()
                     ));
                 }
-                fs::remove_file(&path)
-                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-                remove_owned_exclusion(&owned)?;
+                None
             }
-            DisableRuntime::Claude => {
-                if unchanged && owned.created_container {
-                    fs::remove_file(&path)
-                        .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-                } else if unchanged {
-                    let original = owned.original_content.as_deref().ok_or_else(|| {
-                        "Claude ownership record does not contain the original settings".to_owned()
-                    })?;
-                    atomic_write(&path, original.as_bytes())?;
+            DisableOwned::Claude {
+                source, recovery, ..
+            } => {
+                if unchanged {
+                    match recovery {
+                        ClaudeRecovery::Created => None,
+                        ClaudeRecovery::Existing(original) => Some(original.clone()),
+                    }
                 } else {
-                    let source = String::from_utf8(bytes)
+                    let settings = String::from_utf8(bytes)
                         .map_err(|_| format!("{} is not UTF-8", path.display()))?;
-                    let disabled_source = owned.disabled_source.as_deref().ok_or_else(|| {
-                        "Claude ownership record does not contain its disabled source".to_owned()
-                    })?;
-                    let rendered = claude_settings::remove_exclusion(&source, disabled_source)?;
-                    atomic_write(&path, rendered.as_bytes())?;
+                    Some(
+                        claude_settings::remove_exclusion(&settings, source)
+                            .map_err(partial_recovery)?,
+                    )
                 }
-                remove_owned_exclusion(&owned)?;
             }
+        };
+        let exclusion_edit = owned_exclusion_removal(owned)?;
+        if let Some(replacement) = replacement {
+            atomic_write(&path, replacement.as_bytes())?;
+        } else {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        }
+        #[cfg(test)]
+        local_commit_boundary("restore-exclusion").map_err(partial_recovery)?;
+        if let Some((path, content)) = exclusion_edit {
+            atomic_write(&path, content.as_bytes()).map_err(partial_recovery)?;
         }
         state.disables.remove(&state_key);
-        self.save_state(&state)
+        self.save_state(&state).map_err(partial_recovery)
     }
 
     pub(crate) fn disable_status(&self, runtime: DisableRuntime) -> Result<DisableStatus, String> {
@@ -530,12 +853,13 @@ impl LocalRepository {
         let Some(owned) = state.disables.get(&self.disable_state_key(runtime)) else {
             return Ok(DisableStatus::None);
         };
+        self.validate_disable_ownership(owned)?;
+        validate_local_target(Path::new(&owned.owned().path))?;
+        let disabled_source = owned.source();
+        let owned = owned.owned();
         match fs::read(&owned.path) {
             Ok(bytes) if runtime == DisableRuntime::Claude => {
                 let active = String::from_utf8(bytes).ok().is_some_and(|source| {
-                    let Some(disabled_source) = owned.disabled_source.as_deref() else {
-                        return false;
-                    };
                     claude_settings::contains_exclusion(
                         &source,
                         Path::new(&owned.path),
@@ -563,7 +887,9 @@ impl LocalRepository {
         target: ManagedTarget,
         section: &str,
     ) -> Result<(), String> {
+        let _lock = self.lock_mutation()?;
         let output = self.root.join(target.filename());
+        validate_local_target(&output)?;
         if output.exists() {
             return Err(format!("refusing to overwrite {}", output.display()));
         }
@@ -572,7 +898,9 @@ impl LocalRepository {
     }
 
     pub(crate) fn adopt_managed(&self, target: ManagedTarget, section: &str) -> Result<(), String> {
+        let _lock = self.lock_mutation()?;
         let output = self.root.join(target.filename());
+        validate_local_target(&output)?;
         if !output.is_file() {
             return Err(format!("{} does not exist", output.display()));
         }
@@ -585,6 +913,10 @@ impl LocalRepository {
         section: &str,
         output: &Path,
     ) -> Result<(), String> {
+        let state = self.load_state()?;
+        if let Some(owned) = state.managed.get(&self.managed_state_key(target)) {
+            self.validate_owned_destination(owned, &self.root, output)?;
+        }
         let content = fs::read_to_string(output)
             .map_err(|error| format!("cannot read {}: {error}", output.display()))?;
         if content.is_empty() {
@@ -614,14 +946,10 @@ impl LocalRepository {
             Owned {
                 path: output.display().to_string(),
                 hash: sha256_hex(content.as_bytes()),
-                disabled_source: None,
-                exclusion_path: None,
-                exclusion_pattern: None,
-                created_container: false,
-                original_content: None,
+                exclusion: None,
             },
         );
-        self.save_state(&state)
+        self.save_state(&state).map_err(partial_recovery)
     }
 
     pub(crate) fn managed_exists(&self, target: ManagedTarget) -> bool {
@@ -675,14 +1003,18 @@ impl LocalRepository {
         let local_target = self.load_local_target(target)?;
         let rendered = self.render_managed(target)?;
         let path = self.root.join(target.filename());
+        validate_local_target(&path)?;
+        let state = self.load_state()?;
+        let managed_key = self.managed_state_key(target);
+        let owned = state.managed.get(&managed_key);
+        if let Some(owned) = owned {
+            self.validate_owned_destination(owned, &self.root, &path)?;
+        }
         let deployed = match fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
         };
-        let state = self.load_state()?;
-        let managed_key = self.managed_state_key(target);
-        let owned = state.managed.get(&managed_key);
         let status = if !path.exists() {
             LocalTargetStatus::Missing
         } else if let Some(owned) = owned {
@@ -707,6 +1039,7 @@ impl LocalRepository {
                 "rendered local instructions",
             )
         };
+        let difference = (deployed != rendered).then(|| diff.clone());
         let library = GlobalConfig::load(&self.paths)?;
         let sections = local_target
             .sections
@@ -726,6 +1059,7 @@ impl LocalRepository {
             rendered,
             status,
             diff,
+            difference,
             sections,
             ordered: local_target.sections,
         })
@@ -748,6 +1082,7 @@ impl LocalRepository {
     }
 
     pub(crate) fn apply_managed(&self, plan: &ManagedPlan) -> Result<LocalTargetStatus, String> {
+        let _lock = self.lock_mutation()?;
         let current = self.managed_plan(plan.target)?;
         if current != *plan {
             return Err(
@@ -763,34 +1098,35 @@ impl LocalRepository {
             view.status,
             LocalTargetStatus::External | LocalTargetStatus::Modified
         ) {
-            return Err(format!(
+            return Err(partial_recovery(format!(
                 "{} is {}; refusing to overwrite it",
                 view.path.display(),
                 view.status.label()
-            ));
+            )));
         }
+        let mut state = self.load_state()?;
         if exclusion.needs_write {
             apply_exclusion(&exclusion, &self.root, &view.path)?;
         }
+        #[cfg(test)]
+        local_commit_boundary("managed-output").map_err(partial_recovery)?;
         if view.status != LocalTargetStatus::Current {
-            atomic_write(&view.path, view.rendered.as_bytes())?;
+            atomic_write(&view.path, view.rendered.as_bytes()).map_err(partial_recovery)?;
         }
-        let mut state = self.load_state()?;
         state.managed.insert(
             self.managed_state_key(target),
             Owned {
                 path: view.path.display().to_string(),
                 hash: sha256_hex(view.rendered.as_bytes()),
-                disabled_source: None,
-                exclusion_path: exclusion
-                    .needs_write
-                    .then(|| exclusion.path.display().to_string()),
-                exclusion_pattern: exclusion.needs_write.then_some(exclusion.pattern),
-                created_container: false,
-                original_content: None,
+                exclusion: exclusion.owned().or_else(|| {
+                    state
+                        .managed
+                        .get(&self.managed_state_key(target))
+                        .and_then(|owned| owned.exclusion.clone())
+                }),
             },
         );
-        self.save_state(&state)?;
+        self.save_state(&state).map_err(partial_recovery)?;
         Ok(view.status)
     }
 
@@ -815,8 +1151,12 @@ impl LocalRepository {
             .parent()
             .ok_or_else(|| "source has no parent directory".to_owned())?;
         let output = directory.join("AGENTS.override.md");
+        validate_local_target(&output)?;
         if output.exists() {
-            return Err(format!("refusing to overwrite {}", output.display()));
+            return Err(partial_recovery(format!(
+                "refusing to overwrite {}",
+                output.display()
+            )));
         }
         ensure_untracked(&self.root, &output)?;
         let exclusion = self.exclusion_for(&self.root, &output)?;
@@ -845,6 +1185,7 @@ impl LocalRepository {
     fn claude_disable_plan(&self, source: PathBuf) -> Result<DisablePlan, String> {
         let settings_worktree = crate::git_worktree::main_worktree(&self.root)?;
         let output = settings_worktree.join(".claude/settings.local.json");
+        validate_local_target(&output)?;
         ensure_untracked(&settings_worktree, &output)?;
         let exclusion = self.exclusion_for(&settings_worktree, &output)?;
         let reviewed_output = match fs::read_to_string(&output) {
@@ -859,7 +1200,9 @@ impl LocalRepository {
                 source.to_string_lossy().as_ref(),
             )?
         {
-            return Err("the selected Claude source is already excluded".into());
+            return Err(partial_recovery(
+                "the selected Claude source is already excluded".into(),
+            ));
         }
         let exclusion_text = exclusion.needs_write.then(|| {
             format!(
@@ -964,6 +1307,10 @@ impl LocalRepository {
     }
 
     fn create_local_target(&self, target: ManagedTarget, section: &str) -> Result<(), String> {
+        let state = self.load_state()?;
+        if let Some(owned) = state.managed.get(&self.managed_state_key(target)) {
+            self.validate_owned_destination(owned, &self.root, &self.root.join(target.filename()))?;
+        }
         let path = self.local_manifest_path();
         let exists = path.is_file();
         let mut manifest = if exists {
@@ -997,7 +1344,9 @@ impl LocalRepository {
 
     fn load_state(&self) -> Result<State, String> {
         match fs::read_to_string(&self.state_path) {
-            Ok(source) => toml::from_str(&source)
+            Ok(source) => toml::from_str::<RawState>(&source)
+                .map_err(|error| error.to_string())
+                .and_then(State::try_from)
                 .map_err(|error| format!("invalid {}: {error}", self.state_path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(error) => Err(format!(
@@ -1008,10 +1357,34 @@ impl LocalRepository {
     }
 
     fn save_state(&self, state: &State) -> Result<(), String> {
-        let source = toml::to_string_pretty(state)
+        #[cfg(test)]
+        local_commit_boundary("state")?;
+        let source = toml::to_string_pretty(&RawState::from(state))
             .map_err(|error| format!("cannot serialize overlay state: {error}"))?;
         atomic_write(&self.state_path, source.as_bytes())
     }
+}
+
+fn partial_recovery(error: String) -> String {
+    format!(
+        "{error}; Local writes may be partial: inspect output, info/exclude and overlays.toml before retrying; see docs/configuration.md for manual recovery"
+    )
+}
+
+#[cfg(test)]
+type LocalCommitHook = Box<dyn FnMut(&str) -> Result<(), String>>;
+
+#[cfg(test)]
+thread_local! {
+    static LOCAL_COMMIT_HOOK: std::cell::RefCell<Option<LocalCommitHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn local_commit_boundary(stage: &str) -> Result<(), String> {
+    LOCAL_COMMIT_HOOK.with_borrow_mut(|hook| match hook {
+        Some(hook) => hook(stage),
+        None => Ok(()),
+    })
 }
 
 fn codex_version() -> Result<String, String> {
@@ -1107,30 +1480,26 @@ fn apply_exclusion(exclusion: &Exclusion, worktree: &Path, output: &Path) -> Res
     Ok(())
 }
 
-fn remove_owned_exclusion(owned: &Owned) -> Result<(), String> {
-    let (Some(path), Some(pattern)) = (&owned.exclusion_path, &owned.exclusion_pattern) else {
-        return Ok(());
+fn owned_exclusion_removal(owned: &Owned) -> Result<Option<(PathBuf, String)>, String> {
+    let Some(OwnedExclusion { path, pattern }) = &owned.exclusion else {
+        return Ok(None);
     };
     let path = PathBuf::from(path);
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let mut removed = false;
-    let mut output = source
-        .lines()
+    let output = source
+        .split_inclusive('\n')
         .filter(|line| {
-            if !removed && *line == pattern {
+            if !removed && line.trim_end_matches(['\r', '\n']) == pattern {
                 removed = true;
                 false
             } else {
                 true
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    atomic_write(&path, output.as_bytes())
+        .collect::<String>();
+    Ok(Some((path, output)))
 }
 
 fn git_status(directory: &Path, arguments: &[&str]) -> Result<bool, String> {
@@ -1205,21 +1574,6 @@ mod tests {
         assert!(system_prompt.contains("not a Pi instruction candidate"));
     }
 
-    #[test]
-    fn pi_disable_warns_when_codex_compatibility_is_not_verified() {
-        let (_home, repository, local_repository) = repository();
-        let source = repository.path().join("AGENTS.md");
-        fs::write(&source, "agents\n").unwrap();
-
-        let plan = local_repository
-            .disable_plan(DisableRuntime::Pi, &source)
-            .unwrap();
-        assert!(plan.text.contains("Codex"));
-        assert!(plan.text.contains("Codex compatibility"));
-        assert!(!plan.text.contains("fixture"));
-        assert!(plan.exclusion.as_ref().unwrap().needs_write);
-    }
-
     #[cfg(unix)]
     #[test]
     fn disable_rejects_a_symlink_without_rewriting_its_identity() {
@@ -1239,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_disable_plan_keeps_the_logical_source_path() {
+    fn claude_disable_reuses_an_existing_git_exclusion() {
         let (_home, repository, local_repository) = repository();
         let source = repository.path().join("CLAUDE.md");
         fs::write(&source, "claude\n").unwrap();
@@ -1627,6 +1981,591 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn managed_symlinks_refuse_adoption_and_reviewed_writes_without_effects() {
+        use std::os::unix::fs::symlink;
+        for target in [ManagedTarget::Agents, ManagedTarget::Claude] {
+            for dangling in [false, true] {
+                let (_home, repository, repo) = repository();
+                personal_section(&repo.paths, "local\n");
+                let output = repository.path().join(target.filename());
+                let referent = repository.path().join("referent");
+                if !dangling {
+                    fs::write(&referent, "local\n").unwrap();
+                }
+                symlink(&referent, &output).unwrap();
+                let exclusion = repository.path().join(".git/info/exclude");
+                let before_exclusion = fs::read(&exclusion).unwrap();
+                assert!(repo.adopt_managed(target, "local").is_err());
+                assert!(repo.create_managed(target, "local").is_err());
+                assert!(!repo.local_manifest_path().exists());
+                assert!(!repo.state_path.exists());
+                fs::remove_file(&output).unwrap();
+                repo.create_managed(target, "local").unwrap();
+                let plan = repo.managed_plan(target).unwrap();
+                repo.apply_managed(&plan).unwrap();
+                let plan = repo.managed_plan(target).unwrap();
+                let manifest = fs::read(repo.local_manifest_path()).unwrap();
+                let state = fs::read(&repo.state_path).unwrap();
+                let owned_exclusion = fs::read(&exclusion).unwrap();
+                assert_ne!(owned_exclusion, before_exclusion);
+                fs::remove_file(&output).unwrap();
+                symlink(&referent, &output).unwrap();
+                assert!(repo.inspect_managed(target).is_err());
+                assert!(repo.managed_plan(target).is_err());
+                assert!(repo.apply_managed(&plan).is_err());
+                assert_eq!(fs::read_link(&output).unwrap(), referent);
+                if dangling {
+                    assert!(!referent.exists());
+                } else {
+                    assert_eq!(fs::read(&referent).unwrap(), b"local\n");
+                }
+                assert_eq!(fs::read(repo.local_manifest_path()).unwrap(), manifest);
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(fs::read(exclusion).unwrap(), owned_exclusion);
+            }
+        }
+    }
+
+    fn fail_local_commit(stage: &'static str) {
+        LOCAL_COMMIT_HOOK.set(Some(Box::new(move |current| {
+            if current == stage {
+                Err(format!("injected {stage} failure"))
+            } else {
+                Ok(())
+            }
+        })));
+    }
+
+    fn clear_local_failure_and_check_unlock(repo: &LocalRepository) {
+        LOCAL_COMMIT_HOOK.set(None);
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(repo.state_path.with_file_name("overlays.lock"))
+            .unwrap();
+        handle.try_lock().unwrap();
+    }
+
+    #[test]
+    fn disable_partial_commits_preserve_bytes_and_refuse_unowned_retry() {
+        for runtime in [DisableRuntime::Pi, DisableRuntime::Claude] {
+            for stage in ["disable-output", "state"] {
+                let (_home, directory, repo) = repository();
+                personal_section(&repo.paths, "local\n");
+                repo.create_managed(ManagedTarget::Claude, "local").unwrap();
+                repo.apply_managed(&repo.managed_plan(ManagedTarget::Claude).unwrap())
+                    .unwrap();
+                let state = fs::read(&repo.state_path).unwrap();
+                let source = directory.path().join(if runtime == DisableRuntime::Pi {
+                    "AGENTS.md"
+                } else {
+                    "CLAUDE.md"
+                });
+                fs::write(&source, "shared\n").unwrap();
+                let settings = directory.path().join(".claude/settings.local.json");
+                let original = "{\n  \"keep\": { \"user\": true },\n  \"claudeMdExcludes\": [\"/user.md\"]\n}\n";
+                if runtime == DisableRuntime::Claude {
+                    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+                    fs::write(&settings, original).unwrap();
+                }
+                let plan = repo.disable_plan(runtime, &source).unwrap();
+                let before = fs::read(&plan.output).ok();
+                let exclusion = plan.exclusion.as_ref().unwrap();
+                let old_exclusion = fs::read_to_string(&exclusion.path).unwrap();
+                fail_local_commit(stage);
+                assert!(repo.apply_disable(&plan).unwrap_err().contains("partial"));
+                clear_local_failure_and_check_unlock(&repo);
+                let fresh = LocalRepository::discover(directory.path(), &repo.paths).unwrap();
+                assert_eq!(fresh.disable_status(runtime).unwrap(), DisableStatus::None);
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(
+                    fs::read_to_string(&exclusion.path).unwrap(),
+                    format!("{old_exclusion}{}\n", exclusion.pattern)
+                );
+                assert_eq!(fs::read(&source).unwrap(), b"shared\n");
+                assert_eq!(
+                    fs::read(directory.path().join("CLAUDE.local.md")).unwrap(),
+                    b"local\n"
+                );
+                if stage == "disable-output" {
+                    assert_eq!(fs::read(&plan.output).ok(), before);
+                    fresh
+                        .apply_disable(&fresh.disable_plan(runtime, &source).unwrap())
+                        .unwrap();
+                    fresh.restore_disable(runtime).unwrap();
+                    assert_eq!(fs::read(&plan.output).ok(), before);
+                } else {
+                    let written = fs::read_to_string(&plan.output).unwrap();
+                    if runtime == DisableRuntime::Claude {
+                        assert_eq!(
+                            written,
+                            claude_settings::insert_exclusion(
+                                original,
+                                &settings,
+                                source.to_str().unwrap()
+                            )
+                            .unwrap()
+                        );
+                    } else {
+                        assert!(written.is_empty());
+                    }
+                    assert!(
+                        fresh
+                            .disable_plan(runtime, &source)
+                            .unwrap_err()
+                            .contains("partial")
+                    );
+                    // A user edit between attempts must never be mistaken for recoverable ownership.
+                    fs::write(&plan.output, format!("{written} ")).unwrap();
+                    assert!(fresh.disable_plan(runtime, &source).is_err());
+                    assert_eq!(
+                        fs::read_to_string(&plan.output).unwrap(),
+                        format!("{written} ")
+                    );
+                }
+                assert_eq!(fresh.load_state().unwrap().managed.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn restore_partial_commits_keep_recovery_and_user_edits() {
+        for mode in 0..4 {
+            for stage in ["restore-exclusion", "state"] {
+                let (_home, directory, repo) = repository();
+                let runtime = if mode == 0 {
+                    DisableRuntime::Pi
+                } else {
+                    DisableRuntime::Claude
+                };
+                let source =
+                    directory
+                        .path()
+                        .join(if mode == 0 { "AGENTS.md" } else { "CLAUDE.md" });
+                fs::write(&source, "shared\n").unwrap();
+                let settings = directory.path().join(".claude/settings.local.json");
+                let original = "{\n  \"keep\": 1\n}\n";
+                if mode >= 2 {
+                    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+                    fs::write(&settings, original).unwrap();
+                }
+                let exclusion_path = repo.common_git_dir.join("info/exclude");
+                let user_exclusion = "/user-rule\r\n# untouched\n";
+                fs::write(&exclusion_path, user_exclusion).unwrap();
+                // Keep an unrelated ownership entry through every failed commit and retry.
+                personal_section(&repo.paths, "local\n");
+                repo.create_managed(ManagedTarget::Claude, "local").unwrap();
+                repo.apply_managed(&repo.managed_plan(ManagedTarget::Claude).unwrap())
+                    .unwrap();
+                let mut before_exclusion = fs::read(&exclusion_path).unwrap();
+                let plan = repo.disable_plan(runtime, &source).unwrap();
+                repo.apply_disable(&plan).unwrap();
+                let restored = if mode == 3 {
+                    let settings = fs::read_to_string(&plan.output)
+                        .unwrap()
+                        .replace("\"keep\": 1", "\"keep\": 2, \"user-edit\": true");
+                    fs::write(&plan.output, &settings).unwrap();
+                    Some(
+                        claude_settings::remove_exclusion(&settings, source.to_str().unwrap())
+                            .unwrap(),
+                    )
+                } else {
+                    (mode == 2).then(|| original.to_owned())
+                };
+                let state = fs::read(&repo.state_path).unwrap();
+                let mut exclusion = fs::read(&exclusion_path).unwrap();
+                exclusion.extend_from_slice(b"# late user bytes without newline");
+                before_exclusion.extend_from_slice(b"# late user bytes without newline");
+                fs::write(&exclusion_path, &exclusion).unwrap();
+                fail_local_commit(stage);
+                assert!(
+                    repo.restore_disable(runtime)
+                        .unwrap_err()
+                        .contains("partial")
+                );
+                clear_local_failure_and_check_unlock(&repo);
+                let fresh = LocalRepository::discover(directory.path(), &repo.paths).unwrap();
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(
+                    fs::read(&exclusion_path).unwrap(),
+                    if stage == "state" {
+                        before_exclusion
+                    } else {
+                        exclusion.clone()
+                    }
+                );
+                assert_eq!(
+                    fs::read(&plan.output).ok(),
+                    restored.map(String::into_bytes)
+                );
+                assert_eq!(
+                    fresh.disable_status(runtime).unwrap(),
+                    if mode >= 2 {
+                        DisableStatus::Modified
+                    } else {
+                        DisableStatus::Missing
+                    }
+                );
+                assert!(
+                    fresh
+                        .restore_disable(runtime)
+                        .unwrap_err()
+                        .contains("partial")
+                );
+                let edited = if mode == 0 {
+                    "user instructions\n"
+                } else {
+                    "{\"user-edit\": true}\n"
+                };
+                fs::write(&plan.output, edited).unwrap();
+                assert!(fresh.restore_disable(runtime).is_err());
+                assert_eq!(fs::read_to_string(&plan.output).unwrap(), edited);
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(fresh.load_state().unwrap().managed.len(), 1);
+                assert_eq!(fs::read(&source).unwrap(), b"shared\n");
+            }
+        }
+    }
+
+    #[test]
+    fn managed_partial_commits_do_not_adopt_unowned_output() {
+        for stage in ["managed-output", "state"] {
+            let (_home, directory, repo) = repository();
+            personal_section(&repo.paths, "local\n");
+            repo.create_managed(ManagedTarget::Agents, "local").unwrap();
+            let plan = repo.managed_plan(ManagedTarget::Agents).unwrap();
+            let manifest = fs::read(repo.local_manifest_path()).unwrap();
+            let old_exclusion = fs::read_to_string(&plan.exclusion.path).unwrap();
+            fail_local_commit(stage);
+            assert!(repo.apply_managed(&plan).unwrap_err().contains("partial"));
+            clear_local_failure_and_check_unlock(&repo);
+            let fresh = LocalRepository::discover(directory.path(), &repo.paths).unwrap();
+            assert!(!fresh.state_path.exists());
+            assert_eq!(fs::read(repo.local_manifest_path()).unwrap(), manifest);
+            assert_eq!(
+                fs::read_to_string(&plan.exclusion.path).unwrap(),
+                format!("{old_exclusion}{}\n", plan.exclusion.pattern)
+            );
+            let plan = fresh.managed_plan(ManagedTarget::Agents).unwrap();
+            if stage == "managed-output" {
+                assert_eq!(plan.view.status, LocalTargetStatus::Missing);
+                fresh.apply_managed(&plan).unwrap();
+            } else {
+                assert_eq!(plan.view.status, LocalTargetStatus::External);
+                assert!(fresh.apply_managed(&plan).unwrap_err().contains("partial"));
+                fs::write(&plan.view.path, "user edit\n").unwrap();
+                assert!(
+                    fresh
+                        .apply_managed(&fresh.managed_plan(ManagedTarget::Agents).unwrap())
+                        .is_err()
+                );
+                assert_eq!(fs::read(&plan.view.path).unwrap(), b"user edit\n");
+                assert!(!fresh.state_path.exists());
+            }
+            fresh
+                .create_managed(ManagedTarget::Claude, "local")
+                .unwrap();
+            fresh
+                .apply_managed(&fresh.managed_plan(ManagedTarget::Claude).unwrap())
+                .unwrap();
+            assert_eq!(
+                fresh.load_state().unwrap().managed.len(),
+                if stage == "managed-output" { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn selected_ownership_refuses_foreign_destinations() {
+        for runtime in [DisableRuntime::Pi, DisableRuntime::Claude] {
+            let (_home, directory, repo) = repository();
+            let source = directory.path().join(if runtime == DisableRuntime::Pi {
+                "AGENTS.md"
+            } else {
+                "CLAUDE.md"
+            });
+            fs::write(&source, "shared\n").unwrap();
+            let plan = repo.disable_plan(runtime, &source).unwrap();
+            repo.apply_disable(&plan).unwrap();
+            let valid = fs::read_to_string(&repo.state_path).unwrap();
+            let output = fs::read(&plan.output).unwrap();
+            let exclude_path = repo.common_git_dir.join("info/exclude");
+            let exclude = fs::read(&exclude_path).unwrap();
+            let foreign = TempDir::new().unwrap();
+            let sentinel = foreign.path().join("sentinel");
+            fs::write(&sentinel, &output).unwrap();
+            for case in 0..5 {
+                let mut raw: RawState = toml::from_str(&valid).unwrap();
+                let owned = raw
+                    .disables
+                    .get_mut(&repo.disable_state_key(runtime))
+                    .unwrap();
+                match case {
+                    0 => owned.path = sentinel.display().to_string(),
+                    1 => owned.exclusion_path = Some(sentinel.display().to_string()),
+                    2 => owned.exclusion_pattern = Some("/foreign".into()),
+                    3 => {
+                        owned.disabled_source =
+                            Some(directory.path().join("wrong.md").display().to_string())
+                    }
+                    4 => {
+                        owned.disabled_source = Some(
+                            foreign
+                                .path()
+                                .join(source.file_name().unwrap())
+                                .display()
+                                .to_string(),
+                        )
+                    }
+                    _ => unreachable!(),
+                }
+                let invalid = toml::to_string_pretty(&raw).unwrap();
+                fs::write(&repo.state_path, &invalid).unwrap();
+                assert!(repo.restore_disable(runtime).is_err(), "case {case}");
+                assert!(repo.disable_status(runtime).is_err());
+                assert_eq!(fs::read(&sentinel).unwrap(), output);
+                assert_eq!(fs::read(&plan.output).unwrap(), output);
+                assert_eq!(fs::read(&exclude_path).unwrap(), exclude);
+                assert_eq!(fs::read_to_string(&repo.state_path).unwrap(), invalid);
+            }
+            fs::write(&repo.state_path, valid).unwrap();
+            fs::remove_file(&source).unwrap();
+            repo.restore_disable(runtime).unwrap();
+
+            let subdirectory = directory.path().join("sub");
+            fs::create_dir(&subdirectory).unwrap();
+            let source = subdirectory.join(source.file_name().unwrap());
+            fs::write(&source, "shared\n").unwrap();
+            let plan = repo.disable_plan(runtime, &source).unwrap();
+            repo.apply_disable(&plan).unwrap();
+            let state = fs::read(&repo.state_path).unwrap();
+            let exclusion = fs::read(&exclude_path).unwrap();
+            fs::remove_dir_all(&subdirectory).unwrap();
+            let fresh = LocalRepository::discover(directory.path(), &repo.paths).unwrap();
+            if runtime == DisableRuntime::Claude {
+                assert_eq!(fresh.disable_status(runtime).unwrap(), DisableStatus::Owned);
+                fresh.restore_disable(runtime).unwrap();
+                assert!(!plan.output.exists());
+                assert_eq!(fresh.disable_status(runtime).unwrap(), DisableStatus::None);
+                assert!(
+                    !fs::read_to_string(&exclude_path)
+                        .unwrap()
+                        .lines()
+                        .any(|line| line == "/.claude/settings.local.json")
+                );
+            } else {
+                assert_eq!(
+                    fresh.disable_status(runtime).unwrap(),
+                    DisableStatus::Missing
+                );
+                let error = fresh.restore_disable(runtime).unwrap_err();
+                assert!(error.contains("manual recovery"));
+                assert_eq!(fs::read(&repo.state_path).unwrap(), state);
+                assert_eq!(fs::read(&exclude_path).unwrap(), exclusion);
+                assert!(!subdirectory.exists());
+            }
+        }
+        for target in [ManagedTarget::Agents, ManagedTarget::Claude] {
+            let (_home, directory, repo) = repository();
+            personal_section(&repo.paths, "local\n");
+            repo.create_managed(target, "local").unwrap();
+            repo.apply_managed(&repo.managed_plan(target).unwrap())
+                .unwrap();
+            let plan = repo.managed_plan(target).unwrap();
+            let valid = fs::read_to_string(&repo.state_path).unwrap();
+            let sentinel = directory.path().join("foreign");
+            fs::write(&sentinel, "foreign\n").unwrap();
+            let exclusion = fs::read(repo.common_git_dir.join("info/exclude")).unwrap();
+            for case in 0..3 {
+                let mut raw: RawState = toml::from_str(&valid).unwrap();
+                let owned = raw
+                    .managed
+                    .get_mut(&repo.managed_state_key(target))
+                    .unwrap();
+                match case {
+                    0 => owned.path = sentinel.display().to_string(),
+                    1 => owned.exclusion_path = Some(sentinel.display().to_string()),
+                    2 => owned.exclusion_pattern = Some("/foreign".into()),
+                    _ => unreachable!(),
+                }
+                let invalid = toml::to_string_pretty(&raw).unwrap();
+                fs::write(&repo.state_path, &invalid).unwrap();
+                assert!(repo.apply_managed(&plan).is_err());
+                assert_eq!(fs::read(&sentinel).unwrap(), b"foreign\n");
+                assert_eq!(fs::read(&plan.view.path).unwrap(), b"local\n");
+                assert_eq!(
+                    fs::read(repo.common_git_dir.join("info/exclude")).unwrap(),
+                    exclusion
+                );
+                assert_eq!(fs::read_to_string(&repo.state_path).unwrap(), invalid);
+            }
+        }
+    }
+
+    #[test]
+    fn claude_settings_symlinks_refuse_review_apply_and_restore() {
+        use std::os::unix::fs::symlink;
+        for dangling in [false, true] {
+            for boundary in 0..3 {
+                let (_home, directory, repo) = repository();
+                let source = directory.path().join("CLAUDE.md");
+                fs::write(&source, "shared\n").unwrap();
+                let plan = repo.disable_plan(DisableRuntime::Claude, &source).unwrap();
+                if boundary == 2 {
+                    repo.apply_disable(&plan).unwrap();
+                }
+                let state = fs::read(&repo.state_path).ok();
+                let exclusion = fs::read(repo.common_git_dir.join("info/exclude")).unwrap();
+                let referent = directory.path().join("referent");
+                if !dangling {
+                    fs::write(&referent, "{}\n").unwrap();
+                }
+                fs::create_dir_all(plan.output.parent().unwrap()).unwrap();
+                if boundary == 2 {
+                    fs::remove_file(&plan.output).unwrap();
+                }
+                symlink(&referent, &plan.output).unwrap();
+                let result = match boundary {
+                    0 => repo
+                        .disable_plan(DisableRuntime::Claude, &source)
+                        .map(|_| ()),
+                    1 => repo.apply_disable(&plan),
+                    2 => repo.restore_disable(DisableRuntime::Claude),
+                    _ => unreachable!(),
+                };
+                assert!(result.unwrap_err().contains("ordinary file"));
+                if boundary == 0 {
+                    assert!(!repo.state_path.with_file_name("overlays.lock").exists());
+                }
+                assert_eq!(fs::read_link(&plan.output).unwrap(), referent);
+                assert_eq!(
+                    fs::read(&referent).ok(),
+                    (!dangling).then(|| b"{}\n".to_vec())
+                );
+                assert_eq!(fs::read(&repo.state_path).ok(), state);
+                assert_eq!(
+                    fs::read(repo.common_git_dir.join("info/exclude")).unwrap(),
+                    exclusion
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tracked_managed_outputs_refuse_apply_and_adoption() {
+        for target in [ManagedTarget::Agents, ManagedTarget::Claude] {
+            for adoption in [false, true] {
+                let (_home, directory, repo) = repository();
+                personal_section(&repo.paths, "local\n");
+                let output = directory.path().join(target.filename());
+                let plan = if adoption {
+                    None
+                } else {
+                    repo.create_managed(target, "local").unwrap();
+                    repo.apply_managed(&repo.managed_plan(target).unwrap())
+                        .unwrap();
+                    Some(repo.managed_plan(target).unwrap())
+                };
+                fs::write(&output, "local\n").unwrap();
+                git(directory.path(), &["add", "-f", target.filename()]).unwrap();
+                let manifest = fs::read(repo.local_manifest_path()).ok();
+                let state = fs::read(&repo.state_path).ok();
+                let exclusion = fs::read(repo.common_git_dir.join("info/exclude")).unwrap();
+                let result = match plan {
+                    Some(plan) => repo.apply_managed(&plan).map(|_| ()),
+                    None => repo.adopt_managed(target, "local"),
+                };
+                assert!(result.unwrap_err().contains("tracked"));
+                assert_eq!(fs::read(output).unwrap(), b"local\n");
+                assert_eq!(fs::read(repo.local_manifest_path()).ok(), manifest);
+                assert_eq!(fs::read(&repo.state_path).ok(), state);
+                assert_eq!(
+                    fs::read(repo.common_git_dir.join("info/exclude")).unwrap(),
+                    exclusion
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ownership_blocks_local_mutations_before_any_effect() {
+        let (_home, repository, repo) = repository();
+        personal_section(&repo.paths, "local\n");
+        let source = repository.path().join("CLAUDE.md");
+        fs::write(&source, "shared\n").unwrap();
+        fs::write(
+            repository.path().join(".git/info/exclude"),
+            "/CLAUDE.local.md\n",
+        )
+        .unwrap();
+        let disable_plan = repo.disable_plan(DisableRuntime::Claude, &source).unwrap();
+        repo.apply_disable(&disable_plan).unwrap();
+        repo.create_managed(ManagedTarget::Agents, "local").unwrap();
+        let managed_plan = repo.managed_plan(ManagedTarget::Agents).unwrap();
+        let valid = fs::read_to_string(&repo.state_path).unwrap();
+        let manifest = fs::read(repo.local_manifest_path()).unwrap();
+        let settings = fs::read(&disable_plan.output).unwrap();
+        let exclusion_path = repository.path().join(".git/info/exclude");
+        let exclusion = fs::read(&exclusion_path).unwrap();
+        for case in 0..8 {
+            let mut raw: RawState = toml::from_str(&valid).unwrap();
+            let owned = raw.disables.get_mut("claude").unwrap();
+            match case {
+                0 => owned.disabled_source = None,
+                1 => owned.exclusion_path = None,
+                2 => owned.exclusion_pattern = None,
+                3 => owned.created_container = false,
+                4 => owned.original_content = Some("{}".into()),
+                5 => {
+                    owned.created_container = false;
+                    owned.original_content = Some("invalid JSON".into());
+                }
+                6 => {
+                    let owned = owned.clone();
+                    raw.managed
+                        .insert(repo.managed_state_key(ManagedTarget::Agents), owned);
+                }
+                7 => {
+                    let owned = owned.clone();
+                    raw.disables
+                        .insert(repo.disable_state_key(DisableRuntime::Pi), owned);
+                }
+                _ => unreachable!(),
+            }
+            let malformed = toml::to_string_pretty(&raw).unwrap();
+            fs::write(&repo.state_path, &malformed).unwrap();
+            assert!(
+                repo.restore_disable(DisableRuntime::Claude).is_err(),
+                "case {case}"
+            );
+            assert!(repo.apply_disable(&disable_plan).is_err(), "case {case}");
+            assert!(repo.apply_managed(&managed_plan).is_err(), "case {case}");
+            assert!(
+                repo.create_managed(ManagedTarget::Claude, "local").is_err(),
+                "case {case}"
+            );
+            let adopt_output = repository.path().join("CLAUDE.local.md");
+            fs::write(&adopt_output, "local\n").unwrap();
+            assert!(
+                repo.adopt_managed(ManagedTarget::Claude, "local").is_err(),
+                "case {case}"
+            );
+            assert_eq!(fs::read(&adopt_output).unwrap(), b"local\n");
+            fs::remove_file(adopt_output).unwrap();
+            assert!(!managed_plan.view.path.exists());
+            assert_eq!(fs::read(repo.local_manifest_path()).unwrap(), manifest);
+            assert_eq!(fs::read(&disable_plan.output).unwrap(), settings);
+            assert_eq!(fs::read(&exclusion_path).unwrap(), exclusion);
+            assert_eq!(fs::read_to_string(&repo.state_path).unwrap(), malformed);
+        }
+        fs::write(&repo.state_path, valid).unwrap();
+        fs::remove_file(&exclusion_path).unwrap();
+        assert!(repo.restore_disable(DisableRuntime::Claude).is_err());
+        assert_eq!(fs::read(&disable_plan.output).unwrap(), settings);
+    }
+
+    #[test]
     fn managed_status_distinguishes_stale_and_modified() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
@@ -1746,6 +2685,10 @@ mod tests {
         assert_eq!(plan.view.status, LocalTargetStatus::Current);
         assert!(plan.exclusion_write().is_some());
         repo.apply_managed(&plan).unwrap();
+        let owned_state = fs::read(&repo.state_path).unwrap();
+        let current = repo.managed_plan(ManagedTarget::Agents).unwrap();
+        repo.apply_managed(&current).unwrap();
+        assert_eq!(fs::read(&repo.state_path).unwrap(), owned_state);
         assert!(
             fs::read_to_string(exclusion)
                 .unwrap()
@@ -1913,7 +2856,62 @@ mod tests {
             plan.exclusion_write().unwrap().1,
             main.path().join(".git/info/exclude")
         );
-        main_repo.apply_managed(&plan).unwrap();
+        linked_repo
+            .create_managed(ManagedTarget::Claude, "local")
+            .unwrap();
+        let linked_plan = linked_repo.managed_plan(ManagedTarget::Claude).unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                LOCAL_COMMIT_HOOK.set(Some(Box::new(move |stage| {
+                    if stage == "locked" {
+                        locked_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                    Ok(())
+                })));
+                let result = main_repo.apply_managed(&plan);
+                LOCAL_COMMIT_HOOK.set(None);
+                result
+            });
+            locked_rx.recv().unwrap();
+            // A separately opened handle proves kernel exclusion, without a timing assertion.
+            let contender = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(linked_repo.state_path.with_file_name("overlays.lock"))
+                .unwrap();
+            let contention = contender.try_lock();
+            if contention.is_ok() {
+                contender.unlock().unwrap();
+            }
+            let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+            let linked_writer = &linked_repo;
+            let second = scope.spawn(move || {
+                attempt_tx.send(()).unwrap();
+                linked_writer.apply_managed(&linked_plan)
+            });
+            attempt_rx.recv().unwrap();
+            release_tx.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+            assert!(matches!(contention, Err(std::fs::TryLockError::WouldBlock)));
+        });
+        let state = main_repo.load_state().unwrap();
+        assert!(
+            state
+                .managed
+                .contains_key(&main_repo.managed_state_key(ManagedTarget::Agents))
+        );
+        assert!(
+            state
+                .managed
+                .contains_key(&linked_repo.managed_state_key(ManagedTarget::Claude))
+        );
+        let exclusion = fs::read_to_string(main_repo.common_git_dir.join("info/exclude")).unwrap();
+        assert!(exclusion.lines().any(|line| line == "/AGENTS.override.md"));
+        assert!(exclusion.lines().any(|line| line == "/CLAUDE.local.md"));
         assert_eq!(
             linked_repo
                 .inspect_managed(ManagedTarget::Agents)
@@ -1948,5 +2946,80 @@ mod tests {
         linked_repo.apply_disable(&plan).unwrap();
         assert!(main.path().join(".claude/settings.local.json").is_file());
         assert!(!linked.join(".claude/settings.local.json").exists());
+        fs::remove_file(&claude).unwrap();
+        assert_eq!(
+            main_repo.disable_status(DisableRuntime::Claude).unwrap(),
+            DisableStatus::Owned
+        );
+        main_repo.restore_disable(DisableRuntime::Claude).unwrap();
+        assert!(!plan.output.exists());
+        assert_eq!(main_repo.load_state().unwrap().managed.len(), 3);
+
+        for settings_case in 0..3 {
+            if settings_case > 0 {
+                git(
+                    main.path(),
+                    &["worktree", "add", linked.to_str().unwrap(), "linked"],
+                )
+                .unwrap();
+            }
+            let original = "{\"user\": 1, \"claudeMdExcludes\": [\"/unrelated.md\"]}\n";
+            if settings_case > 0 {
+                fs::write(&plan.output, original).unwrap();
+            }
+            fs::write(&claude, "claude\n").unwrap();
+            let plan = linked_repo
+                .disable_plan(DisableRuntime::Claude, &claude)
+                .unwrap();
+            linked_repo.apply_disable(&plan).unwrap();
+            if settings_case == 2 {
+                let settings = fs::read_to_string(&plan.output).unwrap();
+                fs::write(&plan.output, settings.replace("\"user\": 1", "\"user\": 2")).unwrap();
+            }
+            let managed = fs::read_to_string(&main_repo.state_path).unwrap();
+            let managed: RawState = toml::from_str(&managed).unwrap();
+            let managed = toml::to_string(&managed.managed).unwrap();
+            let exclusion = fs::read_to_string(main_repo.common_git_dir.join("info/exclude"))
+                .unwrap()
+                .replace("/.claude/settings.local.json\n", "");
+            git(
+                main.path(),
+                &["worktree", "remove", "--force", linked.to_str().unwrap()],
+            )
+            .unwrap();
+            let fresh = LocalRepository::discover(main.path(), &paths).unwrap();
+            assert_eq!(
+                fresh.disable_status(DisableRuntime::Claude).unwrap(),
+                DisableStatus::Owned
+            );
+            assert_eq!(
+                fresh.disable_status(DisableRuntime::Pi).unwrap(),
+                DisableStatus::None
+            );
+            fresh.restore_disable(DisableRuntime::Claude).unwrap();
+            if settings_case == 0 {
+                assert!(!plan.output.exists());
+            } else {
+                assert_eq!(
+                    fs::read_to_string(&plan.output).unwrap(),
+                    original.replace(
+                        "\"user\": 1",
+                        if settings_case == 2 {
+                            "\"user\": 2"
+                        } else {
+                            "\"user\": 1"
+                        }
+                    )
+                );
+            }
+            let restored = fs::read_to_string(&fresh.state_path).unwrap();
+            let restored: RawState = toml::from_str(&restored).unwrap();
+            assert!(restored.disables.is_empty());
+            assert_eq!(toml::to_string(&restored.managed).unwrap(), managed);
+            assert_eq!(
+                fs::read_to_string(fresh.common_git_dir.join("info/exclude")).unwrap(),
+                exclusion
+            );
+        }
     }
 }

@@ -380,6 +380,8 @@ fn expand_target_path(raw: &str, home: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Replacement atomic file writes replace the destination, preserving ordinary-file permissions (Unix: 0644 for new files).
+/// Callers must establish ownership and validate symlinks. Syncs the file, not the parent directory.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
@@ -400,6 +402,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .as_file_mut()
         .sync_all()
         .map_err(|error| format!("cannot sync temporary file: {error}"))?;
+    #[cfg(test)]
+    write_hook::before_persist(path)
+        .map_err(|error| format!("cannot replace {}: {error}", path.display()))?;
     temporary
         .persist(path)
         .map_err(|error| format!("cannot replace {}: {}", path.display(), error.error))?;
@@ -434,30 +439,47 @@ pub(crate) fn set_theme(paths: &Paths, theme: &str) -> Result<(), String> {
     atomic_write(&paths.config, document.to_string().as_bytes())
 }
 
+/// No-clobber atomic file writes fail if the destination exists; new files use 0644 on Unix.
+/// Callers own ownership and symlink validation. Syncs the file, not the parent directory.
 pub(crate) fn atomic_create(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-        format!(
-            "cannot create temporary file in {}: {error}",
-            parent.display()
-        )
-    })?;
-    temporary
-        .write_all(bytes)
-        .map_err(|error| format!("cannot write temporary file: {error}"))?;
-    set_created_permissions(temporary.as_file())?;
-    temporary
-        .as_file_mut()
-        .sync_all()
-        .map_err(|error| format!("cannot sync temporary file: {error}"))?;
-    temporary
-        .persist_noclobber(path)
+    let temporary = prepare_atomic_create(path, bytes)
+        .map_err(|error| format!("cannot prepare {}: {error}", path.display()))?;
+    persist_atomic_create(temporary, path)
         .map_err(|error| format!("cannot create {}: {}", path.display(), error.error))?;
     Ok(())
+}
+
+/// Prepare and sync create-only bytes in the destination directory; callers must use
+/// persist_noclobber, retaining its typed I/O error when reserving numbered backups.
+pub(crate) fn prepare_atomic_create(path: &Path, bytes: &[u8]) -> std::io::Result<NamedTempFile> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "file has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    set_created_permissions(temporary.as_file())?;
+    temporary.as_file_mut().sync_all()?;
+    Ok(temporary)
+}
+
+/// Commit create-only bytes, returning the created file or the temporary file and typed
+/// persistence error so backup reservations can retry only AlreadyExists collisions.
+pub(crate) fn persist_atomic_create(
+    temporary: NamedTempFile,
+    path: &Path,
+) -> Result<fs::File, tempfile::PersistError> {
+    #[cfg(test)]
+    if let Err(error) = write_hook::before_persist(path) {
+        return Err(tempfile::PersistError {
+            error,
+            file: temporary,
+        });
+    }
+    temporary.persist_noclobber(path)
 }
 
 /// Lowercase hex SHA-256 digest of `bytes`. This is the ownership hash stored in the Global
@@ -486,16 +508,78 @@ fn set_replacement_permissions(path: &Path, file: &fs::File) -> Result<(), Strin
                 )
             })?;
     } else {
-        set_created_permissions(file)?;
+        set_created_permissions(file)
+            .map_err(|error| format!("cannot set created file permissions: {error}"))?;
     }
     Ok(())
 }
 
-fn set_created_permissions(file: &fs::File) -> Result<(), String> {
+fn set_created_permissions(file: &fs::File) -> std::io::Result<()> {
     #[cfg(unix)]
-    file.set_permissions(fs::Permissions::from_mode(0o644))
-        .map_err(|error| format!("cannot set created file permissions: {error}"))?;
+    file.set_permissions(fs::Permissions::from_mode(0o644))?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod write_hook {
+    use std::cell::RefCell;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    struct Hook {
+        path: PathBuf,
+        skip: usize,
+        action: Box<dyn FnOnce() -> io::Result<()>>,
+    }
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    // Scoped to the calling test thread and removed before invocation so a second
+    // reservation can finish while the first is paused immediately before persistence.
+    pub(crate) fn install(
+        path: &Path,
+        skip: usize,
+        action: impl FnOnce() -> io::Result<()> + 'static,
+    ) -> Guard {
+        HOOK.with(|hook| {
+            assert!(hook.borrow().is_none());
+            *hook.borrow_mut() = Some(Hook {
+                path: path.to_owned(),
+                skip,
+                action: Box::new(action),
+            });
+        });
+        Guard
+    }
+
+    pub(crate) fn before_persist(path: &Path) -> io::Result<()> {
+        let action = HOOK.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            let current = hook.as_mut()?;
+            if current.path != path {
+                return None;
+            }
+            if current.skip > 0 {
+                current.skip -= 1;
+                return None;
+            }
+            hook.take().map(|hook| hook.action)
+        });
+        match action {
+            Some(action) => action(),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +631,109 @@ title = "Global Claude"
 [profiles.default]
 claude = ["common"]
 "#;
+
+    #[test]
+    fn loaders_reject_paths_before_touching_outputs_or_ownership() {
+        let (temp, loaded) = global(VALID, &[("sections/common.md", "private source")]);
+        let paths = loaded.unwrap().paths;
+        let target = temp.path().join(".claude/CLAUDE.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "target sentinel").unwrap();
+        fs::create_dir_all(&paths.state_dir).unwrap();
+        let state = paths.state_dir.join("state.toml");
+        fs::write(&state, "state sentinel").unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_target = outside.path().join("CLAUDE.md");
+        fs::write(&outside_target, "outside sentinel").unwrap();
+        for destination in [
+            ".claude/CLAUDE.md".to_owned(),
+            outside_target.display().to_string(),
+            paths.home.display().to_string(),
+            format!("{}/.claude/../CLAUDE.md", paths.home.display()),
+            "~/../CLAUDE.md".to_owned(),
+        ] {
+            fs::write(
+                &paths.config,
+                VALID.replace("~/.claude/CLAUDE.md", &destination),
+            )
+            .unwrap();
+            assert!(GlobalConfig::load(&paths).is_err(), "{destination}");
+            assert_eq!(fs::read(&target).unwrap(), b"target sentinel");
+            assert_eq!(fs::read(&state).unwrap(), b"state sentinel");
+            assert_eq!(fs::read(&outside_target).unwrap(), b"outside sentinel");
+        }
+        fs::write(
+            &paths.config,
+            VALID.replace("~/.claude/CLAUDE.md", target.to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            GlobalConfig::load(&paths)
+                .unwrap()
+                .target_path("claude")
+                .unwrap(),
+            target
+        );
+
+        let project_manifest = paths.data_dir.join("project.toml");
+        let project_target = paths.home.join("AGENTS.md");
+        fs::write(&project_target, "project sentinel").unwrap();
+        let project_source = "format = 1\n[[sections]]\nid = \"common\"\nname = \"Common\"\npath = \"sections/common.md\"\n[targets.agents]\nsections = [\"common\"]\n";
+        for section in [
+            outside_target.display().to_string(),
+            "../CLAUDE.md".to_owned(),
+            "sections/../../CLAUDE.md".to_owned(),
+        ] {
+            fs::write(&paths.config, VALID.replace("sections/common.md", &section)).unwrap();
+            fs::write(
+                &project_manifest,
+                project_source.replace("sections/common.md", &section),
+            )
+            .unwrap();
+            let global_error = GlobalConfig::load(&paths).unwrap_err();
+            let project_error = crate::project::Workspace::load(&project_manifest).unwrap_err();
+            assert!(global_error.contains("relative path"), "{global_error}");
+            assert!(project_error.contains("relative path"), "{project_error}");
+            assert_eq!(fs::read(&target).unwrap(), b"target sentinel");
+            assert_eq!(fs::read(&project_target).unwrap(), b"project sentinel");
+            assert_eq!(fs::read(&state).unwrap(), b"state sentinel");
+            assert_eq!(fs::read(&outside_target).unwrap(), b"outside sentinel");
+        }
+        fs::write(&project_manifest, project_source).unwrap();
+        assert!(crate::project::Workspace::load(&project_manifest).is_ok());
+    }
+
+    #[test]
+    fn atomic_create_preserves_occupied_entries() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("output");
+        fs::write(&path, "sentinel").unwrap();
+        assert!(atomic_create(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"sentinel");
+
+        #[cfg(unix)]
+        for resolving in [true, false] {
+            use std::os::unix::fs::{MetadataExt, symlink};
+            fs::remove_file(&path).unwrap();
+            let referent = temp.path().join("referent");
+            if resolving {
+                fs::write(&referent, "referent sentinel").unwrap();
+            } else {
+                fs::remove_file(&referent).unwrap();
+            }
+            symlink(&referent, &path).unwrap();
+            let before = fs::symlink_metadata(&path).unwrap();
+            assert!(atomic_create(&path, b"replacement").is_err());
+            assert_eq!(fs::read_link(&path).unwrap(), referent);
+            let after = fs::symlink_metadata(&path).unwrap();
+            assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+            if resolving {
+                assert_eq!(fs::read(&referent).unwrap(), b"referent sentinel");
+            } else {
+                assert!(!referent.exists());
+            }
+        }
+    }
 
     #[test]
     fn renders_normalized_document() {

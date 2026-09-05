@@ -7,7 +7,9 @@ use std::process::Command;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::config::{atomic_create, atomic_write, target_display_name};
+use crate::config::{
+    atomic_create, atomic_write, persist_atomic_create, prepare_atomic_create, target_display_name,
+};
 use crate::deploy::unified_diff;
 use crate::git_worktree::worktree_root;
 use crate::section::{Section, render_format_1, validate_id, validate_relative_path};
@@ -47,7 +49,7 @@ impl ProjectTargetStatus {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TargetView {
     pub(crate) id: String,
     pub(crate) path: PathBuf,
@@ -55,6 +57,9 @@ pub(crate) struct TargetView {
     pub(crate) deployed: String,
     pub(crate) status: ProjectTargetStatus,
     pub(crate) diff: String,
+    section_paths: Vec<PathBuf>,
+    // Content comparison is independent of deployment ownership and CLI labels.
+    pub(crate) difference: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +101,7 @@ impl CreatePlan {
         if current != self.reviewed_manifest {
             return Err("project manifest changed after review".into());
         }
+        reject_target_symlink(&self.target_path)?;
         if self.target_path.exists() {
             return Err(format!(
                 "refusing to overwrite {}",
@@ -116,14 +122,36 @@ impl CreatePlan {
             )
             .map_err(|error| format!("cannot create project Sections directory: {error}"))?;
         }
-        atomic_create(&self.section_path, self.content.as_bytes())?;
+        // Retain the exact created file so a replacement cannot become cleanup's owner.
+        let created = prepare_atomic_create(&self.section_path, self.content.as_bytes())
+            .and_then(|temporary| {
+                persist_atomic_create(temporary, &self.section_path).map_err(|error| error.error)
+            })
+            .map_err(|error| format!("cannot create {}: {error}", self.section_path.display()))?;
         let result = if self.reviewed_manifest.is_some() {
             atomic_write(&self.manifest_path, self.manifest_source.as_bytes())
         } else {
             atomic_create(&self.manifest_path, self.manifest_source.as_bytes())
         };
         if let Err(error) = result {
-            let _ = fs::remove_file(&self.section_path);
+            if let (Ok(original), Ok(current)) =
+                (created.metadata(), fs::symlink_metadata(&self.section_path))
+            {
+                #[cfg(unix)]
+                let same_file = {
+                    use std::os::unix::fs::MetadataExt;
+                    original.dev() == current.dev() && original.ino() == current.ino()
+                };
+                #[cfg(not(unix))]
+                let same_file = original.created().ok().is_some()
+                    && original.created().ok() == current.created().ok();
+                if same_file
+                    && current.is_file()
+                    && fs::read(&self.section_path).ok().as_deref() == Some(self.content.as_bytes())
+                {
+                    let _ = fs::remove_file(&self.section_path);
+                }
+            }
             return Err(error);
         }
         Workspace::load(&self.manifest_path)
@@ -253,6 +281,7 @@ impl Workspace {
         } else {
             unified_diff(&deployed, &expected, &old, &format!("rendered:{id}"))
         };
+        let difference = (deployed != expected).then(|| diff.clone());
         Ok(TargetView {
             id: id.to_owned(),
             path,
@@ -260,6 +289,12 @@ impl Workspace {
             deployed,
             status,
             diff,
+            section_paths: self
+                .composition(id)?
+                .iter()
+                .map(|id| self.section_path(id).unwrap())
+                .collect(),
+            difference,
         })
     }
 
@@ -267,13 +302,9 @@ impl Workspace {
         self.target_names().map(|id| self.inspect(id)).collect()
     }
 
-    pub(crate) fn apply(&self, id: &str) -> Result<ProjectTargetStatus, String> {
-        let reviewed = self.inspect(id)?;
-        let current = Self::load(&self.manifest_path)?.inspect(id)?;
-        if reviewed.status != current.status
-            || reviewed.expected != current.expected
-            || reviewed.deployed != current.deployed
-        {
+    pub(crate) fn apply(&self, reviewed: &TargetView) -> Result<ProjectTargetStatus, String> {
+        let current = Self::load(&self.manifest_path)?.inspect(&reviewed.id)?;
+        if *reviewed != current {
             return Err("project target changed after review; inspect and confirm again".into());
         }
         if current.status != ProjectTargetStatus::Current {
@@ -458,7 +489,11 @@ fn reject_target_symlink(path: &Path) -> Result<(), String> {
             "project target {} is a symlink; mdmanager.ai will not replace it",
             path.display()
         )),
-        Ok(_) => Ok(()),
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(format!(
+            "project target {} is not an ordinary file",
+            path.display()
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
             "cannot inspect project target {}: {error}",
@@ -608,10 +643,202 @@ mod tests {
         );
         assert!(!repository.path().join("AGENTS.md").exists());
 
-        workspace.apply("agents").unwrap();
+        workspace
+            .apply(&workspace.inspect("agents").unwrap())
+            .unwrap();
         assert_eq!(
             fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
             "# Project\n"
+        );
+    }
+
+    #[test]
+    fn project_apply_requires_the_reviewed_bytes_existence_and_paths() {
+        let repository = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap();
+        fs::write(repository.path().join("AGENTS.md"), "original\n").unwrap();
+        let workspace = adopt(repository.path(), "agents").unwrap();
+        let reviewed = workspace.inspect("agents").unwrap();
+        let path = &reviewed.path;
+        fs::write(path, "edited during confirmation\n").unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "edited during confirmation\n"
+        );
+        fs::remove_file(path).unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        assert!(!path.exists());
+        let missing = workspace.inspect("agents").unwrap();
+        fs::write(path, "").unwrap();
+        assert!(workspace.apply(&missing).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"");
+        fs::remove_file(path).unwrap();
+        fs::create_dir(path).unwrap();
+        assert!(workspace.apply(&missing).is_err());
+        assert!(path.is_dir());
+        fs::remove_dir(path).unwrap();
+        workspace.apply(&missing).unwrap();
+        let section = workspace.section_path("agents").unwrap();
+        fs::write(&section, "changed source\n").unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        fs::write(&section, "original\n").unwrap();
+        let renamed = section.with_file_name("renamed.md");
+        fs::rename(&section, renamed).unwrap();
+        fs::write(
+            &workspace.manifest_path,
+            workspace
+                .source
+                .replace("sections/agents.md", "sections/renamed.md"),
+        )
+        .unwrap();
+        assert!(workspace.apply(&reviewed).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
+
+        // Identical contents at a different project root do not authorize that output.
+        let other = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(other.path())
+            .status()
+            .unwrap();
+        fs::write(other.path().join("AGENTS.md"), "original\n").unwrap();
+        let other_workspace = adopt(other.path(), "agents").unwrap();
+        assert!(other_workspace.apply(&reviewed).is_err());
+        assert_eq!(
+            fs::read_to_string(other.path().join("AGENTS.md")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn create_plan_refuses_stale_manifests_and_occupied_paths() {
+        for change in [
+            "changed",
+            "removed",
+            "new",
+            "section",
+            "target",
+            "directory",
+        ] {
+            let temp = TempDir::new().unwrap();
+            if change != "new" {
+                init(temp.path()).unwrap();
+            }
+            let plan = create_plan(temp.path(), "agents", "created\n").unwrap();
+            match change {
+                "changed" | "new" => {
+                    fs::create_dir_all(plan.manifest_path.parent().unwrap()).unwrap();
+                    fs::write(&plan.manifest_path, "format = 1\n# intervening edit\n").unwrap();
+                }
+                "removed" => fs::remove_file(&plan.manifest_path).unwrap(),
+                "section" => fs::write(&plan.section_path, "foreign Section").unwrap(),
+                "target" => fs::write(&plan.target_path, "foreign target").unwrap(),
+                "directory" => fs::create_dir(&plan.target_path).unwrap(),
+                _ => unreachable!(),
+            }
+            let manifest = fs::read(&plan.manifest_path).ok();
+            assert!(plan.apply().is_err(), "{change}");
+            assert_eq!(fs::read(&plan.manifest_path).ok(), manifest);
+            if change == "section" {
+                assert_eq!(fs::read(&plan.section_path).unwrap(), b"foreign Section");
+            } else {
+                assert!(!plan.section_path.exists());
+            }
+            if change == "target" {
+                assert_eq!(fs::read(&plan.target_path).unwrap(), b"foreign target");
+            } else if change == "directory" {
+                assert!(plan.target_path.is_dir());
+            } else {
+                assert!(!plan.target_path.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn create_plan_manifest_failure_cleans_only_its_unchanged_section() {
+        for existing_manifest in [false, true] {
+            for change in ["unchanged", "edited", "replaced", "symlink"] {
+                let temp = TempDir::new().unwrap();
+                if existing_manifest {
+                    init(temp.path()).unwrap();
+                }
+                let plan = create_plan(temp.path(), "agents", "created\n").unwrap();
+                let manifest = fs::read(&plan.manifest_path).ok();
+                let unrelated = temp.path().join("unrelated");
+                fs::write(&unrelated, "foreign sentinel").unwrap();
+                let section = plan.section_path.clone();
+                let referent = unrelated.clone();
+                let _hook = crate::config::write_hook::install(&plan.manifest_path, 0, move || {
+                    assert_eq!(fs::read(&section)?, b"created\n");
+                    match change {
+                        "edited" => fs::write(&section, "intervening edit")?,
+                        "replaced" => {
+                            fs::remove_file(&section)?;
+                            fs::write(&section, "created\n")?;
+                        }
+                        "symlink" => {
+                            #[cfg(unix)]
+                            {
+                                fs::remove_file(&section)?;
+                                std::os::unix::fs::symlink(&referent, &section)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    Err(std::io::Error::other("injected manifest commit failure"))
+                });
+                assert!(plan.apply().unwrap_err().contains("injected"));
+                assert_eq!(fs::read(&plan.manifest_path).ok(), manifest);
+                assert!(!plan.target_path.exists());
+                assert_eq!(fs::read(&unrelated).unwrap(), b"foreign sentinel");
+                match change {
+                    "unchanged" => assert!(!plan.section_path.exists()),
+                    "edited" => {
+                        assert_eq!(fs::read(&plan.section_path).unwrap(), b"intervening edit")
+                    }
+                    "replaced" => assert_eq!(fs::read(&plan.section_path).unwrap(), b"created\n"),
+                    "symlink" => {
+                        #[cfg(unix)]
+                        assert_eq!(fs::read_link(&plan.section_path).unwrap(), unrelated);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn project_loader_rejects_invalid_target_compositions() {
+        let source = "format = 1\n[[sections]]\nid = \"common\"\nname = \"Common\"\npath = \"sections/common.md\"\n[targets.agents]\nsections = [\"common\"]\n";
+        let (temp, workspace) = workspace(source, &[("sections/common.md", "source")]);
+        let target = temp.path().join("AGENTS.md");
+        fs::write(&target, "target sentinel").unwrap();
+        for invalid in [
+            source.replace("format = 1", "format = 2"),
+            source.replace("[\"common\"]", "[\"common\", \"common\"]"),
+            source.replace("[\"common\"]", "[\"unknown\"]"),
+            source.replace("[\"common\"]", "[]"),
+        ] {
+            fs::write(&workspace.manifest_path, &invalid).unwrap();
+            assert!(Workspace::load(&workspace.manifest_path).is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"target sentinel");
+            assert_eq!(
+                fs::read_to_string(&workspace.manifest_path).unwrap(),
+                invalid
+            );
+        }
+        fs::write(&workspace.manifest_path, "format = 1\n").unwrap();
+        assert!(
+            Workspace::load(&workspace.manifest_path)
+                .unwrap()
+                .manifest
+                .targets
+                .is_empty()
         );
     }
 
@@ -661,6 +888,25 @@ mod tests {
     fn project_management_never_replaces_target_symlinks() {
         use std::os::unix::fs::symlink;
 
+        for resolving in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let plan = create_plan(temp.path(), "agents", "created\n").unwrap();
+            let referent = temp.path().join("referent");
+            if resolving {
+                fs::write(&referent, "foreign sentinel").unwrap();
+            }
+            symlink(&referent, &plan.target_path).unwrap();
+            assert!(plan.apply().unwrap_err().contains("symlink"));
+            assert_eq!(fs::read_link(&plan.target_path).unwrap(), referent);
+            assert!(!plan.section_path.exists());
+            assert!(!plan.manifest_path.exists());
+            if resolving {
+                assert_eq!(fs::read(&referent).unwrap(), b"foreign sentinel");
+            } else {
+                assert!(!referent.exists());
+            }
+        }
+
         let repository = TempDir::new().unwrap();
         assert!(
             Command::new("git")
@@ -680,10 +926,11 @@ mod tests {
         fs::remove_file(repository.path().join("CLAUDE.md")).unwrap();
         fs::write(repository.path().join("CLAUDE.md"), "claude\n").unwrap();
         let workspace = adopt(repository.path(), "claude").unwrap();
+        let reviewed = workspace.inspect("claude").unwrap();
         fs::remove_file(repository.path().join("CLAUDE.md")).unwrap();
         symlink("AGENTS.md", repository.path().join("CLAUDE.md")).unwrap();
 
-        let error = workspace.apply("claude").unwrap_err();
+        let error = workspace.apply(&reviewed).unwrap_err();
         assert!(error.contains("CLAUDE.md is a symlink"));
         assert!(
             fs::symlink_metadata(repository.path().join("CLAUDE.md"))

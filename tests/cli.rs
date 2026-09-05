@@ -4,6 +4,36 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "support/pty.rs"]
+mod pty;
+
+// Capture all fixture files, including manifests, ownership, backups and Git exclusions.
+fn files(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            (
+                entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn assert_pipe_refuses(home: &Path, repository: &Path, arguments: &[&str]) {
+    let before = (files(home), files(repository));
+    let output = mdmanager_in(home, repository, arguments);
+    assert!(!output.status.success(), "{arguments:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires --yes"),
+        "{arguments:?}: {output:?}"
+    );
+    assert_eq!((files(home), files(repository)), before, "{arguments:?}");
+}
+
 fn setup() -> TempDir {
     let temp = TempDir::new().unwrap();
     let config = temp.path().join(".mdmanager");
@@ -36,14 +66,36 @@ fn mdmanager(home: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mdmanager"))
         .args(arguments)
         .env("HOME", home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
         .output()
         .unwrap()
 }
 
+#[cfg(unix)]
+fn runtime_path() -> TempDir {
+    let bin = TempDir::new().unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(git, bin.path().join("git")).unwrap();
+    bin
+}
+
 fn mdmanager_in(home: &Path, directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+    #[cfg(unix)]
+    let bin = runtime_path();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mdmanager"));
+    #[cfg(unix)]
+    command.env("PATH", bin.path());
+    command
         .args(arguments)
         .env("HOME", home)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
         .current_dir(directory)
         .output()
         .unwrap()
@@ -78,7 +130,7 @@ fn bare_mdmanager_and_tui_are_the_same_command() {
             .contains("the TUI requires an interactive terminal")
     );
 
-    for command in ["tui1", "tui2", "tui3"] {
+    for command in ["tui1", "tui2"] {
         let removed = mdmanager(home.path(), &[command]);
         assert!(!removed.status.success());
         assert!(
@@ -201,23 +253,6 @@ fn doctor_describes_missing_configuration_without_calling_it_invalid() {
     assert!(output.contains("mdmanager init"));
     assert!(!output.contains("Global manifest: invalid"));
     assert!(!output.contains("repair the manifest"));
-}
-
-#[test]
-fn non_interactive_apply_prints_the_plan_before_requiring_yes() {
-    let home = setup();
-    let output = mdmanager(home.path(), &["apply", "default"]);
-
-    assert!(!output.status.success());
-    let plan = String::from_utf8(output.stdout).unwrap();
-    assert!(plan.contains("Profile: default"));
-    assert!(plan.contains("not found"));
-    assert!(plan.contains("+++ expected: default/claude"));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("non-interactive apply requires --yes")
-    );
 }
 
 #[test]
@@ -510,6 +545,66 @@ fn context_honors_claude_and_pi_user_directories() {
 }
 
 #[test]
+fn codex_context_honors_custom_home_root_candidates_and_shared_budget() {
+    let home = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let codex = home.path().join("custom-codex");
+    let root = workspace.path().join("root");
+    let child = root.join("child");
+    let cwd = child.join("deep");
+    fs::create_dir_all(&codex).unwrap();
+    fs::create_dir_all(cwd.join(".git")).unwrap();
+    fs::write(root.join(".instructions-root"), "").unwrap();
+    fs::write(workspace.path().join("AGENTS.md"), "above root").unwrap();
+    fs::write(codex.join("config.toml"),
+        "project_root_markers = ['.instructions-root']\nproject_doc_fallback_filenames = ['FIRST.md', 'SECOND.md']\nproject_doc_max_bytes = 5\n").unwrap();
+    fs::write(
+        codex.join("AGENTS.md"),
+        "home is outside the project budget",
+    )
+    .unwrap();
+    for (path, content) in [
+        (root.join("AGENTS.override.md"), ""),
+        (root.join("AGENTS.md"), "123"),
+        (root.join("FIRST.md"), "shadowed"),
+        (child.join("FIRST.md"), "4567"),
+        (child.join("SECOND.md"), "shadowed"),
+        (cwd.join("AGENTS.override.md"), "override"),
+        (cwd.join("AGENTS.md"), "shadowed"),
+    ] {
+        fs::write(path, content).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+        .args(["context", "--runtime", "codex", "--json"])
+        .env("HOME", home.path())
+        .env("CODEX_HOME", &codex)
+        .env("PATH", home.path())
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sources = json["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 8);
+    for (path, status) in [
+        (codex.join("AGENTS.md"), "at startup"),
+        (root.join("AGENTS.override.md"), "empty"),
+        (root.join("AGENTS.md"), "at startup"),
+        (root.join("FIRST.md"), "not selected"),
+        (child.join("FIRST.md"), "partial"),
+        (child.join("SECOND.md"), "not selected"),
+        (cwd.join("AGENTS.override.md"), "partial"),
+        (cwd.join("AGENTS.md"), "not selected"),
+    ] {
+        let source = sources
+            .iter()
+            .find(|source| source["path"] == path.to_str().unwrap())
+            .unwrap();
+        assert_eq!(source["status"], status, "{path:?}");
+    }
+}
+
+#[test]
 fn codex_context_reports_invalid_configuration_in_human_and_json_output() {
     let home = TempDir::new().unwrap();
     let repository = TempDir::new().unwrap();
@@ -535,6 +630,7 @@ fn codex_context_reports_invalid_configuration_in_human_and_json_output() {
     );
     assert!(json.status.success());
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(json.get("warnings").is_none());
     assert!(
         json["summary"]
             .as_str()
@@ -560,13 +656,14 @@ fn render_apply_status_and_modified_recovery() {
             .contains("no active profile")
     );
 
+    let before_refusal = files(home.path());
     let needs_yes = mdmanager(home.path(), &["apply", "default"]);
     assert!(!needs_yes.status.success());
-    assert!(
-        String::from_utf8(needs_yes.stdout)
-            .unwrap()
-            .contains("Profile: default")
-    );
+    let plan = String::from_utf8(needs_yes.stdout).unwrap();
+    assert!(plan.contains("Profile: default"));
+    assert!(plan.contains("not found"));
+    assert!(plan.contains("+++ expected: default/claude"));
+    assert_eq!(files(home.path()), before_refusal);
     assert!(
         String::from_utf8(needs_yes.stderr)
             .unwrap()
@@ -697,8 +794,33 @@ fn doctor_repairs_invalid_generated_state_without_changing_targets() {
     assert!(output.contains("Repair: rebuilt generated state for detected Profile default"));
     assert!(output.contains("No problems found"));
     assert!(mdmanager(home.path(), &["doctor"]).status.success());
-    for (path, expected) in targets.iter().zip(before) {
-        assert_eq!(fs::read(path).unwrap(), expected);
+    for (path, expected) in targets.iter().zip(&before) {
+        assert_eq!(&fs::read(path).unwrap(), expected);
+    }
+    let config = home.path().join(".mdmanager/mdmanager.toml");
+    let source = fs::read_to_string(&config).unwrap();
+    let mut manifest: toml::Value = toml::from_str(&source).unwrap();
+    let duplicate = manifest["profiles"]["default"].clone();
+    manifest["profiles"]
+        .as_table_mut()
+        .unwrap()
+        .insert("identical".into(), duplicate);
+    fs::write(&config, toml::to_string(&manifest).unwrap()).unwrap();
+    fs::write(&state, "active_profile = [").unwrap();
+    let ambiguous = mdmanager(home.path(), &["doctor"]);
+    assert!(!ambiguous.status.success());
+    let cleared: toml::Value = toml::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    assert!(cleared.get("active_profile").is_none());
+    assert!(cleared["targets"].as_table().unwrap().is_empty());
+    let state_before = fs::read(&state).unwrap();
+    assert!(
+        !mdmanager(home.path(), &["apply", "default", "--yes"])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read(&state).unwrap(), state_before);
+    for (path, expected) in targets.iter().zip(&before) {
+        assert_eq!(&fs::read(path).unwrap(), expected);
     }
 }
 
@@ -785,6 +907,12 @@ fn project_adopt_render_check_and_apply() {
             .success()
     );
 
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &["project", "adopt", "agents"],
+    );
+
     let adopted = mdmanager_in(
         home.path(),
         repository.path(),
@@ -837,6 +965,12 @@ fn project_adopt_render_check_and_apply() {
             .status
             .success()
     );
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &["project", "apply", "agents"],
+    );
+
     assert!(
         mdmanager_in(
             home.path(),
@@ -908,6 +1042,18 @@ fn project_create_authors_management_then_applies_the_root_file() {
     );
     let draft = repository.path().join("draft.md");
     fs::write(&draft, "# New project instructions\n").unwrap();
+
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &[
+            "project",
+            "create",
+            "agents",
+            "--from",
+            draft.to_str().unwrap(),
+        ],
+    );
 
     let created = mdmanager_in(
         home.path(),
@@ -1061,6 +1207,12 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
             .contains("managed agents instructions already exist")
     );
 
+    assert_pipe_refuses(
+        home.path(),
+        repository.path(),
+        &["local", "apply", "agents"],
+    );
+
     let applied = mdmanager_in(
         home.path(),
         repository.path(),
@@ -1104,6 +1256,25 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
     assert!(error.contains("refusing to overwrite"));
     assert!(error.contains("sections/local.md"));
     assert!(error.contains("move intended edits into that Section"));
+
+    #[cfg(unix)]
+    {
+        let output = repository.path().join("AGENTS.override.md");
+        fs::remove_file(&output).unwrap();
+        std::os::unix::fs::symlink("missing.md", &output).unwrap();
+        let exclusion = fs::read(&exclude).unwrap();
+        let refused = mdmanager_in(
+            home.path(),
+            repository.path(),
+            &["local", "apply", "agents", "--yes"],
+        );
+        assert!(!refused.status.success());
+        assert_eq!(
+            fs::read_link(output).unwrap(),
+            std::path::Path::new("missing.md")
+        );
+        assert_eq!(fs::read(&exclude).unwrap(), exclusion);
+    }
 }
 
 #[test]
@@ -1214,6 +1385,64 @@ fn managed_local_apply_preserves_a_preexisting_ignore_rule() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn pi_disable_classifies_child_codex_version_probes() {
+    use std::os::unix::fs::PermissionsExt;
+    for (probe, verified) in [
+        (Some("printf 'codex-cli 0.147.0\\n'"), true),
+        (Some("printf 'codex-cli 9.99.0\\n'"), false),
+        (None, false),
+        (Some("exit 1"), false),
+        (Some("printf 'malformed\\n'"), false),
+    ] {
+        let home = TempDir::new().unwrap();
+        let repository = TempDir::new().unwrap();
+        let bin = runtime_path();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repository.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repository.path().join("AGENTS.md"), "shared").unwrap();
+        if let Some(probe) = probe {
+            let executable = bin.path().join("codex");
+            fs::write(
+                &executable,
+                format!("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n{probe}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .args(["local", "disable", "pi", "--yes"])
+            .env("HOME", home.path())
+            .env("CODEX_HOME", home.path().join("codex"))
+            .env("PATH", bin.path())
+            .current_dir(repository.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let plan = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            plan.lines().any(|line| line == "Codex compatibility"),
+            verified
+        );
+        assert_eq!(
+            plan.lines()
+                .any(|line| line == "Codex compatibility warning"),
+            !verified
+        );
+        assert_eq!(
+            fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
+            b""
+        );
+    }
+}
+
 #[test]
 fn pi_disable_adds_and_restores_its_exclusion() {
     let home = TempDir::new().unwrap();
@@ -1228,6 +1457,8 @@ fn pi_disable_adds_and_restores_its_exclusion() {
     );
     fs::write(repository.path().join("AGENTS.md"), "# Shared\n").unwrap();
     let exclude = repository.path().join(".git/info/exclude");
+
+    assert_pipe_refuses(home.path(), repository.path(), &["local", "disable", "pi"]);
 
     let disabled = mdmanager_in(
         home.path(),
@@ -1252,6 +1483,8 @@ fn pi_disable_adds_and_restores_its_exclusion() {
             .lines()
             .any(|line| line == "/AGENTS.override.md")
     );
+
+    assert_pipe_refuses(home.path(), repository.path(), &["local", "restore", "pi"]);
 
     assert!(
         mdmanager_in(
@@ -1350,6 +1583,75 @@ fn claude_disable_preserves_source_and_restores_owned_settings() {
 
 #[cfg(unix)]
 #[test]
+fn claude_disable_preserves_matching_logical_pwd_and_rejects_mismatches() {
+    for matching in [true, false] {
+        let home = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let repository = workspace.path().join("physical");
+        let other = workspace.path().join("other");
+        let alias = workspace.path().join("logical");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(if matching { &repository } else { &other }, &alias).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repository.join("CLAUDE.md"), "shared").unwrap();
+        fs::write(other.join("CLAUDE.md"), "other").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .args(["local", "disable", "claude", "--yes"])
+            .env("HOME", home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("PWD", &alias)
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let expected = if matching { &alias } else { &repository }.join("CLAUDE.md");
+        let settings: serde_json::Value = serde_json::from_slice(
+            &fs::read(repository.join(".claude/settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["claudeMdExcludes"], serde_json::json!([expected]));
+        let owned = files(home.path())
+            .into_iter()
+            .find(|(path, _)| path.file_name().unwrap() == "overlays.toml")
+            .unwrap()
+            .1;
+        let owned: toml::Value = toml::from_str(std::str::from_utf8(&owned).unwrap()).unwrap();
+        assert_eq!(
+            owned["disables"]["claude"]["disabled_source"].as_str(),
+            expected.to_str()
+        );
+        let context = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .args(["context", "--runtime", "claude", "--json"])
+            .env("HOME", home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("PWD", &alias)
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(context.status.success(), "{context:?}");
+        let context: serde_json::Value = serde_json::from_slice(&context.stdout).unwrap();
+        assert!(
+            context["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source["status"] == "excluded"
+                    && source["path"] == repository.join("CLAUDE.md").to_str().unwrap())
+        );
+        assert!(!other.join(".claude").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn claude_disable_refuses_a_claude_symlink_to_agents() {
     use std::os::unix::fs::symlink;
 
@@ -1386,4 +1688,205 @@ fn claude_disable_refuses_a_claude_symlink_to_agents() {
             .join(".claude/settings.local.json")
             .exists()
     );
+}
+
+// Pipe tests cannot catch writes on default/decline/EOF or broken affirmative dispatch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn terminal_confirmation_guards_project_local_and_global_writes() {
+    let home = setup();
+    let repository = TempDir::new().unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(repository.path().join("draft.md"), "# Project\n").unwrap();
+    add_personal_section(home.path(), "local", "Local", "# Personal\n");
+    let exclude = repository.path().join(".git/info/exclude");
+    let original_exclude = fs::read(&exclude).unwrap();
+
+    let commands: &[&[&str]] = &[
+        &["project", "create", "agents", "--from", "draft.md"],
+        &["project", "apply", "agents"],
+        &["local", "disable", "pi"],
+        &["local", "restore", "pi"],
+        &["local", "apply", "agents"],
+        &["apply", "default"],
+    ];
+    for arguments in commands {
+        if *arguments == ["local", "apply", "agents"] {
+            let created = mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["local", "create", "agents", "local"],
+            );
+            assert!(created.status.success(), "{created:?}");
+        }
+        if *arguments == ["apply", "default"] {
+            // An external target would require force through pipes; review can authorize it.
+            fs::create_dir_all(home.path().join(".claude")).unwrap();
+            fs::write(home.path().join(".claude/CLAUDE.md"), "older external\n").unwrap();
+            assert!(
+                mdmanager(home.path(), &["apply", "default", "--yes", "--force"])
+                    .status
+                    .success()
+            );
+            fs::write(home.path().join(".claude/CLAUDE.md"), "external\n").unwrap();
+        }
+        let before = (files(home.path()), files(repository.path()));
+        for answer in [b"\n".as_slice(), b"n\n", b"\x04"] {
+            let mut terminal = pty::Pty::spawn(home.path(), repository.path(), arguments);
+            terminal.wait_for_prompt();
+            assert_eq!((files(home.path()), files(repository.path())), before);
+            // Canonical terminal VEOF on an empty input line makes read_line return EOF.
+            terminal.answer(answer);
+            let (status, output) = terminal.finish();
+            assert_eq!(status.code(), Some(1), "{arguments:?}: {output}");
+            assert_eq!(
+                (files(home.path()), files(repository.path())),
+                before,
+                "{arguments:?}, answer {answer:?}: {output}"
+            );
+        }
+        let mut terminal = pty::Pty::spawn(home.path(), repository.path(), arguments);
+        terminal.wait_for_prompt();
+        terminal.answer(b"yes\n");
+        let (status, output) = terminal.finish();
+        assert!(status.success(), "{arguments:?}: {output}");
+        assert_ne!((files(home.path()), files(repository.path())), before);
+        match *arguments {
+            ["project", "create", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join(".mdmanager/sections/agents.md")).unwrap(),
+                    b"# Project\n"
+                );
+                assert!(repository.path().join(".mdmanager/project.toml").is_file());
+                assert!(!repository.path().join("AGENTS.md").exists());
+            }
+            ["project", "apply", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join("AGENTS.md")).unwrap(),
+                    b"# Project\n"
+                );
+            }
+            ["local", "disable", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
+                    b""
+                );
+                assert!(
+                    fs::read_to_string(&exclude)
+                        .unwrap()
+                        .contains("/AGENTS.override.md")
+                );
+            }
+            ["local", "restore", ..] => {
+                assert!(!repository.path().join("AGENTS.override.md").exists());
+                assert_eq!(fs::read(&exclude).unwrap(), original_exclude);
+            }
+            ["local", "apply", ..] => {
+                assert_eq!(
+                    fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
+                    b"# Personal\n"
+                );
+                assert!(
+                    fs::read_to_string(&exclude)
+                        .unwrap()
+                        .contains("/AGENTS.override.md")
+                );
+                let status = mdmanager_in(home.path(), repository.path(), &["local", "status"]);
+                assert!(status.status.success(), "{status:?}");
+            }
+            ["apply", ..] => {
+                assert_eq!(
+                    fs::read(home.path().join(".mdmanager/backups/claude.bak")).unwrap(),
+                    b"older external\n"
+                );
+                assert_eq!(
+                    fs::read(home.path().join(".mdmanager/backups/claude.1.bak")).unwrap(),
+                    b"external\n"
+                );
+                assert!(mdmanager(home.path(), &["status"]).status.success());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+// A helper-level reviewed apply test misses a CLI that re-inspects after approval.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn terminal_apply_rejects_edits_after_review_but_accepts_edits_before_review() {
+    for project in [false, true] {
+        let home = setup();
+        let repository = TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repository.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (target, arguments) = if project {
+            fs::write(repository.path().join("AGENTS.md"), "# Original\n").unwrap();
+            let adopted = mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["project", "adopt", "agents", "--yes"],
+            );
+            assert!(adopted.status.success(), "{adopted:?}");
+            (
+                repository.path().join("AGENTS.md"),
+                vec!["project", "apply", "agents"],
+            )
+        } else {
+            assert!(
+                mdmanager(home.path(), &["apply", "default", "--yes"])
+                    .status
+                    .success()
+            );
+            (
+                home.path().join(".claude/CLAUDE.md"),
+                vec!["apply", "default"],
+            )
+        };
+        let expected = fs::read(&target).unwrap();
+        fs::write(&target, "edit before review\n").unwrap();
+        let before_prompt = (files(home.path()), files(repository.path()));
+        let mut terminal = pty::Pty::spawn(home.path(), repository.path(), &arguments);
+        terminal.wait_for_prompt();
+        assert_eq!(
+            (files(home.path()), files(repository.path())),
+            before_prompt
+        );
+        fs::write(&target, "edit during review\n").unwrap();
+        let after_edit = (files(home.path()), files(repository.path()));
+        terminal.answer(b"y\n");
+        let (status, output) = terminal.finish();
+        assert!(!status.success(), "{output}");
+        assert!(output.contains("changed after review"), "{output}");
+        assert_eq!((files(home.path()), files(repository.path())), after_edit);
+
+        // The same edit is acceptable when it is part of the displayed review.
+        let mut terminal = pty::Pty::spawn(home.path(), repository.path(), &arguments);
+        terminal.wait_for_prompt();
+        terminal.answer(b"y\n");
+        let (status, output) = terminal.finish();
+        assert!(status.success(), "{output}");
+        assert_eq!(fs::read(&target).unwrap(), expected);
+        if project {
+            assert!(!repository.path().join(".mdmanager/backups").exists());
+        } else {
+            assert_eq!(
+                fs::read(home.path().join(".mdmanager/backups/claude.bak")).unwrap(),
+                b"edit during review\n"
+            );
+            assert!(mdmanager(home.path(), &["status"]).status.success());
+        }
+    }
 }
