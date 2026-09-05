@@ -1,0 +1,22 @@
+# Rendered by record.sh for each theme; do not edit the generated demo.*.tape.
+Output workflow-@THEME@.gif
+Set Shell bash
+Set FontFamily "DejaVu Sans Mono"
+Set FontSize 14
+Set Width 1060
+Set Height 620
+Set Padding 14
+Set Framerate 12
+Set Theme @THEME_JSON@
+Env MDMANAGER_THEME "@THEME@"
+Env COLUMNS "120"
+Env LINES "32"
+Hide
+Type "bash /demo/fixture.sh && clear"
+Enter
+Sleep 2s
+Type "bash /demo/scenes.sh"
+Enter
+Sleep 1s
+Show
+Sleep 60s

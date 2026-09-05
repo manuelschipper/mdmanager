@@ -126,7 +126,7 @@ Open `mdmanager` in your terminal to check the result. Browse the sources and re
 while the agent works; the TUI reloads automatically as files change.
 
 <p align="center">
-  <img src="assets/workflow.gif" alt="A project Section changes on disk, the TUI reloads and shows the difference, and CLI Apply brings the target up to date" width="960">
+  <img src="assets/workflow.gif" alt="Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared Section, review the difference in CLAUDE.md and AGENTS.md, then apply it" width="960">
 </p>
 
 When you're happy with the changes, ask the agent to apply them. You can also authorize it to apply
