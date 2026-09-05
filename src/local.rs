@@ -417,7 +417,7 @@ fn validate_local_target(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(()),
         Ok(_) => Err(format!(
-            "local target {} is not an ordinary file; refusing to replace it",
+            "local target {} is not an ordinary file",
             path.display()
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

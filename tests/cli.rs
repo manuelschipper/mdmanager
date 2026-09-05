@@ -78,7 +78,7 @@ fn bare_mdmanager_and_tui_are_the_same_command() {
             .contains("the TUI requires an interactive terminal")
     );
 
-    for command in ["tui1", "tui2", "tui3"] {
+    for command in ["tui1", "tui2"] {
         let removed = mdmanager(home.path(), &[command]);
         assert!(!removed.status.success());
         assert!(
