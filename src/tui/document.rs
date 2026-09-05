@@ -27,6 +27,7 @@ pub(super) struct DocumentState {
     pub(super) document_height: u16,
     pub(super) highlighted_line: Option<(usize, Instant)>,
     pub(super) search: Option<SearchPrompt>,
+    last_search: Option<(String, usize)>,
     pub(super) line_prompt: Option<LinePrompt>,
 }
 
@@ -73,11 +74,36 @@ pub(super) fn render_document(
         );
         return;
     }
-    let lines = about.lines().count();
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let max_about_height = area.height.saturating_sub(4);
+    let mut displayed_about = about.to_owned();
+    let mut lines = Paragraph::new(displayed_about.as_str())
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width);
+    if lines.saturating_add(2) > usize::from(max_about_height) {
+        // Keep usage metadata and Contents reachable when the full path would consume the screen.
+        displayed_about = about
+            .lines()
+            .map(|line| {
+                if let Some(path) = line.strip_prefix("Path: ") {
+                    format!(
+                        "Path: {}",
+                        truncate_start(path, usize::from(inner_width).saturating_sub(6))
+                    )
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        lines = Paragraph::new(displayed_about.as_str())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width);
+    }
     let about_height = u16::try_from(lines)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
-        .min(area.height.saturating_sub(4));
+        .min(max_about_height);
     let [about_area, _, content_area] = Layout::vertical([
         Constraint::Length(about_height),
         Constraint::Length(1),
@@ -85,7 +111,7 @@ pub(super) fn render_document(
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(about)
+        Paragraph::new(displayed_about)
             .block(
                 Block::default()
                     .title(" About ")
@@ -380,18 +406,44 @@ impl DocumentState {
         if lines.is_empty() {
             return None;
         }
+        let width = self.document_width.max(1);
         let matches = lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line.to_lowercase().contains(&needle))
-            .map(|(index, _)| wrapped_line_offset(&lines, index, self.document_width.max(1)))
+            .filter_map(|(index, line)| {
+                let match_end = line.to_lowercase().find(&needle)? + needle.len();
+                let mut folded_bytes = 0;
+                let end = line.char_indices().find_map(|(byte, character)| {
+                    folded_bytes += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+                    (folded_bytes >= match_end).then_some(byte + character.len_utf8())
+                })?;
+                let within_line = Paragraph::new(&line[..end])
+                    .wrap(Wrap { trim: false })
+                    .line_count(width)
+                    .saturating_sub(1);
+                Some(wrapped_line_offset(&lines, index, width) + within_line)
+            })
             .collect::<Vec<_>>();
+        // The last match can lie below the maximum viewport origin. Retain its
+        // identity so repeating search advances even when scrolling was clamped.
+        let after = self
+            .last_search
+            .as_ref()
+            .filter(|(previous, offset)| {
+                previous == &needle
+                    && self.scroll
+                        == u16::try_from(*offset)
+                            .unwrap_or(u16::MAX)
+                            .min(self.max_scroll)
+            })
+            .map_or(usize::from(self.scroll), |(_, offset)| *offset);
         let found = matches
             .iter()
             .copied()
-            .find(|offset| *offset > usize::from(self.scroll))
+            .find(|offset| *offset > after)
             .or_else(|| matches.first().copied());
         if let Some(offset) = found {
+            self.last_search = Some((needle, offset));
             self.scroll = u16::try_from(offset)
                 .unwrap_or(u16::MAX)
                 .min(self.max_scroll);
@@ -510,40 +562,43 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     #[test]
-    fn document_search_moves_to_the_matching_line() {
+    fn document_navigation_reveals_matches_and_page_boundaries() {
         let (_home, repository, _paths, mut app) = fixture();
-        fs::write(
-            repository.path().join("AGENTS.md"),
-            format!("{}needle\n", "line\n".repeat(40)),
-        )
-        .unwrap();
+        let content = format!(
+            "FIRST-BOUNDARY\n{}\nneedle-alpha\n{} needle-beta\n{}\nneedle-gamma\nLAST-BOUNDARY",
+            "ordinary line\n".repeat(40),
+            "İ界 wrapped words ".repeat(300),
+            "ordinary line\n".repeat(40),
+        );
+        fs::write(repository.path().join("AGENTS.md"), content).unwrap();
         app.open(View::File {
             title: "AGENTS.md".into(),
             path: repository.path().join("AGENTS.md"),
             about: "Project file".into(),
         });
-        draw_at(&mut app, 80, 20);
-        app.apply_search("needle".into());
-        assert!(app.document.scroll > 0);
-        assert!(app.message.as_ref().unwrap().1.contains("Found"));
-    }
-
-    #[test]
-    fn document_search_accounts_for_wrapped_lines() {
-        let (_home, repository, _paths, mut app) = fixture();
-        fs::write(
-            repository.path().join("AGENTS.md"),
-            format!("{}\nneedle\n", "wide ".repeat(300)),
-        )
-        .unwrap();
-        app.open(View::File {
-            title: "AGENTS.md".into(),
-            path: repository.path().join("AGENTS.md"),
-            about: "Project file".into(),
-        });
-        draw_at(&mut app, 80, 20);
-        app.apply_search("needle".into());
-        assert!(app.document.scroll >= 5);
+        assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
+        for expected in [
+            "needle-alpha",
+            "needle-beta",
+            "needle-gamma",
+            "needle-alpha",
+        ] {
+            app.apply_search("NEEDLE".into());
+            let screen = draw_at(&mut app, 80, 20);
+            assert!(screen.contains(expected), "{expected} missing: {screen}");
+        }
+        for _ in 0..100 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        }
+        assert!(draw_at(&mut app, 80, 20).contains("LAST-BOUNDARY"));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(draw_at(&mut app, 80, 20).contains("LAST-BOUNDARY"));
+        for _ in 0..100 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        }
+        assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
     }
 
     #[test]
@@ -618,24 +673,6 @@ mod tests {
     }
 
     #[test]
-    fn shift_arrows_page_the_visible_document() {
-        let (_home, repository, _paths, mut app) = fixture();
-        fs::write(
-            repository.path().join("AGENTS.md"),
-            "long line\n".repeat(100),
-        )
-        .unwrap();
-        app.open(View::File {
-            title: "AGENTS.md".into(),
-            path: repository.path().join("AGENTS.md"),
-            about: "Project file".into(),
-        });
-        draw_at(&mut app, 80, 20);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
-        assert_eq!(app.document.scroll, PAGE_LINES);
-    }
-
-    #[test]
     fn short_info_replaces_the_screen_with_a_content_sized_panel() {
         let (_home, _repository, _paths, mut app) = fixture();
         app.open(View::Info {
@@ -678,9 +715,11 @@ mod tests {
         });
 
         let screen = draw_at(&mut app, 160, 50);
-        assert!(app.document.max_scroll > 0);
-        assert!(screen.contains("↑↓ scroll"));
-        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.document.scroll, 1);
+        assert!(screen.contains("error detail 1"));
+        assert!(!screen.contains("error detail 80"));
+        for _ in 0..80 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        }
+        assert!(draw_at(&mut app, 160, 50).contains("error detail 80"));
     }
 }

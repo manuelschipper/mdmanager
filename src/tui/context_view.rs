@@ -60,7 +60,16 @@ pub(super) fn render_context(
             input.scan_status,
             ContextScanStatus::NotStarted | ContextScanStatus::Scanning
         );
-    if input.inspection.context.sources.is_empty() && !scan_in_progress {
+    let has_scan_errors = match input.scan_status {
+        ContextScanStatus::Failed => true,
+        ContextScanStatus::Complete { unreadable } => !unreadable.is_empty(),
+        _ => false,
+    };
+    if input.inspection.context.sources.is_empty()
+        && !scan_in_progress
+        && input.inspection.context.warnings.is_empty()
+        && !has_scan_errors
+    {
         (*context_preview) = false;
         document.max_scroll = 0;
         frame.render_widget(
@@ -112,6 +121,12 @@ pub(super) fn render_context(
     let selected = entries.get(input.context_entry_index).copied();
     let mut selected_row = None;
     let mut items = Vec::new();
+    if input.inspection.context.sources.is_empty() && !scan_in_progress {
+        items.push(ListItem::new(
+            "No persistent Markdown instructions found for this runtime.",
+        ));
+        items.push(ListItem::new(""));
+    }
     for warning in &input.inspection.context.warnings {
         items.push(ListItem::new(Line::styled(
             format!("  ⚠ {}", relative_message(input.project_root, warning)),
@@ -678,15 +693,50 @@ mod tests {
     }
 
     #[test]
-    fn context_hides_an_empty_subfolder_group() {
-        let (_home, _repository, _paths, mut app) = fixture();
+    fn empty_context_retains_scan_diagnostics_without_a_selection() {
+        let (_home, repository, _paths, mut app) = fixture();
         app.open(View::Context);
         finish_context_scan(&mut app);
+        app.inspection.context.sources.clear();
+        app.context.audit.sources.clear();
+        assert!(app.inspection.context.warnings.is_empty());
+        let normal = draw(&mut app);
+        assert!(normal.contains("No persistent Markdown"));
+        assert!(!normal.contains("SUBFOLDER INSTRUCTIONS"));
+        assert!(context_entries(&app.inspection.context, false).is_empty());
+        assert!(!app.context_preview);
 
-        let screen = draw(&mut app);
+        app.context.scan_status = ContextScanStatus::Complete {
+            unreadable: vec![repository.path().join("unreadable-marker")],
+        };
+        assert!(draw(&mut app).contains("unreadable-marker"));
 
-        assert!(!screen.contains("SUBFOLDER INSTRUCTIONS"));
-        assert!(!screen.contains("Enter show"));
+        app.context.scan_status = ContextScanStatus::Failed;
+        let backend = TestBackend::new(100, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.fg == active_theme().warning
+                    && cell.symbol().chars().any(char::is_alphabetic))
+        );
+        assert!(
+            terminal
+                .backend()
+                .to_string()
+                .contains("No persistent Markdown")
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.view, View::Context));
+
+        app.context.scan_status = ContextScanStatus::Scanning;
+        assert!(draw(&mut app).contains("checking subfolders"));
+        assert!(!app.context_preview);
     }
 
     #[test]

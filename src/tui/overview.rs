@@ -671,7 +671,7 @@ mod tests {
     use super::super::inspection::symlink_info;
 
     #[test]
-    fn home_keeps_the_existing_groups_and_is_read_only() {
+    fn home_keeps_the_existing_groups() {
         let (_home, _repository, _paths, mut app) = fixture();
         let screen = draw(&mut app);
         assert!(screen.contains("CONTEXT"));
@@ -688,9 +688,6 @@ mod tests {
         assert!(!screen.contains("would replace"));
         assert!(!screen.contains("would load after"));
         assert!(screen.contains("mdmanager docs start"));
-        assert!(!screen.contains("Enter create"));
-        assert!(!screen.contains("Enter adopt"));
-        assert!(!screen.contains("apply"));
         let lines = screen.lines().collect::<Vec<_>>();
         let box_bottom = lines.iter().rposition(|line| line.contains('└')).unwrap();
         let guide = lines

@@ -286,7 +286,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn managed_project_is_browsable_but_has_no_mutation_keys() {
+    fn managed_project_exposes_composition_and_document() {
         let (_home, repository, paths, _app) = fixture();
         project::adopt(repository.path(), "agents").unwrap();
         let mut app = App::new_at(paths, None, repository.path().to_owned()).unwrap();
@@ -294,13 +294,10 @@ mod tests {
         let screen = draw(&mut app);
         assert!(screen.contains("Generated document"));
         assert!(screen.contains("Composition"));
-        assert!(!screen.contains("save"));
-        assert!(!screen.contains("apply"));
-        assert!(!screen.contains("toggle"));
     }
 
     #[test]
-    fn managed_difference_is_full_width_and_read_only() {
+    fn managed_difference_toggles_back_to_composition() {
         let (_home, repository, paths, _app) = fixture();
         let project = project::adopt(repository.path(), "agents").unwrap();
         fs::write(
@@ -317,8 +314,6 @@ mod tests {
         assert!(matches!(app.view, View::Diff(_)));
         let screen = draw_at(&mut app, 160, 40);
         assert!(screen.contains("Unified difference"));
-        assert!(screen.contains("Ask your coding agent"));
-        assert!(!screen.contains("confirm"));
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),

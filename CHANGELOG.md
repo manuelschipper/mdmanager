@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **TUI metadata and diagnostics** — Source About panels account for wrapped paths and
+  compact the displayed path when needed to keep usage metadata and Contents visible.
+  Empty Context views retain configuration warnings and scan failures.
+- **Document search navigation** — Search reveals matches within wrapped lines and
+  advances past the final match before wrapping, even at the bottom of a document.
+
 - **Collision-safe Global backups** — Backup reservations use create-only persistence so
   overlapping replacements retain every recovery point.
 - **Project creation safety** — Reviewed creation rejects newly introduced target symlinks
