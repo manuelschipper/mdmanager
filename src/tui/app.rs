@@ -2479,6 +2479,40 @@ mod tests {
     }
 
     #[test]
+    fn missing_local_targets_open_their_runtime_guidance() {
+        let (_home, _repository, _paths, mut app) = fixture();
+        for (target, runtimes) in [
+            (
+                local::ManagedTarget::Agents,
+                &[ContextRuntime::Pi, ContextRuntime::Codex][..],
+            ),
+            (local::ManagedTarget::Claude, &[ContextRuntime::Claude][..]),
+        ] {
+            app.home_index = app
+                .home_items()
+                .iter()
+                .position(|item| matches!(item, HomeItem::LocalMissing(value) if *value == target))
+                .unwrap();
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let View::Info { kind, title, text } = &app.view else {
+                panic!("expected missing Local target diagnostic");
+            };
+            assert!(matches!(kind, DiagnosticKind::General));
+            assert_eq!(title, &format!("{} · not found", target.filename()));
+            assert_eq!(text, &missing_local_text(target));
+            for runtime in [
+                ContextRuntime::Pi,
+                ContextRuntime::Codex,
+                ContextRuntime::Claude,
+            ] {
+                assert_eq!(text.contains(runtime.label()), runtimes.contains(&runtime));
+            }
+            handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(matches!(app.view, View::Home));
+        }
+    }
+
+    #[test]
     fn malformed_local_manifest_is_one_invalid_home_item() {
         let (_home, _repository, _paths, mut app) = fixture();
         let local_repository = app.local_repository.as_ref().unwrap();
