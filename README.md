@@ -71,7 +71,9 @@ mdmanager apply hosted --yes
 ```
 
 Profiles and personal Sections can live in your dotfiles. You handle getting those files onto each
-machine; mdmanager applies the chosen Profile there.
+machine; mdmanager applies the chosen Profile there. A fresh install does not fetch your Profiles or
+choose one for the machine. Follow the [fresh-machine setup and update workflow](docs/configuration.md#using-the-library-across-machines)
+to install your shared configuration, select a Profile, and apply later changes.
 
 ## Read global and project instructions together
 

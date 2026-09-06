@@ -90,6 +90,47 @@ A failed state save may leave unowned/changed output, even with matching bytes. 
 and preserve edits, then approve replacement or use `mdmanager apply PROFILE --force`;
 protected output is backed up first. Never edit state to bypass ownership protection.
 
+## Using the library across machines
+
+mdmanager reads the library installed on the current machine. It does not sync files between
+machines or select a Profile from the hostname. Your dotfiles repository or installer distributes
+`mdmanager.toml` and `sections/`; each machine chooses its own active Profile.
+
+On a fresh machine:
+
+1. Install mdmanager.
+2. Clone your dotfiles repository and copy or link its personal library into `~/.mdmanager/`.
+   Keep the generated `.gitignore` with the library so `projects/`, `state/`, and `backups/`
+   remain machine-local.
+3. Apply the Profile defined for this setup. Installing the binary alone does not make your
+   existing Profiles available. `mdmanager init` creates a starter library; skip it when restoring
+   your existing library.
+
+For example, if the cloned library is at `~/dotfiles/mdmanager`, defines a `vps` Profile, and
+`~/.mdmanager` does not yet exist:
+
+```sh
+ln -s "$HOME/dotfiles/mdmanager" "$HOME/.mdmanager"
+mdmanager apply vps --yes
+mdmanager status
+```
+
+Successful Apply records `vps` as this machine's active Profile in local ownership state.
+Another machine can apply a different Profile from the same library.
+
+To distribute later edits, commit and push the shared configuration and Sections. On each affected
+machine, pull those changes (or rerun the installer that copies them), then review and apply:
+
+```sh
+git -C "$HOME/dotfiles" pull --ff-only
+mdmanager apply
+mdmanager status
+```
+
+With no Profile argument, Apply uses that machine's recorded active Profile and prompts before
+writing changes. Pulling the library alone does not update deployed instruction files; Apply is
+required on each machine. An unattended installer can use `mdmanager apply vps --yes` explicitly.
+
 ## Committed project composition
 
 An opted-in Git repository keeps this source beside its generated root files:

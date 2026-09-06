@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Cross-machine setup** — Document how to install a shared personal library on a fresh
+  machine, select its Profile, and pull and apply later changes while keeping ownership state local.
+
 - **Markdown documents** — Render headings, lists, emphasis, code, and links in TUI documents
   and previews. Press `m` to switch to raw source; the saved UI preference reloads from disk.
   Source line numbers, line jumps, and search remain aligned; differences always stay raw.
