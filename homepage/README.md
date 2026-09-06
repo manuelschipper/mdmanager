@@ -6,8 +6,8 @@ at `/docs/` and `CHANGELOG.md` at `/news/`; edit those sources to change their
 content. Unreleased changelog entries stay out of the public site.
 
 The build copies the bundled Space Mono fonts from `assets/` and reuses the
-repository's hero artwork and workflow recording. It reads the version and Rust
-requirement from `Cargo.toml`.
+repository's hero artwork and workflow recording. It reads the version from
+`Cargo.toml`.
 
 ## Build and preview
 
@@ -25,6 +25,37 @@ root of `mdmanager.ai`, with directory indexes and `404.html` as the error page.
 Rebuild after changing docs, the changelog, or site sources. Generated output is
 ignored by Git. The site needs no application server; only the theme toggle and
 copy button use JavaScript. Clipboard access requires HTTPS or localhost.
+
+## Publish
+
+The site runs on Cloudflare Pages, project `mdmanager`, production branch `main`,
+with custom domain `mdmanager.ai`. Build from the exact released commit after its
+GitHub release succeeds, then deploy `homepage/dist/` with Wrangler:
+
+```sh
+npx wrangler pages deploy homepage/dist --project-name mdmanager --branch main
+```
+
+Use the operator's Cloudflare credentials through Relic; credentials do not belong
+in this repository. The generated `_headers` serves `/install` as plain text without
+caching. The installer selects a GitHub release and verifies the archive checksum
+before replacing the binary. GitHub releases and website deploys are separate.
+
+Verify `/`, `/docs/`, `/news/`, `/demo/`, `/install`, and an unknown path (404) on
+the immutable deployment URL and `https://mdmanager.ai`. Smoke-install into a
+temporary `MDMANAGER_INSTALL_DIR` on Linux and macOS and check `--version`.
+
+## Release
+
+CI checks formatting, Clippy, Rust tests, installer verification, and the website
+build on Linux and macOS. The tag workflow repeats CI, builds and runs the version
+check natively on all four release targets, and publishes archives and checksums
+only when every build succeeds.
+
+For the next release, update `Cargo.toml` and regenerate `Cargo.lock`, finalize the
+Unreleased changelog section, then commit and push to `main`. Require that commit's
+CI to pass before creating and pushing its `vX.Y.Z` tag. Never move a public release
+tag. Wait for the Release workflow to succeed before deploying the website.
 
 ## Re-record the demo
 

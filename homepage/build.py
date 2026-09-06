@@ -75,7 +75,6 @@ def page(title, description, path, current, content=None, noindex=False):
         "{{NAV}}": nav,
         "{{MARK}}": mark,
         "{{VERSION}}": escape(package["version"]),
-        "{{RUST_VERSION}}": escape(package["rust-version"]),
     }.items():
         rendered = rendered.replace(marker, value)
     robots = '<meta name="robots" content="noindex">' if noindex else ""
@@ -154,6 +153,8 @@ def write_page(path, html):
 if OUT.exists():
     shutil.rmtree(OUT)
 shutil.copytree(HERE / "assets", OUT / "assets")
+shutil.copyfile(HERE / "install.sh", OUT / "install")
+(OUT / "_headers").write_text("/install\n  Content-Type: text/plain; charset=utf-8\n  Cache-Control: no-cache\n  X-Content-Type-Options: nosniff\n")
 for filename in ["workflow.mp4", "workflow-light.mp4", "context.png"]:
     shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
 (OUT / "assets/favicon.svg").write_text(

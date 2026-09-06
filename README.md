@@ -142,12 +142,25 @@ The agent performs instruction edits and Apply through the CLI. You use the TUI 
 
 ## Get started
 
+Install a prebuilt binary for Linux or macOS (x86_64 and ARM64):
+
+```sh
+curl -fsSL https://mdmanager.ai/install | sh
+```
+
+The installer verifies the release's SHA-256 checksum and installs to `~/.local/bin`
+without sudo. Add that directory to your `PATH` if prompted. Run the same command to
+update. Set `MDMANAGER_VERSION=v0.1.0` to select a release or
+`MDMANAGER_INSTALL_DIR=/path/to/bin` to choose the destination; pass these variables
+to `sh` when piping the installer. Archives and checksums are also available on
+[GitHub Releases](https://github.com/manuelschipper/mdmanager/releases).
+
 Building from source requires Rust 1.91.1 or newer:
 
 ```sh
 git clone https://github.com/manuelschipper/mdmanager.git
 cd mdmanager
-cargo install --path .
+cargo install --locked --path .
 ```
 
 Open it in the repository you want to inspect:
