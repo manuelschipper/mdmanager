@@ -199,24 +199,24 @@ DEMO_ALT = (
     "Section, review the difference in CLAUDE.md and AGENTS.md, then apply it"
 )
 captions = json.loads((HERE / "demo/captions.json").read_text())
-steps = "".join(
-    f'<li data-start="{step["start"]}"><button type="button">{escape(step["text"])}</button></li>'
-    for step in captions
+dots = "".join(
+    f'<button type="button" data-start="{step["start"]}" data-text="{escape(step["text"])}" aria-label="Step {index}: {escape(step["text"])}"></button>'
+    for index, step in enumerate(captions, 1)
 )
 content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
-  <h1>The workflow in one minute</h1>
-  <div class="demo">
-    <video class="demo-video" autoplay muted loop playsinline controls
-      data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
-      aria-label="{escape(DEMO_ALT)}"></video>
-    <ol class="steps" aria-label="What the recording shows">{steps}</ol>
-  </div>
+  <h1 class="caption"><span class="counter"></span><span class="text">The workflow in one minute</span></h1>
+  <video class="demo-video" autoplay muted loop playsinline controls
+    data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
+    aria-label="{escape(DEMO_ALT)}"></video>
+  <div class="dots" aria-label="Steps">{dots}</div>
   <p>Recorded from a clean Docker installation with a scripted agent transcript; the CLI commands and TUI are real.</p>
 </main>
 <script>
 const video = document.querySelector('.demo-video');
-const steps = [...document.querySelectorAll('.steps li')];
+const dots = [...document.querySelectorAll('.dots button')];
+const counter = document.querySelector('.caption .counter');
+const text = document.querySelector('.caption .text');
 function source() {{
   const wanted = video.dataset[document.documentElement.classList.contains('light') ? 'light' : 'dark'];
   if (video.getAttribute('src') === wanted) return;
@@ -228,12 +228,15 @@ function source() {{
 source();
 window.addEventListener('themechange', source);
 video.addEventListener('timeupdate', () => {{
-  let active = null;
-  for (const step of steps) if (video.currentTime >= Number(step.dataset.start)) active = step;
-  for (const step of steps) step.classList.toggle('active', step === active);
+  let active = -1;
+  dots.forEach((dot, index) => {{ if (video.currentTime >= Number(dot.dataset.start)) active = index; }});
+  dots.forEach((dot, index) => dot.classList.toggle('active', index === active));
+  if (active < 0) return;
+  counter.textContent = `${{active + 1}}/${{dots.length}}`;
+  text.textContent = dots[active].dataset.text;
 }});
-for (const step of steps) step.querySelector('button').addEventListener('click', () => {{
-  video.currentTime = Number(step.dataset.start);
+for (const dot of dots) dot.addEventListener('click', () => {{
+  video.currentTime = Number(dot.dataset.start);
   video.play().catch(() => {{}});
 }});
 </script>
