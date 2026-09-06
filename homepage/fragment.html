@@ -279,24 +279,25 @@ aside a:not([aria-current=page]) {
   max-width:820px;
   margin:auto
 }
-.demo-image {
+.demo-video {
   display:block;
   width:100%;
-  max-height:calc(100vh - 220px);
+  max-height:calc(100vh - 250px);
   height:auto;
   object-fit:contain;
-  margin:auto
+  border:1px solid var(--border);
+  background:var(--bg)
 }
-html.light .demo-image.dark,html:not(.light) .demo-image.light {
+.caption .counter {
+  color:var(--muted);
+  font-weight:400;
+  margin-right:14px
+}
+.caption .counter:empty {
   display:none
 }
 .demo-panel {
   padding:20px
-}
-.demo-panel p {
-  color:var(--muted);
-  margin:16px 0 0;
-  font-size:12px
 }
 [hidden] {
   display:none!important
@@ -304,7 +305,8 @@ html.light .demo-image.dark,html:not(.light) .demo-image.light {
 .demo-panel h1 {
   font-size:20px;
   font-weight:700;
-  margin:0 0 17px
+  margin:0 0 17px;
+  min-height:27px
 }
 .back {
   font-size:12px;
@@ -471,6 +473,7 @@ updateThemeButton();
 themeButton.addEventListener('click', () => {
   const light = document.documentElement.classList.toggle('light');
   updateThemeButton();
+  window.dispatchEvent(new Event('themechange'));
   try {
     localStorage.setItem('mdmanager-theme', light ? 'light' : 'dark');
   } catch {

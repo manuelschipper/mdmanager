@@ -29,17 +29,21 @@ copy button use JavaScript. Clipboard access requires HTTPS or localhost.
 ## Re-record the demo
 
 `demo/` records the workflow demo from a clean Docker installation with VHS. The
-fixture is a Personal library with an applied Global Profile and a `harbor` Project
-whose `CLAUDE.md` and `AGENTS.md` share one Section. `scenes.sh` drives the TUI in
-tmux and writes the narration into a status band styled like the site; `agent.sh`
-plays the coding-agent pane with a scripted transcript around real CLI commands.
+fixture is a fictional Personal library with three machine Profiles over Claude, Codex
+and Pi, and a `harbor` Project as Context backdrop. `scenes.sh` drives the TUI in
+tmux and logs when each caption starts; `agent.sh` plays the coding-agent pane with a
+scripted transcript around real CLI commands.
 
 ```sh
 homepage/demo/record.sh
+cp homepage/demo/out/workflow-gruvbox-dark.mp4 assets/workflow.mp4
+cp homepage/demo/out/workflow-gruvbox-light.mp4 assets/workflow-light.mp4
 cp homepage/demo/out/workflow-gruvbox-dark.gif assets/workflow.gif
 cp homepage/demo/out/workflow-gruvbox-light.gif assets/workflow-light.gif
 ```
 
-Both GIFs come from the same tape; the site shows the one matching its theme.
-Building the image compiles mdmanager from the checkout, so the recording always
-matches the source it ships with.
+Both themes come from the same tape. The site plays the video matching its theme
+with the captions beside it as page text, from `demo/captions.json`, which
+`record.sh` refreshes. The README GIFs carry the same captions burned in below the
+terminal. Building the image compiles mdmanager from the checkout, so the recording
+always matches the source it ships with.

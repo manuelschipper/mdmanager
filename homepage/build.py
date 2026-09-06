@@ -3,6 +3,7 @@
 
 from html import escape
 from pathlib import Path
+import json
 import re
 import shutil
 import tomllib
@@ -153,7 +154,7 @@ def write_page(path, html):
 if OUT.exists():
     shutil.rmtree(OUT)
 shutil.copytree(HERE / "assets", OUT / "assets")
-for filename in ["workflow.gif", "workflow-light.gif", "context.png"]:
+for filename in ["workflow.mp4", "workflow-light.mp4", "context.png"]:
     shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
 (OUT / "assets/favicon.svg").write_text(
     mark.replace('class="mark"', 'color="#d79921"').replace('44 16 282 141', '34 -64 302 302')
@@ -194,17 +195,42 @@ write_page("/news/", page("Changelog · mdmanager.ai", "mdmanager releases and c
 paths.append("/news/")
 
 DEMO_ALT = (
-    "Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared "
-    "Section, review the difference in CLAUDE.md and AGENTS.md, then apply it"
+    "Open mdmanager, browse Context, the Library and two Profiles, watch a coding agent edit a "
+    "Section shared by Claude, Codex and Pi, review the Global difference, then apply the Profile"
 )
+captions = json.loads((HERE / "demo/captions.json").read_text())
 content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
-  <h1>The workflow in one minute</h1>
-  <img class="demo-image dark" src="/assets/workflow.gif" alt="{DEMO_ALT}">
-  <img class="demo-image light" src="/assets/workflow-light.gif" alt="{DEMO_ALT}">
-  <p>Recorded from a clean Docker installation with a scripted agent transcript; the CLI commands and TUI are real.</p>
-</main>'''
-write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context, review a shared Section change, and apply it with mdmanager.", "/demo/", "", content))
+  <h1 class="caption"><span class="counter"></span><span class="text">The workflow in one minute</span></h1>
+  <video class="demo-video" autoplay muted loop playsinline controls
+    data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
+    aria-label="{escape(DEMO_ALT)}"></video>
+</main>
+<script>
+const video = document.querySelector('.demo-video');
+const steps = {json.dumps(captions)};
+const counter = document.querySelector('.caption .counter');
+const text = document.querySelector('.caption .text');
+function source() {{
+  const wanted = video.dataset[document.documentElement.classList.contains('light') ? 'light' : 'dark'];
+  if (video.getAttribute('src') === wanted) return;
+  const at = video.currentTime;
+  video.setAttribute('src', wanted);
+  video.currentTime = at;
+  video.play().catch(() => {{}});
+}}
+source();
+window.addEventListener('themechange', source);
+video.addEventListener('timeupdate', () => {{
+  let active = -1;
+  steps.forEach((step, index) => {{ if (video.currentTime >= step.start) active = index; }});
+  if (active < 0) return;
+  counter.textContent = `${{active + 1}}/${{steps.length}}`;
+  text.textContent = steps[active].text;
+}});
+</script>
+'''
+write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context and Profiles, review a shared Section change across runtimes, and apply it with mdmanager.", "/demo/", "", content))
 paths.append("/demo/")
 
 (OUT / "404.html").write_text(page(
