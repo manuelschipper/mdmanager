@@ -195,8 +195,8 @@ write_page("/news/", page("Changelog · mdmanager.ai", "mdmanager releases and c
 paths.append("/news/")
 
 DEMO_ALT = (
-    "Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared "
-    "Section, review the difference in CLAUDE.md and AGENTS.md, then apply it"
+    "Open mdmanager, browse Context, the Library and two Profiles, watch a coding agent edit a "
+    "Section shared by Claude, Codex and Pi, review the Global difference, then apply the Profile"
 )
 captions = json.loads((HERE / "demo/captions.json").read_text())
 dots = "".join(
@@ -240,7 +240,7 @@ for (const dot of dots) dot.addEventListener('click', () => {{
 }});
 </script>
 '''
-write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context, review a shared Section change, and apply it with mdmanager.", "/demo/", "", content))
+write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context and Profiles, review a shared Section change across runtimes, and apply it with mdmanager.", "/demo/", "", content))
 paths.append("/demo/")
 
 (OUT / "404.html").write_text(page(

@@ -128,7 +128,7 @@ while the agent works; the TUI reloads automatically as files change.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/workflow-light.gif">
-    <img src="assets/workflow.gif" alt="Open mdmanager, browse Context for Claude and Codex, watch a coding agent edit a shared Section, review the difference in CLAUDE.md and AGENTS.md, then apply it" width="960">
+    <img src="assets/workflow.gif" alt="Open mdmanager, browse Context, the Library and two Profiles, watch a coding agent edit a Section shared by Claude, Codex and Pi, review the Global difference, then apply the Profile" width="960">
   </picture>
 </p>
 

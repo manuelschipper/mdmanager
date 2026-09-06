@@ -4,47 +4,51 @@
   "text": "Open mdmanager inside a repository."
  },
  {
-  "start": 5.0,
-  "text": "Home lists Context, Project, Local, Global and the Library."
+  "start": 4.9,
+  "text": "Home: Context, Project, Local and Global, plus your Library."
  },
  {
-  "start": 8.6,
+  "start": 8.5,
   "text": "Context shows every file Claude loads, in order, and why."
  },
  {
-  "start": 12.6,
-  "text": "Rules that load only for matching paths are called out."
+  "start": 12.7,
+  "text": "Press \u2192 for Codex. The first file in each chain is Global."
  },
  {
-  "start": 15.9,
-  "text": "Press \u2192 to compare runtimes. Codex loads a different chain."
+  "start": 17.7,
+  "text": "The Library: your Profiles and the Sections they share."
  },
  {
-  "start": 20.9,
-  "text": "CLAUDE.md is built from Sections; one is shared with AGENTS.md."
+  "start": 21.6,
+  "text": "Profile laptop: each runtime gets the Sections it needs."
  },
  {
-  "start": 24.8,
-  "text": "Ask your coding agent. It edits the Section through the CLI."
+  "start": 26.5,
+  "text": "Profile hosted: same library, another machine, another mix."
  },
  {
-  "start": 33.9,
-  "text": "The TUI reloads from disk while the agent works."
+  "start": 31.3,
+  "text": "Agent Common is used by every Profile. Edit it once."
  },
  {
-  "start": 38.5,
-  "text": "Review the difference. Nothing has been applied yet."
+  "start": 41.8,
+  "text": "Your agent edits the Section. The TUI reloads as it works."
  },
  {
-  "start": 43.9,
-  "text": "AGENTS.md gets the same line: both targets share the Section."
+  "start": 45.8,
+  "text": "One edit: Claude, Codex and Pi are all out of sync."
  },
  {
-  "start": 50.6,
-  "text": "Authorize Apply. The difference closes on its own."
+  "start": 50.7,
+  "text": "Review the Global difference before anything is applied."
  },
  {
-  "start": 54.1,
-  "text": "Every target is current. mdmanager.ai"
+  "start": 57.1,
+  "text": "Authorize Apply. All three targets are current again."
+ },
+ {
+  "start": 60.3,
+  "text": "Keep the library in dotfiles. Each machine applies its Profile."
  }
 ]

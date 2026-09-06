@@ -40,48 +40,53 @@ type_cmd() {
   say "Open mdmanager inside a repository."
   type_cmd "mdmanager"; sleep 0.4; keys Enter
   sleep 3.2                                  # splash
-  say "Home lists Context, Project, Local, Global and the Library."
+  say "Home: Context, Project, Local and Global, plus your Library."
   sleep 3.0
 
   keys Enter; sleep 0.6
   say "Context shows every file Claude loads, in order, and why."
   sleep 2.4
   keys Down; sleep 1.2
-  keys Down; sleep 0.4
-  say "Rules that load only for matching paths are called out."
-  sleep 2.8
-
   keys Right; sleep 0.5
-  say "Press → to compare runtimes. Codex loads a different chain."
-  sleep 3.2
-
-  keys Escape; sleep 0.5; keys Down; sleep 0.25; keys Down; sleep 0.4; keys Enter; sleep 0.6
-  say "CLAUDE.md is built from Sections; one is shared with AGENTS.md."
+  say "Press → for Codex. The first file in each chain is Global."
   sleep 3.0
-  keys Down; sleep 0.3; keys Enter; sleep 0.6
-  say "Ask your coding agent. It edits the Section through the CLI."
-  sleep 1.0
+
+  keys Escape; sleep 0.4
+  for _ in 1 2 3 4 5 6 7 8; do keys Down; sleep 0.12; done
+  keys Enter; sleep 0.5
+  say "The Library: your Profiles and the Sections they share."
+  sleep 3.4
+  keys Enter; sleep 0.5
+  say "Profile laptop: each runtime gets the Sections it needs."
+  sleep 3.6
+  keys Escape; sleep 0.3; keys Down; sleep 0.2; keys Down; sleep 0.3; keys Enter; sleep 0.5
+  say "Profile hosted: same library, another machine, another mix."
+  sleep 3.6
+  keys Escape; sleep 0.3; keys Down; sleep 0.3; keys Enter; sleep 0.5
+  say "Agent Common is used by every Profile. Edit it once."
+  sleep 2.4
+
   tmux split-window -hb -l 42 -t demo:0 "bash /demo/agent.sh"
   tmux select-pane -t demo:0.right
   until [ -e "$flags/edited" ]; do sleep 0.2; done
   sleep 0.8
-  say "The TUI reloads from disk while the agent works."
-  sleep 3.6
+  say "Your agent edits the Section. The TUI reloads as it works."
+  sleep 3.2
 
-  keys Escape; sleep 0.5; keys d; sleep 0.5
-  say "Review the difference. Nothing has been applied yet."
-  sleep 3.4
-  keys Escape; sleep 0.3; keys Escape; sleep 0.4; keys Up; sleep 0.3; keys Enter; sleep 0.4; keys d; sleep 0.5
-  say "AGENTS.md gets the same line: both targets share the Section."
+  keys Escape; sleep 0.3; keys Escape; sleep 0.5
+  say "One edit: Claude, Codex and Pi are all out of sync."
   sleep 3.6
+  keys Up; sleep 0.2; keys Up; sleep 0.2; keys Up; sleep 0.3; keys d; sleep 0.5
+  say "Review the Global difference before anything is applied."
+  sleep 3.2
 
   touch "$flags/approve"
   until [ -e "$flags/applied" ]; do sleep 0.2; done
-  sleep 0.5
-  say "Authorize Apply. The difference closes on its own."
-  sleep 3.0
-  keys Escape; sleep 0.5
-  say "Every target is current. mdmanager.ai"
+  sleep 0.6
+  tmux capture-pane -t demo:0.right -p | grep -q 'LIBRARY' || { keys Escape; sleep 0.4; }
+  say "Authorize Apply. All three targets are current again."
+  sleep 3.2
+  say "Keep the library in dotfiles. Each machine applies its Profile."
   sleep 4
 ) &
 

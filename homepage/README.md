@@ -29,8 +29,8 @@ copy button use JavaScript. Clipboard access requires HTTPS or localhost.
 ## Re-record the demo
 
 `demo/` records the workflow demo from a clean Docker installation with VHS. The
-fixture is a Personal library with an applied Global Profile and a `harbor` Project
-whose `CLAUDE.md` and `AGENTS.md` share one Section. `scenes.sh` drives the TUI in
+fixture is a fictional Personal library with three machine Profiles over Claude, Codex
+and Pi, and a `harbor` Project as Context backdrop. `scenes.sh` drives the TUI in
 tmux and logs when each caption starts; `agent.sh` plays the coding-agent pane with a
 scripted transcript around real CLI commands.
 
