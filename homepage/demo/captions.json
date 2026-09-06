@@ -1,14 +1,14 @@
 [
  {
-  "start": 0.4,
+  "start": 0.3,
   "text": "Open mdmanager inside a repository."
  },
  {
-  "start": 4.8,
+  "start": 4.7,
   "text": "Home: Context, Project, Local and Global, plus your Library."
  },
  {
-  "start": 8.4,
+  "start": 8.3,
   "text": "Context shows every file Claude loads, in order, and why."
  },
  {
@@ -20,11 +20,11 @@
   "text": "The Library: your Profiles and the Sections they share."
  },
  {
-  "start": 21.4,
+  "start": 21.3,
   "text": "Profile laptop: each runtime gets the Sections it needs."
  },
  {
-  "start": 26.3,
+  "start": 26.2,
   "text": "Profile hosted: same library, another machine, another mix."
  },
  {
@@ -40,11 +40,11 @@
   "text": "Your agent edits the Section. The TUI reloads as it works."
  },
  {
-  "start": 49.2,
+  "start": 49.1,
   "text": "One edit: Claude, Codex and Pi are all out of sync."
  },
  {
-  "start": 54.0,
+  "start": 53.9,
   "text": "Review the Global difference before anything is applied."
  },
  {
