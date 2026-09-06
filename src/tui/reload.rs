@@ -177,6 +177,7 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
         pi_agent.join("AGENTS.MD"),
         pi_agent.join("CLAUDE.md"),
         pi_agent.join("CLAUDE.MD"),
+        input.paths.home.join(".xi/AGENTS.md"),
     ] {
         hash_tree(&path, &mut hasher, false);
     }
@@ -243,36 +244,42 @@ mod tests {
 
     #[test]
     fn watcher_ignores_runtime_session_churn() {
-        let (home, _repository, _paths, app) = fixture();
-        let initial = current_watch_signature(&ReloadInput {
-            audit: &app.inspection.context,
-            paths: &app.paths,
-            watch_root: &app.watch_root,
-        });
-        let transcript = home
-            .path()
-            .join(".claude/projects/session/transcript.jsonl");
-        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        fs::write(transcript, "session output\n").unwrap();
-        assert_eq!(
-            current_watch_signature(&ReloadInput {
+        for (transcript_path, instruction_path) in [
+            (
+                ".claude/projects/session/transcript.jsonl",
+                ".claude/CLAUDE.md",
+            ),
+            (".xi/sessions/session/session.jsonl", ".xi/AGENTS.md"),
+        ] {
+            let (home, _repository, _paths, app) = fixture();
+            let initial = current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
+                watch_root: &app.watch_root,
+            });
+            let transcript = home.path().join(transcript_path);
+            fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            fs::write(transcript, "session output\n").unwrap();
+            assert_eq!(
+                current_watch_signature(&ReloadInput {
+                    audit: &app.inspection.context,
+                    paths: &app.paths,
+                    watch_root: &app.watch_root
+                }),
+                initial
+            );
 
-        let instruction = home.path().join(".claude/CLAUDE.md");
-        fs::write(instruction, "# Global instructions\n").unwrap();
-        assert_ne!(
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
+            let instruction = home.path().join(instruction_path);
+            fs::write(instruction, "# Global instructions\n").unwrap();
+            assert_ne!(
+                current_watch_signature(&ReloadInput {
+                    audit: &app.inspection.context,
+                    paths: &app.paths,
+                    watch_root: &app.watch_root
+                }),
+                initial
+            );
+        }
     }
 
     #[test]

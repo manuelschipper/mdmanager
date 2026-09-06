@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Xi support** — Add `init xi`, Xi in the Context runtime picker, and `context --runtime xi`.
+  Inspect Global and Project `AGENTS.md` in Xi loading order, report its 64 KiB per-file limit,
+  and reload Global Xi instruction changes. `mdmanager docs xi` covers setup and runtime boundaries.
+
 ## mdmanager 0.1.0 — Sep 6, 2026
 
 - **Binary installation** — Install verified Linux and macOS binaries for x86_64 and

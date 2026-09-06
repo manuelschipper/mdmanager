@@ -43,7 +43,7 @@ topics = dict(
 )
 groups = [
     ("Getting started", ["start", "context", "concepts", "migrate"]),
-    ("Runtimes", ["claude", "codex", "cursor", "pi"]),
+    ("Runtimes", ["claude", "codex", "cursor", "pi", "xi"]),
     ("Reference", ["configuration", "tui", "cli"]),
 ]
 

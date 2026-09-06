@@ -8,6 +8,7 @@ mdmanager context --runtime claude
 mdmanager context --runtime codex
 mdmanager context --runtime cursor
 mdmanager context --runtime pi
+mdmanager context --runtime xi
 mdmanager context --runtime claude --json
 ```
 
@@ -36,5 +37,5 @@ commands, output styles, prompt arguments, tool/MCP output, explicit attachments
 state. A runtime configuration file is read only to explain selection of persistent instruction
 Markdown.
 
-See `mdmanager docs claude`, `mdmanager docs codex`, `mdmanager docs cursor`, or
-`mdmanager docs pi` for runtime-specific loading and configuration recipes.
+See `mdmanager docs claude`, `mdmanager docs codex`, `mdmanager docs cursor`,
+`mdmanager docs pi`, or `mdmanager docs xi` for runtime-specific loading and configuration recipes.

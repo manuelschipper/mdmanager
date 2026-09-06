@@ -19,6 +19,7 @@ pub(crate) fn manifest(targets: &[String]) -> Result<String, String> {
             "claude" => ("~/.claude/CLAUDE.md", "Global Claude"),
             "codex" => ("~/.codex/AGENTS.md", "Global Codex"),
             "pi" => ("~/.pi/agent/AGENTS.md", "Global Pi"),
+            "xi" => ("~/.xi/AGENTS.md", "Global Xi"),
             "cursor" => {
                 return Err(
                     "Cursor has no Global Markdown target; use `mdmanager project adopt agents` for an existing AGENTS.md or `mdmanager project create agents --from FILE` to create one, and `mdmanager context --runtime cursor` to inspect it"
@@ -27,7 +28,7 @@ pub(crate) fn manifest(targets: &[String]) -> Result<String, String> {
             }
             _ => {
                 return Err(format!(
-                    "unknown Global target {id}; expected claude, codex, or pi"
+                    "unknown Global target {id}; expected claude, codex, pi, or xi"
                 ));
             }
         };

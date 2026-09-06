@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  Claude Code · Codex · Cursor · Pi
+  Claude Code · Codex · Cursor · Pi · Xi
 </p>
 
 <p align="center">

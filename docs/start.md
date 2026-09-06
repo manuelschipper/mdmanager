@@ -74,7 +74,7 @@ are outside its scope.
 
 Project and Local Instructions require a Git worktree. Global and Local compositions resolve
 Personal Sections through `~/.mdmanager/mdmanager.toml`; **mdmanager init [GLOBAL_TARGET...]**
-creates the library and exactly the requested Claude, Codex, or Pi targets without deploying them.
+creates the library and exactly the requested Claude, Codex, Pi, or Xi targets without deploying them.
 With no targets it creates only the library.
 
 ## Symlink aliases

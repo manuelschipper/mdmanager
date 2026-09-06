@@ -26,10 +26,11 @@ pub(crate) enum ContextRuntime {
     Codex,
     Cursor,
     Pi,
+    Xi,
 }
 
 impl ContextRuntime {
-    pub(crate) const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Cursor, Self::Pi];
+    pub(crate) const ALL: [Self; 5] = [Self::Claude, Self::Codex, Self::Cursor, Self::Pi, Self::Xi];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -37,6 +38,7 @@ impl ContextRuntime {
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
             Self::Pi => "Pi",
+            Self::Xi => "Xi",
         }
     }
 
@@ -46,8 +48,9 @@ impl ContextRuntime {
             "codex" => Ok(Self::Codex),
             "cursor" => Ok(Self::Cursor),
             "pi" => Ok(Self::Pi),
+            "xi" => Ok(Self::Xi),
             _ => Err(format!(
-                "unknown runtime {raw}; expected claude, codex, cursor, or pi"
+                "unknown runtime {raw}; expected claude, codex, cursor, pi, or xi"
             )),
         }
     }
@@ -58,6 +61,7 @@ impl ContextRuntime {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Pi => "pi",
+            Self::Xi => "xi",
         }
     }
 }
@@ -190,6 +194,7 @@ impl Audit {
             ContextRuntime::Codex => resolve_codex(&directory, paths),
             ContextRuntime::Cursor => resolve_cursor(&directory, paths),
             ContextRuntime::Pi => resolve_pi(&directory, paths),
+            ContextRuntime::Xi => resolve_xi(&directory, paths),
         };
         if let Some(global) = global {
             annotate_managed(&mut audit, global);
@@ -879,6 +884,61 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
         .count();
     Audit {
         runtime: ContextRuntime::Pi,
+        directory: directory.to_owned(),
+        sources,
+        warnings: Vec::new(),
+        summary: format!("{loaded} load at startup"),
+    }
+}
+
+fn resolve_xi(directory: &Path, paths: &Paths) -> Audit {
+    // Xi tests for a .git entry, including worktree gitfiles; it does not ask Git for a root.
+    let mut ancestors = directory
+        .ancestors()
+        .map(Path::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(index) = ancestors.iter().position(|path| path.join(".git").exists()) {
+        ancestors.truncate(index + 1);
+    }
+    ancestors.reverse();
+    let candidates = std::iter::once((paths.home.join(".xi/AGENTS.md"), "user".to_owned())).chain(
+        ancestors
+            .into_iter()
+            .map(|ancestor| (ancestor.join("AGENTS.md"), scope_for(&ancestor, directory))),
+    );
+    let mut sources = Vec::new();
+    for (path, scope) in candidates {
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let state = if metadata.len() > 64 * 1024 {
+            SourceState::Excluded(
+                "exceeds Xi's 64 KiB per-file limit; Xi skips the entire file".into(),
+            )
+        } else if metadata.len() == 0 {
+            SourceState::Empty
+        } else {
+            SourceState::Startup
+        };
+        push_source(
+            &mut sources,
+            &path,
+            &scope,
+            SourceGroup::Startup,
+            state,
+            paths,
+            directory,
+        );
+    }
+    let loaded = sources
+        .iter()
+        .filter(|source| matches!(source.state, SourceState::Startup))
+        .count();
+    Audit {
+        runtime: ContextRuntime::Xi,
         directory: directory.to_owned(),
         sources,
         warnings: Vec::new(),
@@ -1601,6 +1661,75 @@ mod tests {
             imports,
             [parent.join("../shared.md"), parent.join("./local.md")]
         );
+    }
+
+    #[test]
+    fn xi_loads_only_agents_in_directory_order_with_a_per_file_limit() {
+        for git_entry in ["directory", "file", "absent"] {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path().join("repo");
+            let cwd = root.join("empty/leaf");
+            fs::create_dir_all(cwd.join("descendant")).unwrap();
+            fs::create_dir_all(temp.path().join(".xi")).unwrap();
+            match git_entry {
+                "directory" => fs::create_dir(root.join(".git")).unwrap(),
+                "file" => fs::write(root.join(".git"), "gitdir: elsewhere").unwrap(),
+                _ => {}
+            }
+            let global = temp.path().join(".xi/AGENTS.md");
+            let outside = temp.path().join("AGENTS.md");
+            let project = root.join("AGENTS.md");
+            let empty = root.join("empty/AGENTS.md");
+            let large = cwd.join("AGENTS.md");
+            fs::write(&global, "global instructions").unwrap();
+            fs::write(&outside, "outside the git boundary").unwrap();
+            fs::write(&project, "x".repeat(64 * 1024)).unwrap();
+            fs::write(&empty, "").unwrap();
+            fs::write(&large, "x".repeat(64 * 1024 + 1)).unwrap();
+            for name in [
+                "AGENTS.override.md",
+                "CLAUDE.md",
+                "CLAUDE.local.md",
+                "AGENTS.MD",
+                "descendant/AGENTS.md",
+            ] {
+                fs::write(cwd.join(name), "not loaded by Xi").unwrap();
+            }
+            let audit = Audit::resolve(ContextRuntime::Xi, &cwd, &paths(temp.path()), None);
+            let sources = audit
+                .sources
+                .iter()
+                .filter(|source| source.path.starts_with(temp.path()))
+                .collect::<Vec<_>>();
+            let mut expected = vec![global.clone()];
+            if git_entry == "absent" {
+                expected.push(outside);
+            }
+            expected.extend([project.clone(), empty.clone(), large.clone()]);
+            assert_eq!(
+                sources
+                    .iter()
+                    .map(|source| source.path.clone())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(sources[0].scope, "user");
+            for path in [&global, &project] {
+                assert!(
+                    sources.iter().any(|source| &source.path == path
+                        && matches!(source.state, SourceState::Startup))
+                );
+            }
+            assert!(
+                sources.iter().any(
+                    |source| source.path == empty && matches!(source.state, SourceState::Empty)
+                )
+            );
+            assert!(
+                sources.iter().any(|source| source.path == large
+                    && matches!(source.state, SourceState::Excluded(_)))
+            );
+        }
     }
 
     #[test]

@@ -2393,16 +2393,20 @@ mod tests {
         assert!(app.picker.is_some());
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
         );
         let picker = draw(&mut app);
         assert!(picker.contains("mdmanager.ai · Context Runtime"));
-        assert!(picker.contains("Pi"));
-        assert!(!picker.contains("Codex"));
+        assert!(picker.contains("Xi"));
+        assert!(!picker.contains("Pi"));
         assert!(!picker.contains("PROJECT INSTRUCTIONS"));
         assert!(!picker.contains("GLOBAL INSTRUCTIONS"));
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.context.audit.runtime, ContextRuntime::Pi);
+        assert_eq!(app.context.audit.runtime, ContextRuntime::Xi);
         assert!(app.picker.is_none());
         let settings = app.paths.home.join(".codex/config.toml");
         fs::create_dir_all(settings.parent().unwrap()).unwrap();

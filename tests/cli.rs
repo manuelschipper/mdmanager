@@ -216,18 +216,20 @@ fn init_without_targets_creates_only_the_personal_library() {
 #[test]
 fn init_creates_exactly_the_selected_global_targets() {
     let home = TempDir::new().unwrap();
-    let output = mdmanager(home.path(), &["init", "claude", "codex"]);
+    let output = mdmanager(home.path(), &["init", "claude", "codex", "xi"]);
     assert!(output.status.success());
     let manifest = fs::read_to_string(home.path().join(".mdmanager/mdmanager.toml")).unwrap();
 
     assert!(manifest.contains("[targets.claude]"));
     assert!(manifest.contains("[targets.codex]"));
+    assert!(manifest.contains("[targets.xi]"));
     assert!(!manifest.contains("[targets.pi]"));
     assert!(manifest.contains("[profiles.default]"));
     assert!(manifest.contains("claude = [\"common\"]"));
     assert!(manifest.contains("codex = [\"common\"]"));
     assert!(!home.path().join(".claude/CLAUDE.md").exists());
     assert!(!home.path().join(".codex/AGENTS.md").exists());
+    assert!(!home.path().join(".xi/AGENTS.md").exists());
     assert!(
         String::from_utf8(output.stdout)
             .unwrap()
@@ -342,6 +344,7 @@ fn bundled_docs_work_without_configuration() {
         ("claude", include_str!("../docs/claude.md")),
         ("codex", include_str!("../docs/codex.md")),
         ("pi", include_str!("../docs/pi.md")),
+        ("xi", include_str!("../docs/xi.md")),
         ("concepts", include_str!("../docs/concepts.md")),
         ("configuration", include_str!("../docs/configuration.md")),
         ("cli", include_str!("../docs/cli.md")),
@@ -447,6 +450,53 @@ fn context_reports_rules_imports_exclusions_and_json() {
     );
     assert!(pi.status.success());
     assert!(!String::from_utf8(pi.stdout).unwrap().contains("SYSTEM.md"));
+}
+
+#[test]
+fn xi_context_reports_the_managed_global_and_project_chain() {
+    let home = TempDir::new().unwrap();
+    let repository = TempDir::new().unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repository.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let root = repository.path().canonicalize().unwrap();
+    let cwd = root.join("child");
+    fs::create_dir(&cwd).unwrap();
+    let project = root.join("AGENTS.md");
+    let leaf = cwd.join("AGENTS.md");
+    fs::write(&project, "project instructions").unwrap();
+    fs::write(&leaf, "leaf instructions").unwrap();
+    assert!(mdmanager(home.path(), &["init", "xi"]).status.success());
+    assert!(
+        mdmanager(home.path(), &["apply", "default", "--yes"])
+            .status
+            .success()
+    );
+    let global = home.path().join(".xi/AGENTS.md");
+    let rendered = mdmanager(home.path(), &["render", "default", "xi"]);
+    assert!(rendered.status.success());
+    assert_eq!(fs::read(&global).unwrap(), rendered.stdout);
+    let before = (files(home.path()), files(repository.path()));
+    let output = mdmanager_in(home.path(), &cwd, &["context", "--runtime", "xi", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["runtime"], "xi");
+    let sources = json["sources"].as_array().unwrap();
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [&global, &project, &leaf].map(|path| path.to_str().unwrap())
+    );
+    assert_eq!(sources[0]["managed"]["target"], "xi");
+    assert_eq!(sources[0]["managed"]["status"], "current");
+    assert_eq!((files(home.path()), files(repository.path())), before);
 }
 
 #[test]

@@ -32,10 +32,10 @@ enum Command {
     },
     /// Create the Personal Section library and selected Global targets without deploying.
     #[command(
-        long_about = "Create the Personal Section library and selected Global targets without deploying.\n\nAvailable Global targets: claude, codex, pi. Pass none to create only the Personal Section library. Cursor uses project AGENTS.md and has no Global target."
+        long_about = "Create the Personal Section library and selected Global targets without deploying.\n\nAvailable Global targets: claude, codex, pi, xi. Pass none to create only the Personal Section library. Cursor uses project AGENTS.md and has no Global target."
     )]
     Init {
-        /// Global targets to configure: claude, codex, pi.
+        /// Global targets to configure: claude, codex, pi, xi.
         #[arg(value_name = "GLOBAL_TARGET")]
         targets: Vec<String>,
     },
@@ -44,7 +44,7 @@ enum Command {
     Tui,
     /// Show the Markdown instruction files a runtime would load.
     Context {
-        /// Runtime to inspect: claude, codex, cursor, or pi.
+        /// Runtime to inspect: claude, codex, cursor, pi, or xi.
         #[arg(long, default_value = "claude")]
         runtime: String,
         /// Emit stable machine-readable output.

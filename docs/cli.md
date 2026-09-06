@@ -30,9 +30,9 @@ mdmanager local restore RUNTIME [--yes]
 ```
 
 `context`, `docs`, the TUI, and Project commands need no personal configuration. Context accepts
-`claude` (default), `codex`, `cursor`, or `pi`; JSON reports the same resolution details.
+`claude` (default), `codex`, `cursor`, `pi`, or `xi`; JSON reports the same resolution details.
 
-`init` accepts Global targets `claude`, `codex`, and `pi` and creates exactly those targets without
+`init` accepts Global targets `claude`, `codex`, `pi`, and `xi` and creates exactly those targets without
 deploying them. `apply PROFILE` writes that Profile's targets, not every catalog Target. With no
 arguments `init` creates only the Personal Section library. Cursor uses project
 `AGENTS.md` and has no Global target, so `init cursor` stops with directed project and Context

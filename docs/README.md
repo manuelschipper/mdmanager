@@ -11,6 +11,7 @@ those instructions without taking ownership of it.
 - [Codex](codex.md) — `AGENTS.md` discovery and overrides.
 - [Cursor](cursor.md) — `AGENTS.md` and `.cursor/rules/*.mdc` discovery.
 - [Pi](pi.md) — instruction-file selection.
+- [Xi](xi.md) — Global and Project `AGENTS.md` loading and per-run exclusions.
 - [Concepts](concepts.md) — scopes, rendering, and status.
 - [Configuration](configuration.md) — Global, Project, and Local manifests plus UI preferences.
 - [TUI](tui.md) — inspection screens, runtime and theme pickers, and keyboard controls.

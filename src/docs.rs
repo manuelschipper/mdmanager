@@ -48,6 +48,11 @@ const TOPICS: &[Topic] = &[
         "../docs/pi.md"
     ),
     topic!(
+        "xi",
+        "Understand Xi AGENTS.md loading and run-specific exclusions.",
+        "../docs/xi.md"
+    ),
+    topic!(
         "concepts",
         "Understand awareness, ownership, rendering, and status.",
         "../docs/concepts.md"
