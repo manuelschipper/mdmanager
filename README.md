@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/context.png" alt="Claude instruction sources in load order, with global, project, and local files beside a Markdown preview" width="960">
+  <img src="assets/context-rendered.png" alt="Claude instruction sources in load order beside a rendered Markdown preview" width="960">
 </p>
 
 Claude and Codex may share your coding conventions, but each also needs instructions of its own.

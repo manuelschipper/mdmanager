@@ -92,7 +92,7 @@ def page(title, description, path, current, content=None, noindex=False):
 <meta property="og:url" content="{SITE}{path}">
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{description}">
-<meta property="og:image" content="{SITE}/assets/context.png">
+<meta property="og:image" content="{SITE}/assets/context-rendered.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#282828">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
@@ -155,7 +155,7 @@ if OUT.exists():
 shutil.copytree(HERE / "assets", OUT / "assets")
 shutil.copyfile(HERE / "install.sh", OUT / "install")
 (OUT / "_headers").write_text("/install\n  Content-Type: text/plain; charset=utf-8\n  Cache-Control: no-cache\n  X-Content-Type-Options: nosniff\n")
-for filename in ["workflow.mp4", "workflow-light.mp4", "context.png"]:
+for filename in ["workflow.mp4", "workflow-light.mp4", "context-rendered.png"]:
     shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
 (OUT / "assets/favicon.svg").write_text(
     mark.replace('class="mark"', 'color="#d79921"').replace('44 16 282 141', '34 -64 302 302')

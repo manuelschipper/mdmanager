@@ -29,8 +29,9 @@ copy button use JavaScript. Clipboard access requires HTTPS or localhost.
 ## Publish
 
 The site runs on Cloudflare Pages, project `mdmanager`, production branch `main`,
-with custom domain `mdmanager.ai`. Build from the exact released commit after its
-GitHub release succeeds, then deploy `homepage/dist/` with Wrangler:
+with custom domain `mdmanager.ai`. For a release, build from the exact released
+commit after its GitHub release succeeds. For a website-only update, use its
+committed revision on `main`. Deploy `homepage/dist/` with Wrangler:
 
 ```sh
 npx wrangler pages deploy homepage/dist --project-name mdmanager --branch main
@@ -77,3 +78,21 @@ with the captions beside it as page text, from `demo/captions.json`, which
 `record.sh` refreshes. The README GIF carries the same captions burned in below the
 terminal and stays dark like the rest of the README. Building the image compiles mdmanager from the checkout, so the recording
 always matches the source it ships with.
+
+## Refresh the screenshot
+
+The README and social cards share `assets/context-rendered.png`. Capture it from
+the current TUI and the demo fixture after changing document rendering or Context:
+
+```sh
+docker build --network host -t mdmanager-demo -f homepage/demo/Dockerfile .
+mkdir -p homepage/demo/out
+docker run --rm --network none -v "$PWD/homepage/demo/out:/out" \
+  -v "$PWD/homepage/demo/context.tape:/demo/context.tape:ro" \
+  mdmanager-demo /demo/context.tape
+cp homepage/demo/out/context-rendered.png assets/context-rendered.png
+```
+
+Review the PNG before committing and deploying. When replacing a social-card
+image, change its filename and both references in `README.md` and `build.py` so
+image caches receive a new URL.
