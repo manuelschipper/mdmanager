@@ -39,11 +39,10 @@ homepage/demo/record.sh
 cp homepage/demo/out/workflow-gruvbox-dark.mp4 assets/workflow.mp4
 cp homepage/demo/out/workflow-gruvbox-light.mp4 assets/workflow-light.mp4
 cp homepage/demo/out/workflow-gruvbox-dark.gif assets/workflow.gif
-cp homepage/demo/out/workflow-gruvbox-light.gif assets/workflow-light.gif
 ```
 
 Both themes come from the same tape. The site plays the video matching its theme
 with the captions beside it as page text, from `demo/captions.json`, which
-`record.sh` refreshes. The README GIFs carry the same captions burned in below the
-terminal. Building the image compiles mdmanager from the checkout, so the recording
+`record.sh` refreshes. The README GIF carries the same captions burned in below the
+terminal and stays dark like the rest of the README. Building the image compiles mdmanager from the checkout, so the recording
 always matches the source it ships with.
