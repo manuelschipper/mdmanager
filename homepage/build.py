@@ -199,21 +199,16 @@ DEMO_ALT = (
     "Section shared by Claude, Codex and Pi, review the Global difference, then apply the Profile"
 )
 captions = json.loads((HERE / "demo/captions.json").read_text())
-dots = "".join(
-    f'<button type="button" data-start="{step["start"]}" data-text="{escape(step["text"])}" aria-label="Step {index}: {escape(step["text"])}"></button>'
-    for index, step in enumerate(captions, 1)
-)
 content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
   <h1 class="caption"><span class="counter"></span><span class="text">The workflow in one minute</span></h1>
   <video class="demo-video" autoplay muted loop playsinline controls
     data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
     aria-label="{escape(DEMO_ALT)}"></video>
-  <div class="dots" aria-label="Steps">{dots}</div>
 </main>
 <script>
 const video = document.querySelector('.demo-video');
-const dots = [...document.querySelectorAll('.dots button')];
+const steps = {json.dumps(captions)};
 const counter = document.querySelector('.caption .counter');
 const text = document.querySelector('.caption .text');
 function source() {{
@@ -228,15 +223,10 @@ source();
 window.addEventListener('themechange', source);
 video.addEventListener('timeupdate', () => {{
   let active = -1;
-  dots.forEach((dot, index) => {{ if (video.currentTime >= Number(dot.dataset.start)) active = index; }});
-  dots.forEach((dot, index) => dot.classList.toggle('active', index === active));
+  steps.forEach((step, index) => {{ if (video.currentTime >= step.start) active = index; }});
   if (active < 0) return;
-  counter.textContent = `${{active + 1}}/${{dots.length}}`;
-  text.textContent = dots[active].dataset.text;
-}});
-for (const dot of dots) dot.addEventListener('click', () => {{
-  video.currentTime = Number(dot.dataset.start);
-  video.play().catch(() => {{}});
+  counter.textContent = `${{active + 1}}/${{steps.length}}`;
+  text.textContent = steps[active].text;
 }});
 </script>
 '''
