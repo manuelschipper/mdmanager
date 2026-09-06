@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="#get-started">Get started</a> ·
+  <a href="#install">Install</a> ·
   <a href="#work-with-your-coding-agent">Demo</a> ·
   <a href="#documentation">Documentation</a>
 </p>
@@ -140,7 +140,7 @@ target directly.
 
 The agent performs instruction edits and Apply through the CLI. You use the TUI to inspect its work.
 
-## Get started
+## Install
 
 Install a prebuilt binary for Linux or macOS (x86_64 and ARM64):
 
@@ -148,37 +148,25 @@ Install a prebuilt binary for Linux or macOS (x86_64 and ARM64):
 curl -fsSL https://mdmanager.ai/install | sh
 ```
 
-The installer verifies the release's SHA-256 checksum and installs to `~/.local/bin`
-without sudo. Add that directory to your `PATH` if prompted. Run the same command to
-update. Set `MDMANAGER_VERSION=v0.1.0` to select a release or
-`MDMANAGER_INSTALL_DIR=/path/to/bin` to choose the destination; pass these variables
-to `sh` when piping the installer. Archives and checksums are also available on
-[GitHub Releases](https://github.com/manuelschipper/mdmanager/releases).
+Installs to `~/.local/bin` without sudo. Add it to your `PATH` if prompted.
+Run the same command to update. [Manual downloads](https://github.com/manuelschipper/mdmanager/releases).
 
-Building from source requires Rust 1.91.1 or newer:
+Point your coding agent to:
 
 ```sh
-git clone https://github.com/manuelschipper/mdmanager.git
-cd mdmanager
-cargo install --locked --path .
+mdmanager docs start
 ```
 
-Open it in the repository you want to inspect:
+Then run `mdmanager` inside your repository to inspect instructions in the TUI.
 
-```sh
-cd /path/to/your/repository
-mdmanager
-```
+<details>
+<summary>Installer options</summary>
 
-Then ask your coding agent to read `mdmanager docs start` and describe the setup you want.
+The installer verifies the release's SHA-256 checksum. Set `MDMANAGER_VERSION=v0.1.0`
+to select a release or `MDMANAGER_INSTALL_DIR=/path/to/bin` to choose the destination;
+pass these variables to `sh` when piping the installer.
 
-To prepare a personal Section library with Global Claude and Codex targets:
-
-```sh
-mdmanager init claude codex
-```
-
-Initialization creates the configuration without deploying instructions.
+</details>
 
 ## Documentation
 
@@ -204,6 +192,14 @@ See the [documentation index](docs/README.md) for runtime-specific guides.
 Release notes are in the [changelog](CHANGELOG.md).
 
 ## Develop
+
+Building from source requires Rust 1.91.1 or newer:
+
+```sh
+git clone https://github.com/manuelschipper/mdmanager.git
+cd mdmanager
+cargo install --locked --path .
+```
 
 ```sh
 cargo test
