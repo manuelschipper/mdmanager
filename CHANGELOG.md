@@ -6,6 +6,8 @@
   ARM64 from `mdmanager.ai/install`, with archives and SHA-256 checksums on GitHub Releases.
 - **Release checks** — Run formatting, Clippy, Rust tests, installer verification, and
   website builds on Linux and macOS before publishing native release binaries.
+- **Pi path aliases** — Disable and restore Pi instructions reached through a symlinked
+  parent directory, including macOS temporary paths, without rejecting them as outside the repository.
 
 - **Cross-machine setup** — Document how to install a shared personal library on a fresh
   machine, select its Profile, and pull and apply later changes while keeping ownership state local.

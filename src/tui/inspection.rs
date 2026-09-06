@@ -734,7 +734,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let (_home, repository, _paths, mut app) = fixture();
-        let link = repository.path().join("CLAUDE.md");
+        let link = fs::canonicalize(repository.path())
+            .unwrap()
+            .join("CLAUDE.md");
         symlink("missing.md", &link).unwrap();
         app.refresh_inspection();
 

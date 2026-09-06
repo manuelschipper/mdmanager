@@ -615,7 +615,7 @@ mod tests {
             assert!(screen.contains("Used by: not currently used"), "{screen}");
             assert!(screen.contains("│ Draft"), "{screen}");
         }
-        let source = repository.path().join(".mdmanager").join(&nested);
+        let source = fs::canonicalize(repository.path().join(".mdmanager").join(&nested)).unwrap();
         assert!(
             matches!(&app.view, View::SectionDocument { path, about, .. }
             if path == &source && about.contains(&source.display().to_string()))
