@@ -18,6 +18,9 @@ tmux -u new-session -d -s demo -x "${COLUMNS:-120}" -y "${LINES:-32}" \
   -e MDMANAGER_THEME="${MDMANAGER_THEME:-gruvbox-dark}" \
   "bash --noprofile --rcfile /demo/bashrc"
 tmux set -g status off
+# The recording terminal does not advertise 24-bit colour; without this tmux rounds every
+# theme colour to the nearest 256-colour palette entry and tints the light theme peach.
+tmux set -as terminal-features ',*:RGB'
 tmux set -g pane-border-style "fg=$border"
 tmux set -g pane-active-border-style "fg=$border"
 tmux set -g window-style "bg=$bg"
