@@ -10,7 +10,7 @@ The interfaces have separate responsibilities:
 
 - Coding agents interpret intent and edit Markdown or manifests.
 - The CLI performs every create, adopt, validate, render, apply, disable, and restore operation.
-- The TUI browses and verifies instructions read-only, reloads after disk changes, and saves UI theme preferences.
+- The TUI browses and verifies instructions read-only, reloads after disk changes, and saves UI theme and document rendering preferences.
 
 The TUI never stages composition changes or applies instructions. Its theme picker previews,
 saves on Enter, and restores the previous palette on Esc; see [TUI themes](docs/tui.md#theme-picker).
@@ -244,6 +244,8 @@ and owns view history and dispatch. Its child modules live beside it:
 - `inspection.rs` observes one refresh generation of instruction content, comparisons,
   diagnostics, file ownership, and Home identities. Its input includes document paths from
   the current view and history; it does not depend on App or navigation variants.
+- `markdown.rs` converts Markdown parser events into styled source lines without wrapping or
+  filesystem access; removed delimiters retain blank source-line slots.
 - `document.rs` owns viewport dimensions, wrapping, search and line-jump prompts, temporary
   highlights, and document rendering shared by the pages.
 - `reload.rs` owns watch signatures and the polling clock. It requests refresh; App accepts

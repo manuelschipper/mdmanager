@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::active_theme;
+use super::markdown::RenderMode;
 
 const LINE_HIGHLIGHT_DURATION: Duration = Duration::from_millis(1200);
 
@@ -21,6 +22,7 @@ pub(super) const COMPACT_WIDTH: u16 = 120;
 #[derive(Default)]
 /// Viewport and prompts belong to one TUI session; wrapping determines scroll offsets.
 pub(super) struct DocumentState {
+    pub(super) render_mode: RenderMode,
     pub(super) scroll: u16,
     pub(super) max_scroll: u16,
     pub(super) document_width: u16,
@@ -39,17 +41,16 @@ pub(super) struct SearchPrompt {
     pub(super) query: String,
 }
 
-fn wrapped_line_offset(lines: &[&str], index: usize, width: u16) -> usize {
-    if index == 0 {
-        return 0;
-    }
-    let mut prefix = lines[..index].join("\n");
-    prefix.push('\n');
-    prefix.push('x');
-    Paragraph::new(prefix)
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .saturating_sub(1)
+fn wrapped_line_offset(lines: &[Line<'_>], index: usize, width: u16) -> usize {
+    lines[..index]
+        .iter()
+        .map(|line| {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                .max(1)
+        })
+        .sum()
 }
 
 /// Renders accepted document text; never reads its source path from disk.
@@ -142,6 +143,37 @@ pub(super) fn render_plain_document(
     readable: bool,
     numbered: bool,
 ) {
+    let lines = document.render_mode.lines(content);
+    render_lines(frame, document, area, title, lines, readable, numbered);
+}
+
+pub(super) fn render_raw_document(
+    frame: &mut Frame<'_>,
+    document: &mut DocumentState,
+    area: Rect,
+    title: &str,
+    content: &str,
+) {
+    render_lines(
+        frame,
+        document,
+        area,
+        title,
+        RenderMode::Raw.lines(content),
+        false,
+        false,
+    );
+}
+
+fn render_lines(
+    frame: &mut Frame<'_>,
+    document: &mut DocumentState,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    readable: bool,
+    numbered: bool,
+) {
     let block = Block::default()
         .title(title)
         .title_style(Style::new().fg(active_theme().secondary))
@@ -159,7 +191,6 @@ pub(super) fn render_plain_document(
         inner.x + inner.width.saturating_sub(width) / 2
     };
     let readable_area = Rect::new(x, inner.y, width, inner.height);
-    let lines = content.lines().collect::<Vec<_>>();
     let number_width = lines.len().max(1).to_string().len().max(3);
     let gutter_width = if numbered {
         u16::try_from(number_width)
@@ -183,13 +214,15 @@ pub(super) fn render_plain_document(
             .iter()
             .enumerate()
             .map(|(index, line)| {
-                let line = Line::raw((*line).to_owned());
+                let mut line = line.clone();
                 if highlighted == Some(index + 1) {
-                    line.style(
-                        Style::new()
-                            .fg(active_theme().background)
-                            .bg(active_theme().warning),
-                    )
+                    let highlight = Style::new()
+                        .fg(active_theme().background)
+                        .bg(active_theme().warning);
+                    for span in &mut line.spans {
+                        span.style = span.style.patch(highlight);
+                    }
+                    line.style(highlight)
                 } else {
                     line
                 }
@@ -212,7 +245,7 @@ pub(super) fn render_plain_document(
                 format!("{:>number_width$} │ ", index + 1),
                 Style::new().fg(active_theme().muted),
             ));
-            let wrapped = Paragraph::new((*line).to_owned())
+            let wrapped = Paragraph::new(line.clone())
                 .wrap(Wrap { trim: false })
                 .line_count(content_area.width.max(1))
                 .max(1);
@@ -378,7 +411,7 @@ pub(super) fn info_panel_geometry(screen: Rect, text: &str) -> (Rect, u16) {
 
 impl DocumentState {
     pub(super) fn go_to_line(&mut self, text: &str, input: String) -> (bool, String) {
-        let lines = text.lines().collect::<Vec<_>>();
+        let lines = self.render_mode.lines(text);
         if lines.is_empty() {
             return (false, "Document has no lines".into());
         }
@@ -397,7 +430,12 @@ impl DocumentState {
         (true, format!("Line {line}"))
     }
 
-    pub(super) fn apply_search(&mut self, text: &str, query: String) -> Option<(bool, String)> {
+    pub(super) fn apply_search(
+        &mut self,
+        text: &str,
+        query: String,
+        raw: bool,
+    ) -> Option<(bool, String)> {
         if query.is_empty() {
             return None;
         }
@@ -407,21 +445,32 @@ impl DocumentState {
             return None;
         }
         let width = self.document_width.max(1);
+        let displayed = if raw {
+            RenderMode::Raw
+        } else {
+            self.render_mode
+        }
+        .lines(text);
         let matches = lines
             .iter()
             .enumerate()
             .filter_map(|(index, line)| {
-                let match_end = line.to_lowercase().find(&needle)? + needle.len();
+                line.to_lowercase().find(&needle)?;
+                let visible = displayed[index].to_string();
+                let Some(match_start) = visible.to_lowercase().find(&needle) else {
+                    return Some(wrapped_line_offset(&displayed, index, width));
+                };
+                let match_end = match_start + needle.len();
                 let mut folded_bytes = 0;
-                let end = line.char_indices().find_map(|(byte, character)| {
+                let end = visible.char_indices().find_map(|(byte, character)| {
                     folded_bytes += character.to_lowercase().map(char::len_utf8).sum::<usize>();
                     (folded_bytes >= match_end).then_some(byte + character.len_utf8())
                 })?;
-                let within_line = Paragraph::new(&line[..end])
+                let within_line = Paragraph::new(&visible[..end])
                     .wrap(Wrap { trim: false })
                     .line_count(width)
                     .saturating_sub(1);
-                Some(wrapped_line_offset(&lines, index, width) + within_line)
+                Some(wrapped_line_offset(&displayed, index, width) + within_line)
             })
             .collect::<Vec<_>>();
         // The last match can lie below the maximum viewport origin. Retain its
@@ -563,9 +612,9 @@ mod tests {
         let (_home, repository, _paths, mut app) = fixture();
         let content = format!(
             "FIRST-BOUNDARY\n{}\nneedle-alpha\n{} needle-beta\n{}\nneedle-gamma\nLAST-BOUNDARY",
-            "ordinary line\n".repeat(40),
-            "İ界 wrapped words ".repeat(300),
-            "ordinary line\n".repeat(40),
+            "**ordinary** line\n".repeat(40),
+            "**İ界 wrapped words** ".repeat(300),
+            "**ordinary** line\n".repeat(40),
         );
         fs::write(repository.path().join("AGENTS.md"), content).unwrap();
         app.open(View::File {
@@ -573,36 +622,45 @@ mod tests {
             path: repository.path().join("AGENTS.md"),
             about: "Project file".into(),
         });
-        assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
-        for expected in [
-            "needle-alpha",
-            "needle-beta",
-            "needle-gamma",
-            "needle-alpha",
-        ] {
-            app.apply_search("NEEDLE".into());
-            let screen = draw_at(&mut app, 80, 20);
-            assert!(screen.contains(expected), "{expected} missing: {screen}");
-        }
-        for _ in 0..100 {
+        for mode in [RenderMode::Markdown, RenderMode::Raw] {
+            app.document.render_mode = mode;
+            app.document.scroll = 0;
+            assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
+            for expected in [
+                "needle-alpha",
+                "needle-beta",
+                "needle-gamma",
+                "needle-alpha",
+            ] {
+                app.apply_search("NEEDLE".into());
+                let screen = draw_at(&mut app, 80, 20);
+                assert!(screen.contains(expected), "{expected} missing: {screen}");
+            }
+            for _ in 0..100 {
+                handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+            }
+            assert!(draw_at(&mut app, 80, 20).contains("LAST-BOUNDARY"));
             handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
-        }
-        assert!(draw_at(&mut app, 80, 20).contains("LAST-BOUNDARY"));
-        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
-        assert!(draw_at(&mut app, 80, 20).contains("LAST-BOUNDARY"));
-        for _ in 0..100 {
+            assert!(draw_at(&mut app, 80, 20).contains("LAST-BOUNDARY"));
+            for _ in 0..100 {
+                handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+            }
+            assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
             handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+            assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
         }
-        assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
-        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
-        assert!(draw_at(&mut app, 80, 20).contains("FIRST-BOUNDARY"));
     }
 
     #[test]
     fn go_to_line_centers_and_highlights_the_source_line() {
         let (_home, repository, _paths, mut app) = fixture();
         let content = (1..=100)
-            .map(|line| format!("line {line}"))
+            .map(|line| match line {
+                20 | 22 => "```".into(),
+                21 => "# verbatim code".into(),
+                1..=70 => format!("## {}", "**wrapped words** ".repeat(12)),
+                _ => format!("line {line}"),
+            })
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(repository.path().join("AGENTS.md"), content).unwrap();
@@ -634,6 +692,86 @@ mod tests {
             .find(|line| line.contains("line 80"))
             .unwrap();
         assert_eq!(row.split('│').nth(1).unwrap().trim(), "80");
+    }
+
+    #[test]
+    fn markdown_styles_preserve_source_rows_and_code_bytes() {
+        let source = "# Heading\n## Heading\n### Heading\n\n- **bold** and *italic* with `code`\n  - nested\n\n7. ordered\n3. retained\n\n[link](https://example.com)\n```rust\n# **verbatim**\n\n  indented\n```\nlast\n`multi\nline`";
+        let lines = RenderMode::Markdown.lines(source);
+        assert_eq!(lines.len(), source.lines().count());
+        for (row, bold) in [(0, true), (1, true), (2, false)] {
+            assert_eq!(lines[row].spans.len(), 1);
+            let span = &lines[row].spans[0];
+            assert!(!span.content.starts_with('#'));
+            assert_eq!(span.style.fg, Some(active_theme().primary));
+            assert_eq!(span.style.add_modifier.contains(Modifier::BOLD), bold);
+        }
+        assert!(lines[3].spans.is_empty());
+        assert_eq!(lines[4].spans[0].content, "• ");
+        for modifier in [Modifier::BOLD, Modifier::ITALIC] {
+            assert!(
+                lines[4]
+                    .spans
+                    .iter()
+                    .any(|span| span.style.add_modifier.contains(modifier))
+            );
+        }
+        assert!(
+            lines[4]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(active_theme().muted)
+                    && !span.content.contains('`'))
+        );
+        assert_eq!(lines[5].spans[0].content, "  • ");
+        for row in [7, 8] {
+            assert!(
+                lines[row].to_string().starts_with(
+                    source
+                        .lines()
+                        .nth(row)
+                        .unwrap()
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                )
+            );
+        }
+        assert!(
+            lines[10]
+                .spans
+                .last()
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+        for row in [11, 15] {
+            assert!(lines[row].spans.is_empty());
+        }
+        for row in [12, 13, 14] {
+            assert_eq!(
+                lines[row].to_string(),
+                format!("    {}", source.lines().nth(row).unwrap())
+            );
+            assert_eq!(lines[row].style.fg, Some(active_theme().muted));
+        }
+        for row in [17, 18] {
+            assert_eq!(lines[row].spans.len(), 1);
+            assert_eq!(lines[row].spans[0].style.fg, Some(active_theme().muted));
+            assert_eq!(
+                lines[row].to_string(),
+                source.lines().nth(row).unwrap().trim_matches('`')
+            );
+        }
+        assert_eq!(
+            RenderMode::Raw
+                .lines(source)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            source.lines().collect::<Vec<_>>()
+        );
     }
 
     #[test]

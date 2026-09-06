@@ -10,6 +10,7 @@ publish = false
 clap = { version = "4.6.4", features = ["derive"] }
 glob = "0.3"
 indexmap = { version = "2", features = ["serde"] }
+pulldown-cmark = { version = "=0.13.0", default-features = false }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

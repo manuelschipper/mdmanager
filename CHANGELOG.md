@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Markdown documents** — Render headings, lists, emphasis, code, and links in TUI documents
+  and previews. Press `m` to switch to raw source; the saved UI preference reloads from disk.
+  Source line numbers, line jumps, and search remain aligned; differences always stay raw.
+
 - **Bundled docs** — Remove private page-size limits so documentation growth cannot
   panic when reading a topic in a debug build.
 
