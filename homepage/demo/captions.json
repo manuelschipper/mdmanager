@@ -1,58 +1,42 @@
 [
  {
-  "start": 0.3,
-  "text": "Open mdmanager inside a repository."
- },
- {
   "start": 4.7,
   "text": "Home: Context, Project, Local and Global, plus your Library."
  },
  {
-  "start": 8.3,
+  "start": 9.3,
   "text": "Context shows every file Claude loads, in order, and why."
  },
  {
-  "start": 12.5,
-  "text": "Press \u2192 for Codex. The first file in each chain is Global."
- },
- {
-  "start": 17.4,
+  "start": 16.2,
   "text": "The Library: your Profiles and the Sections they share."
  },
  {
-  "start": 21.3,
+  "start": 20.8,
   "text": "Profile laptop: each runtime gets the Sections it needs."
  },
  {
-  "start": 26.2,
+  "start": 26.3,
   "text": "Profile hosted: same library, another machine, another mix."
  },
  {
-  "start": 31.0,
-  "text": "Agent Common is used by every Profile. Edit it once."
+  "start": 32.3,
+  "text": "Your agent edits Agent Common. The TUI reloads as it works."
  },
  {
-  "start": 33.8,
-  "text": "Documents render as Markdown. Press m for the raw source."
- },
- {
-  "start": 45.1,
-  "text": "Your agent edits the Section. The TUI reloads as it works."
- },
- {
-  "start": 49.1,
+  "start": 44.1,
   "text": "One edit: Claude, Codex and Pi are all out of sync."
  },
  {
-  "start": 53.9,
+  "start": 49.4,
   "text": "Review the Global difference before anything is applied."
  },
  {
-  "start": 60.4,
+  "start": 56.3,
   "text": "Authorize Apply. All three targets are current again."
  },
  {
-  "start": 63.6,
+  "start": 59.9,
   "text": "Keep the library in dotfiles. Each machine applies its Profile."
  }
 ]
