@@ -550,7 +550,7 @@ mod tests {
             let screen = draw_at(&mut app, width, height);
             assert!(screen.contains("Personal Section"), "{screen}");
             assert!(screen.contains("Used by: not currently used"), "{screen}");
-            assert!(screen.contains("# Scratch"), "{screen}");
+            assert!(screen.contains("│ Scratch"), "{screen}");
         }
         assert!(
             matches!(&app.view, View::SectionDocument { path, about, .. }
@@ -613,7 +613,7 @@ mod tests {
             let screen = draw_at(&mut app, width, height);
             assert!(screen.contains("Project Section"), "{screen}");
             assert!(screen.contains("Used by: not currently used"), "{screen}");
-            assert!(screen.contains("# Draft"), "{screen}");
+            assert!(screen.contains("│ Draft"), "{screen}");
         }
         let source = repository.path().join(".mdmanager").join(&nested);
         assert!(
@@ -625,7 +625,7 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let screen = draw_at(&mut app, 60, 20);
         assert!(screen.contains("Used by: AGENTS.md"), "{screen}");
-        assert!(screen.contains("# Project agents"), "{screen}");
+        assert!(screen.contains("│ Project agents"), "{screen}");
     }
 
     #[test]

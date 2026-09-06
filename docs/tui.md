@@ -2,7 +2,7 @@
 
 Run **mdmanager** or **mdmanager tui** to open the terminal interface. It never changes instruction
 content or applies compositions. Ask a coding agent to read **mdmanager docs start** and use the CLI
-while the TUI reloads. The theme picker changes only the UI theme setting.
+while the TUI reloads. UI controls save only theme and document rendering preferences.
 The startup wordmark lasts 1.8 seconds; any key skips it. The `[ui] theme` in
 `~/.mdmanager/mdmanager.toml` also reloads; an invalid name leaves the current palette unchanged.
 
@@ -39,6 +39,7 @@ t                  search, preview, and save themes
 Left/Right         previous/next Context runtime
 /                  search an open document
 g                  go to a source line
+m                  toggle Markdown rendering and raw text
 d                  toggle a managed-target difference
 ?                  contextual help
 q or Ctrl+C        quit
@@ -74,6 +75,14 @@ for Markdown. A symlink row shows where it points; About reports the link's owne
 from whether its resolved target is managed.
 
 ## Documents
+
+Documents and previews render Markdown by default: styled headings, lists, emphasis, code, and
+links. Press **m** to switch to raw source or back; differences always stay raw. The choice saves
+as `[ui] render` in `~/.mdmanager/mdmanager.toml` and reloads after external edits. Invalid values
+keep the current mode. Rendering preserves source lines and paragraph breaks, including blank
+rows for removed delimiters, so **g** and **/** still navigate to the matching source line.
+Saving requires an existing valid mdmanager configuration, as with themes. If saving fails,
+the toggle still changes this session and reports the error without creating configuration.
 
 Full Markdown documents are left-aligned in a readable-width column. Dim line numbers and dividers
 stay separate; wrapped continuations leave the gutter blank. Press **g** and a source line number

@@ -27,6 +27,7 @@ Bare `mdmanager init` creates the Personal Section library without Global target
 ```toml
 [ui]
 theme = "gruvbox-dark"
+render = "markdown"
 
 [[sections]]
 id = "common"
@@ -63,6 +64,10 @@ Profile/Target array controls Section order. Profiles do not inherit. Rendering 
 current palette when a name is invalid. Press **t** in the TUI to filter and preview the catalog;
 Enter saves the selection to this file and Esc cancels it.
 
+`render` accepts `markdown` (the default) or `raw`. Press **m** in a document view to save the
+choice. External changes reload automatically; an invalid value keeps the current mode.
+Differences always display raw text.
+
 Global requirements:
 
 - IDs use lowercase ASCII letters, digits, `-`, or `_`, and start with a letter.
@@ -73,7 +78,7 @@ Global requirements:
   Lists are non-empty and duplicate-free; unknown Target keys fail.
 
 Omitted Targets stay untouched; removing a catalog Target drops it fleet-wide.
-The TUI edits only `[ui].theme`; agents edit compositions and use `render`, `status`, and Apply.
+The TUI edits only `[ui].theme` and `[ui].render`; agents edit compositions and use `render`, `status`, and Apply.
 
 Apply owns regular files. Configure canonical paths; approve external symlink aliases
 separately. mdmanager only reports aliases. Configured symlinks are unmanaged or changed and

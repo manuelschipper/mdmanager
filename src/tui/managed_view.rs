@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::active_theme;
-use super::document::{DocumentState, render_document, render_plain_document};
+use super::document::{DocumentState, render_document, render_plain_document, render_raw_document};
 use super::inspection::{
     InstructionInspection, ManagedRef, global_diagnostic_text, managed_workspace, symlink_info,
     symlink_target_status,
@@ -226,14 +226,12 @@ pub(super) fn render_diff(
                     .wrap(Wrap { trim: false }),
                 about_area,
             );
-            render_plain_document(
+            render_raw_document(
                 frame,
                 document,
                 diff_area,
                 " Unified difference ",
                 workspace.difference.as_deref().unwrap_or_default(),
-                false,
-                false,
             );
         }
         Err(error) => render_document(frame, document, area, "Difference", "", &error, false),
@@ -314,6 +312,18 @@ mod tests {
         assert!(matches!(app.view, View::Diff(_)));
         let screen = draw_at(&mut app, 160, 40);
         assert!(screen.contains("Unified difference"));
+        assert!(screen.contains("+# Changed by agent"));
+        assert!(!screen.contains("m raw"));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.document.render_mode,
+            super::super::markdown::RenderMode::Markdown
+        );
+        assert!(!app.paths.config.exists());
+        assert!(draw_at(&mut app, 160, 40).contains("+# Changed by agent"));
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),

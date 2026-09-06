@@ -74,18 +74,25 @@ pub(crate) fn target_display_name(id: &str) -> String {
 pub(crate) struct Ui {
     #[serde(default = "default_theme")]
     pub(crate) theme: String,
+    #[serde(default = "default_render")]
+    pub(crate) render: String,
 }
 
 impl Default for Ui {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            render: default_render(),
         }
     }
 }
 
 fn default_theme() -> String {
     crate::theme::DEFAULT_NAME.into()
+}
+
+fn default_render() -> String {
+    "markdown".into()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -413,6 +420,17 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 pub(crate) fn set_theme(paths: &Paths, theme: &str) -> Result<(), String> {
     crate::theme::resolve(theme)?;
+    set_ui_setting(paths, "theme", theme)
+}
+
+pub(crate) fn set_render(paths: &Paths, render: &str) -> Result<(), String> {
+    if !matches!(render, "markdown" | "raw") {
+        return Err(format!("unknown render mode: {render}"));
+    }
+    set_ui_setting(paths, "render", render)
+}
+
+fn set_ui_setting(paths: &Paths, key: &str, setting: &str) -> Result<(), String> {
     let source = fs::read_to_string(&paths.config)
         .map_err(|error| format!("cannot read {}: {error}", paths.config.display()))?;
     let manifest: Manifest = toml::from_str(&source)
@@ -428,14 +446,14 @@ pub(crate) fn set_theme(paths: &Paths, theme: &str) -> Result<(), String> {
         .as_table_mut()
         .ok_or_else(|| "ui configuration must be a table".to_owned())?;
     let decor = ui
-        .get("theme")
+        .get(key)
         .and_then(Item::as_value)
         .map(|value| value.decor().clone());
-    let mut selected = value(theme);
+    let mut selected = value(setting);
     if let (Some(decor), Some(value)) = (decor, selected.as_value_mut()) {
         *value.decor_mut() = decor;
     }
-    ui["theme"] = selected;
+    ui[key] = selected;
     atomic_write(&paths.config, document.to_string().as_bytes())
 }
 

@@ -8,6 +8,8 @@ mod inspection;
 mod library_view;
 #[path = "managed_view.rs"]
 mod managed_view;
+#[path = "markdown.rs"]
+mod markdown;
 #[path = "overview.rs"]
 mod overview;
 #[path = "reload.rs"]
@@ -31,6 +33,7 @@ use self::library_view::{
     render_global_profile, render_library,
 };
 use self::managed_view::{ManagedViewInput, render_diff, render_managed, render_managed_document};
+use self::markdown::RenderMode;
 use self::overview::{
     OverviewInput, home_canvas_height, home_canvas_width, home_header_line, home_item_key,
     home_target_reference, render_home,
@@ -184,7 +187,9 @@ impl App {
 
     fn apply_search(&mut self, query: String) {
         if let Some(text) = self.searchable_text()
-            && let Some((ok, message)) = self.document.apply_search(&text, query)
+            && let Some((ok, message)) =
+                self.document
+                    .apply_search(&text, query, matches!(self.view, View::Diff(_)))
         {
             self.set_message(ok, message);
         }
@@ -220,6 +225,19 @@ impl App {
             }
             None => None,
         };
+        let mut document = DocumentState::default();
+        let render_error = global.as_ref().and_then(|global| {
+            match RenderMode::parse(&global.manifest.ui.render) {
+                Ok(mode) => {
+                    document.render_mode = mode;
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        });
+        let ui_error = theme_error
+            .map(|error| format!("{error}; keeping current theme"))
+            .or_else(|| render_error.map(|error| format!("{error}; keeping current render mode")));
         let (project, project_error) = match Workspace::discover(&directory) {
             Ok(project) => (project, None),
             Err(error) => (None, Some(error)),
@@ -272,12 +290,12 @@ impl App {
             history: Vec::new(),
             home_index: 0,
             section_index: 0,
-            document: DocumentState::default(),
+            document,
             context_preview: false,
             help: false,
             picker: None,
             theme_picker: None,
-            message: theme_error.map(|error| (false, format!("{error}; keeping current theme"))),
+            message: ui_error.map(|error| (false, error)),
             message_expires_at: None,
             watcher: ReloadWatcher::new(),
             intro_started: None,
@@ -439,10 +457,15 @@ impl App {
             |project| project.root.clone(),
         );
         let mut theme_error = None;
+        let mut render_error = None;
         if self.paths.config.exists() {
             match GlobalConfig::load(&self.paths) {
                 Ok(global) => {
                     theme_error = activate_theme(&global).err();
+                    match RenderMode::parse(&global.manifest.ui.render) {
+                        Ok(mode) => self.document.render_mode = mode,
+                        Err(error) => render_error = Some(error),
+                    }
                     self.global = Some(global);
                     self.global_error = None;
                 }
@@ -590,6 +613,9 @@ impl App {
         if let Some(error) = theme_error {
             self.message = Some((false, format!("{error}; keeping current theme")));
             self.message_expires_at = None;
+        } else if let Some(error) = render_error {
+            self.message = Some((false, format!("{error}; keeping current render mode")));
+            self.message_expires_at = None;
         } else if notify_reload {
             self.message = Some((true, "Updated from disk".into()));
             self.message_expires_at = Some(Instant::now() + RELOAD_MESSAGE_DURATION);
@@ -713,6 +739,18 @@ impl App {
             .context
             .sources
             .get(self.context.source_index)
+    }
+
+    fn markdown_view(&self) -> bool {
+        matches!(
+            self.view,
+            View::Context
+                | View::Source
+                | View::File { .. }
+                | View::SectionDocument { .. }
+                | View::Managed(_)
+                | View::ManagedDocument(_)
+        )
     }
 
     fn searchable_text(&self) -> Option<String> {
@@ -933,6 +971,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> SessionAction {
         KeyCode::Char('?') => {
             app.help = true;
             app.clear_message();
+            SessionAction::Continue
+        }
+        KeyCode::Char('m') if app.markdown_view() => {
+            let mode = app.document.render_mode.toggle();
+            app.document.render_mode = mode;
+            match config::set_render(&app.paths, mode.name()) {
+                Ok(()) => {
+                    app.reload_from_disk();
+                    app.set_message(true, format!("Render mode saved · {}", mode.name()));
+                }
+                Err(error) => {
+                    app.set_message(false, format!("Could not save render mode · {error}"))
+                }
+            }
             SessionAction::Continue
         }
         KeyCode::Char('t') => {
@@ -1861,6 +1913,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_footer_line(frame: &mut Frame<'_>, app: &App, area: Rect, keys: &str) {
+    let keys = if app.markdown_view() {
+        format!("m {}   {keys}", app.document.render_mode.toggle().name())
+    } else {
+        keys.to_owned()
+    };
     let home = matches!(app.view, View::Home);
     let message = if home {
         Line::default()
@@ -1881,7 +1938,7 @@ fn render_footer_line(frame: &mut Frame<'_>, app: &App, area: Rect, keys: &str) 
         Block::default().borders(Borders::TOP)
     };
     frame.render_widget(
-        Paragraph::new(Text::from(vec![message, Line::from(keys.to_owned())]))
+        Paragraph::new(Text::from(vec![message, Line::from(keys)]))
             .block(block)
             .alignment(Alignment::Center)
             .style(Style::new().fg(active_theme().muted)),
@@ -2920,24 +2977,27 @@ agents = ["common"]
     }
 
     #[test]
-    fn theme_reload_keeps_global_instructions_and_the_last_valid_palette() {
+    fn ui_reload_keeps_global_instructions_and_the_last_valid_preferences() {
         let (_home, _repository, paths, mut app) = global_fixture();
         let source = fs::read_to_string(&paths.config).unwrap();
         fs::write(
             &paths.config,
-            format!("[ui]\ntheme = \"github-light\"\n\n{source}"),
+            format!("[ui]\ntheme = \"github-light\"\nrender = \"raw\"\n\n{source}"),
         )
         .unwrap();
         app.reload_from_disk();
         assert_eq!(active_theme().background, Color::Rgb(255, 255, 255));
+        assert_eq!(app.document.render_mode, RenderMode::Raw);
 
         let source = fs::read_to_string(&paths.config)
             .unwrap()
-            .replace("github-light", "unknown");
+            .replace("github-light", "unknown")
+            .replace("raw", "unknown");
         fs::write(&paths.config, source).unwrap();
         app.reload_from_disk();
 
         assert!(app.global.is_some());
+        assert_eq!(app.document.render_mode, RenderMode::Raw);
         assert_eq!(active_theme().background, Color::Rgb(255, 255, 255));
         assert!(
             app.message
@@ -2945,6 +3005,84 @@ agents = ["common"]
                 .is_some_and(|(ok, message)| !ok && message.contains("unknown theme"))
         );
         reset_theme();
+    }
+
+    #[test]
+    fn markdown_toggle_saves_only_ui_and_reloads_across_document_views() {
+        let (_home, repository, paths, mut app) = global_fixture();
+        let source = fs::read_to_string(&paths.config).unwrap();
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let path = repository.path().join("AGENTS.md");
+        assert_eq!(app.document.render_mode, RenderMode::Markdown);
+        for view in [
+            View::Context,
+            View::Source,
+            View::File {
+                title: "Source".into(),
+                path: path.clone(),
+                about: String::new(),
+            },
+            View::Managed(ManagedRef::Project("agents".into())),
+            View::ManagedDocument(ManagedRef::Project("agents".into())),
+            View::SectionDocument {
+                title: "Section".into(),
+                path,
+                about: String::new(),
+            },
+        ] {
+            app.open(view);
+            let expected = app.document.render_mode.toggle();
+            handle_key(&mut app, key);
+            assert_eq!(app.document.render_mode, expected);
+            let saved = fs::read_to_string(&paths.config).unwrap();
+            assert!(saved.starts_with(&source));
+            let saved: toml::Value = toml::from_str(&saved).unwrap();
+            assert_eq!(saved["ui"]["render"].as_str(), Some(expected.name()));
+            app.document.render_mode = expected.toggle();
+            app.reload_from_disk();
+            assert_eq!(app.document.render_mode, expected);
+        }
+        app.open(View::Context);
+        handle_key(&mut app, key);
+        assert_eq!(app.document.render_mode, RenderMode::Raw);
+        let global = GlobalConfig::load(&paths).unwrap();
+        let restarted =
+            App::new_at(paths.clone(), Some(global), repository.path().to_owned()).unwrap();
+        assert_eq!(restarted.document.render_mode, RenderMode::Raw);
+        fs::write(&paths.config, &source).unwrap();
+        app.reload_from_disk();
+        assert_eq!(app.document.render_mode, RenderMode::Markdown);
+    }
+
+    #[test]
+    fn markdown_toggle_without_configuration_changes_only_the_session() {
+        let (_home, repository, paths, mut app) = fixture();
+        let path = repository.path().join("AGENTS.md");
+        let original = fs::read(&path).unwrap();
+        app.open(View::File {
+            title: "Source".into(),
+            path: path.clone(),
+            about: String::new(),
+        });
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.document.render_mode, RenderMode::Raw);
+        assert!(app.message.as_ref().is_some_and(|(ok, _)| !ok));
+        assert!(!paths.config.exists());
+        assert_eq!(fs::read(path).unwrap(), original);
+        app.reload_from_disk();
+        assert_eq!(app.document.render_mode, RenderMode::Raw);
+        let screen = draw(&mut app);
+        assert!(screen.contains("m markdown"));
+        assert!(screen.contains("1 │ #"));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.document.render_mode, RenderMode::Markdown);
+        assert!(draw(&mut app).contains("m raw"));
     }
 
     #[test]
