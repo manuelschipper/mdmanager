@@ -210,7 +210,6 @@ content = f'''<main id="content" class="demo-panel">
     data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
     aria-label="{escape(DEMO_ALT)}"></video>
   <div class="dots" aria-label="Steps">{dots}</div>
-  <p>Recorded from a clean Docker installation with a scripted agent transcript; the CLI commands and TUI are real.</p>
 </main>
 <script>
 const video = document.querySelector('.demo-video');
