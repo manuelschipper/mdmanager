@@ -65,6 +65,10 @@ type_cmd() {
   keys Escape; sleep 0.3; keys Down; sleep 0.3; keys Enter; sleep 0.5
   say "Agent Common is used by every Profile. Edit it once."
   sleep 2.4
+  keys m; sleep 0.4
+  say "Documents render as Markdown. Press m for the raw source."
+  sleep 2.6
+  keys m; sleep 0.6
 
   tmux split-window -hb -l 42 -t demo:0 "bash /demo/agent.sh"
   tmux select-pane -t demo:0.right
