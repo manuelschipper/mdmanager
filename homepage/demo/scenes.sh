@@ -46,7 +46,7 @@ type_cmd() {
   sleep 4.0
 
   keys Enter; sleep 0.6
-  say "Context shows every file Claude loads, in order, and why."
+  say "Context shows every file your agent loads, in order, and why."
   sleep 2.6
   keys Down; sleep 2.4
 
