@@ -6,7 +6,7 @@
   panic when reading a topic in a debug build.
 
 - **Website** — Add the mdmanager.ai homepage, with the existing documentation and release changelog rendered as static pages.
-- **Workflow demo** — Re-record the README and website demo from a scripted Docker session: it now starts at the splash, walks Home, Context, the Library and two Profiles, shows a coding agent editing a Section shared by Claude, Codex and Pi, and reviews and applies the Global difference. The site plays a matching light or dark video with the narration beside it as page text; the README GIFs carry the narration below the terminal.
+- **Workflow demo** — Re-record the README and website demo from a scripted Docker session: it now starts at the splash, walks Home, Context, the Library and two Profiles, shows a coding agent editing a Section shared by Claude, Codex and Pi, and reviews and applies the Global difference. The site plays a matching light or dark video with the narration beside it as page text; the README GIF carries the narration below the terminal.
 - **TUI metadata and diagnostics** — Source About panels account for wrapped paths and
   compact the displayed path when needed to keep usage metadata and Contents visible.
   Empty Context views retain configuration warnings and scan failures.
