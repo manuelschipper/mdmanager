@@ -617,7 +617,10 @@ fn codex_context_honors_custom_home_root_candidates_and_shared_budget() {
     ] {
         let source = sources
             .iter()
-            .find(|source| source["path"] == path.to_str().unwrap())
+            .find(|source| {
+                fs::canonicalize(source["path"].as_str().unwrap()).unwrap()
+                    == fs::canonicalize(&path).unwrap()
+            })
             .unwrap();
         assert_eq!(source["status"], status, "{path:?}");
     }
@@ -1250,7 +1253,10 @@ fn managed_local_override_is_machine_owned_and_hash_guarded() {
         String::from_utf8_lossy(&applied.stderr)
     );
     let applied_output = String::from_utf8(applied.stdout).unwrap();
-    let exclusion_plan = format!("  /AGENTS.override.md in {}", exclude.display());
+    let exclusion_plan = format!(
+        "  /AGENTS.override.md in {}",
+        exclude.canonicalize().unwrap().display()
+    );
     assert_eq!(
         applied_output
             .lines()
@@ -1497,7 +1503,10 @@ fn pi_disable_adds_and_restores_its_exclusion() {
         String::from_utf8_lossy(&disabled.stderr)
     );
     let plan = String::from_utf8(disabled.stdout).unwrap();
-    let exclusion_plan = format!("  /AGENTS.override.md in {}", exclude.display());
+    let exclusion_plan = format!(
+        "  /AGENTS.override.md in {}",
+        exclude.canonicalize().unwrap().display()
+    );
     assert_eq!(
         plan.lines().filter(|line| *line == exclusion_plan).count(),
         1
@@ -1565,7 +1574,10 @@ fn claude_disable_preserves_source_and_restores_owned_settings() {
     );
     let disabled_output = String::from_utf8(disabled.stdout).unwrap();
     let exclude = repository.path().join(".git/info/exclude");
-    let exclusion_plan = format!("  /.claude/settings.local.json in {}", exclude.display());
+    let exclusion_plan = format!(
+        "  /.claude/settings.local.json in {}",
+        exclude.canonicalize().unwrap().display()
+    );
     assert_eq!(
         disabled_output
             .lines()
@@ -1580,7 +1592,17 @@ fn claude_disable_preserves_source_and_restores_owned_settings() {
     let settings =
         fs::read_to_string(repository.path().join(".claude/settings.local.json")).unwrap();
     assert!(settings.contains("claudeMdExcludes"));
-    assert!(settings.contains(&repository.path().join("CLAUDE.md").display().to_string()));
+    assert!(
+        settings.contains(
+            &repository
+                .path()
+                .join("CLAUDE.md")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        )
+    );
 
     let restored = mdmanager_in(
         home.path(),
@@ -1617,6 +1639,7 @@ fn claude_disable_preserves_matching_logical_pwd_and_rejects_mismatches() {
         let alias = workspace.path().join("logical");
         fs::create_dir(&repository).unwrap();
         fs::create_dir(&other).unwrap();
+        let repository = repository.canonicalize().unwrap();
         std::os::unix::fs::symlink(if matching { &repository } else { &other }, &alias).unwrap();
         assert!(
             Command::new("git")

@@ -15,13 +15,13 @@
 </p>
 
 <p align="center">
-  <a href="#get-started">Get started</a> ·
+  <a href="#install">Install</a> ·
   <a href="#work-with-your-coding-agent">Demo</a> ·
   <a href="#documentation">Documentation</a>
 </p>
 
 <p align="center">
-  <img src="assets/context.png" alt="Claude instruction sources in load order, with global, project, and local files beside a Markdown preview" width="960">
+  <img src="assets/context-rendered.png" alt="Claude instruction sources in load order beside a rendered Markdown preview" width="960">
 </p>
 
 Claude and Codex may share your coding conventions, but each also needs instructions of its own.
@@ -140,32 +140,33 @@ target directly.
 
 The agent performs instruction edits and Apply through the CLI. You use the TUI to inspect its work.
 
-## Get started
+## Install
 
-Building from source requires Rust 1.91.1 or newer:
-
-```sh
-git clone https://github.com/manuelschipper/mdmanager.git
-cd mdmanager
-cargo install --path .
-```
-
-Open it in the repository you want to inspect:
+Install a prebuilt binary for Linux or macOS (x86_64 and ARM64):
 
 ```sh
-cd /path/to/your/repository
-mdmanager
+curl -fsSL https://mdmanager.ai/install | sh
 ```
 
-Then ask your coding agent to read `mdmanager docs start` and describe the setup you want.
+Installs to `~/.local/bin` without sudo. Add it to your `PATH` if prompted.
+Run the same command to update. [Manual downloads](https://github.com/manuelschipper/mdmanager/releases).
 
-To prepare a personal Section library with Global Claude and Codex targets:
+Point your coding agent to:
 
 ```sh
-mdmanager init claude codex
+mdmanager docs start
 ```
 
-Initialization creates the configuration without deploying instructions.
+Then run `mdmanager` inside your repository to inspect instructions in the TUI.
+
+<details>
+<summary>Installer options</summary>
+
+The installer verifies the release's SHA-256 checksum. Set `MDMANAGER_VERSION=v0.1.0`
+to select a release or `MDMANAGER_INSTALL_DIR=/path/to/bin` to choose the destination;
+pass these variables to `sh` when piping the installer.
+
+</details>
 
 ## Documentation
 
@@ -191,6 +192,14 @@ See the [documentation index](docs/README.md) for runtime-specific guides.
 Release notes are in the [changelog](CHANGELOG.md).
 
 ## Develop
+
+Building from source requires Rust 1.91.1 or newer:
+
+```sh
+git clone https://github.com/manuelschipper/mdmanager.git
+cd mdmanager
+cargo install --locked --path .
+```
 
 ```sh
 cargo test

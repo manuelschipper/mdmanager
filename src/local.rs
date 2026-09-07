@@ -704,7 +704,12 @@ impl LocalRepository {
                 }
             }
         }
-        Ok(source)
+        // Pi writes beside the source, using the same physical path as Git's root.
+        // Claude exclusions retain the logical spelling used by the runtime.
+        Ok(match runtime {
+            DisableRuntime::Pi => resolved_parent.join(filename),
+            DisableRuntime::Claude => source,
+        })
     }
 
     /// Revalidates the reviewed output and Git exclusion before either is changed.
@@ -1596,6 +1601,31 @@ mod tests {
         assert!(!local_repository.state_path.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pi_disable_resolves_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let (_home, repository, repo) = repository();
+        let alias_parent = TempDir::new().unwrap();
+        let alias = alias_parent.path().join("repository");
+        symlink(repository.path(), &alias).unwrap();
+        fs::write(alias.join("AGENTS.md"), "shared\n").unwrap();
+
+        let plan = repo
+            .disable_plan(DisableRuntime::Pi, &alias.join("AGENTS.md"))
+            .unwrap();
+        assert_eq!(plan.output, repo.root.join("AGENTS.override.md"));
+        repo.apply_disable(&plan).unwrap();
+        assert_eq!(
+            repo.disable_status(DisableRuntime::Pi).unwrap(),
+            DisableStatus::Owned
+        );
+        repo.restore_disable(DisableRuntime::Pi).unwrap();
+        assert!(!alias.join("AGENTS.override.md").exists());
+        assert_eq!(fs::read(alias.join("AGENTS.md")).unwrap(), b"shared\n");
+    }
+
     #[test]
     fn claude_disable_reuses_an_existing_git_exclusion() {
         let (_home, repository, local_repository) = repository();
@@ -1667,7 +1697,10 @@ mod tests {
         let plan = local_repository
             .disable_plan(DisableRuntime::Claude, &source)
             .unwrap();
-        assert_eq!(plan.output, worktree.join(".claude/settings.local.json"));
+        assert_eq!(
+            plan.output,
+            local_repository.root.join(".claude/settings.local.json")
+        );
         local_repository.apply_disable(&plan).unwrap();
         let audit = crate::context::Audit::resolve(
             crate::context::ContextRuntime::Claude,
@@ -1775,7 +1808,10 @@ mod tests {
         let plan = local_repository
             .disable_plan(DisableRuntime::Claude, &source)
             .unwrap();
-        assert_eq!(plan.output, worktree.join(".claude/settings.local.json"));
+        assert_eq!(
+            plan.output,
+            local_repository.root.join(".claude/settings.local.json")
+        );
         local_repository.apply_disable(&plan).unwrap();
         let audit = crate::context::Audit::resolve(
             crate::context::ContextRuntime::Claude,
@@ -2769,7 +2805,7 @@ mod tests {
         personal_section(&paths, "expected\n");
         fs::write(repository.path().join("AGENTS.override.md"), "expected\n").unwrap();
         let repo = LocalRepository::discover(repository.path(), &paths).unwrap();
-        let exclusion = repository.path().join(".git/info/exclude");
+        let exclusion = repo.common_git_dir.join("info/exclude");
         let before = fs::read_to_string(&exclusion).unwrap();
 
         let error = repo
@@ -2835,7 +2871,7 @@ mod tests {
         let plan = main_repo.managed_plan(ManagedTarget::Agents).unwrap();
         assert_eq!(
             plan.exclusion_write().unwrap().1,
-            main.path().join(".git/info/exclude")
+            main_repo.common_git_dir.join("info/exclude")
         );
         linked_repo
             .create_managed(ManagedTarget::Claude, "local")
@@ -2923,7 +2959,10 @@ mod tests {
         let plan = linked_repo
             .disable_plan(DisableRuntime::Claude, &claude)
             .unwrap();
-        assert_eq!(plan.output, main.path().join(".claude/settings.local.json"));
+        assert_eq!(
+            plan.output,
+            main_repo.root.join(".claude/settings.local.json")
+        );
         linked_repo.apply_disable(&plan).unwrap();
         assert!(main.path().join(".claude/settings.local.json").is_file());
         assert!(!linked.join(".claude/settings.local.json").exists());

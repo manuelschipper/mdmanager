@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91.1"
 license = "MIT"
+description = "Manage your CLAUDE.md and AGENTS.md across machines and runtimes"
+repository = "https://github.com/manuelschipper/mdmanager"
+homepage = "https://mdmanager.ai"
 publish = false
 
 [dependencies]

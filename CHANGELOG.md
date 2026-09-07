@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## mdmanager 0.1.0 — Sep 6, 2026
+
+- **Binary installation** — Install verified Linux and macOS binaries for x86_64 and
+  ARM64 from `mdmanager.ai/install`, with archives and SHA-256 checksums on GitHub Releases.
+- **Release checks** — Run formatting, Clippy, Rust tests, installer verification, and
+  website builds on Linux and macOS before publishing native release binaries.
+- **Pi path aliases** — Disable and restore Pi instructions reached through a symlinked
+  parent directory, including macOS temporary paths, without rejecting them as outside the repository.
 
 - **Cross-machine setup** — Document how to install a shared personal library on a fresh
   machine, select its Profile, and pull and apply later changes while keeping ownership state local.
@@ -44,8 +51,6 @@
 
 - **Claude worktree settings** — Context uses the same Git-reported settings worktree as Local disables, including separate Git directories and submodules, and no longer reads settings from Git metadata parents.
 - **Malformed rule headers** — Claude and Cursor rules with unterminated frontmatter are reported as ambiguous with a reason instead of inferring loading from incomplete metadata.
-
-## mdmanager 0.1.0 — Sep 5, 2026
 
 - **Runtime Context** — Inspect persistent Markdown instructions for Claude Code,
   Codex, Cursor, and Pi. Browse global and project sources with loading order,
