@@ -1,0 +1,9 @@
+name = "mdmanager"
+compatibility_date = "2026-09-06"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "INSTALL_METRICS"
+database_name = "mdmanager-install-metrics"
+database_id = "05f7b420-f6e6-4fb4-904b-6c3f0ac6f1d8"
+migrations_dir = "migrations"

@@ -31,10 +31,12 @@ copy button use JavaScript. Clipboard access requires HTTPS or localhost.
 The site runs on Cloudflare Pages, project `mdmanager`, production branch `main`,
 with custom domain `mdmanager.ai`. For a release, build from the exact released
 commit after its GitHub release succeeds. For a website-only update, use its
-committed revision on `main`. Deploy `homepage/dist/` with Wrangler:
+committed revision on `main`. Deploy from `homepage/` so Wrangler loads its D1
+binding:
 
 ```sh
-npx wrangler pages deploy homepage/dist --project-name mdmanager --branch main
+cd homepage
+npx wrangler pages deploy dist --project-name mdmanager --branch main
 ```
 
 Use the operator's Cloudflare credentials through Relic; credentials do not belong
@@ -45,6 +47,28 @@ before replacing the binary. GitHub releases and website deploys are separate.
 Verify `/`, `/docs/`, `/news/`, `/demo/`, `/install`, and an unknown path (404) on
 the immutable deployment URL and `https://mdmanager.ai`. Smoke-install into a
 temporary `MDMANAGER_INSTALL_DIR` on Linux and macOS and check `--version`.
+
+## Installer metrics
+
+`wrangler.toml` binds the `/install` Pages Function to the
+`mdmanager-install-metrics` D1 database. Before deploying a schema change, run
+`npx wrangler d1 migrations apply mdmanager-install-metrics --remote` from
+`homepage/` with the operator's Cloudflare credentials.
+
+`installer_fetches` keeps successful GET totals by UTC day, without IP addresses,
+user agents, cookies, or other identifiers. These are installer fetches, not
+unique people or confirmed installs; repeats and automation can count. The
+`metric_snapshots` row preserves the Cloudflare endpoint count available before
+the tracker was deployed. To query the combined count:
+
+```sql
+SELECT
+  (SELECT COALESCE(SUM(value), 0) FROM metric_snapshots
+   WHERE source = 'cloudflare' AND metric = 'retained_installer_endpoint_requests') +
+  (SELECT COALESCE(SUM(fetches), 0) FROM installer_fetches) AS installer_fetches;
+```
+
+Run the Function tests with `npm test` from `homepage/`.
 
 ## Release
 

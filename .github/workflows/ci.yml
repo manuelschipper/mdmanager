@@ -29,5 +29,6 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m unittest discover -s tests -p 'test_install.py'
+      - run: npm test --prefix homepage
       - run: pip install -r homepage/requirements.txt
       - run: python homepage/build.py

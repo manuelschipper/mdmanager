@@ -155,6 +155,7 @@ if OUT.exists():
 shutil.copytree(HERE / "assets", OUT / "assets")
 shutil.copyfile(HERE / "install.sh", OUT / "install")
 (OUT / "_headers").write_text("/install\n  Content-Type: text/plain; charset=utf-8\n  Cache-Control: no-cache\n  X-Content-Type-Options: nosniff\n")
+(OUT / "_routes.json").write_text(json.dumps({"version": 1, "include": ["/install"], "exclude": []}))
 for filename in ["workflow.mp4", "workflow-light.mp4", "context-rendered.png"]:
     shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
 (OUT / "assets/favicon.svg").write_text(
