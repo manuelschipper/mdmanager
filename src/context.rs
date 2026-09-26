@@ -877,6 +877,7 @@ fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
                 .any(|marker| ancestor.join(marker).exists())
         })
         .unwrap_or(directory);
+    let untrusted = codex_untrusted_project(&settings, directory);
     let mut remaining = settings.max_bytes;
     for ancestor in ancestors_from(root, directory) {
         let mut candidates = vec![
@@ -889,15 +890,27 @@ fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
                 .iter()
                 .map(|name| ancestor.join(name)),
         );
+        let start = sources.len();
+        let budget = remaining;
         push_priority_candidates(
             &mut sources,
             &candidates,
             &scope_for(&ancestor, directory),
-            true,
+            false,
             Some(&mut remaining),
             paths,
             directory,
         );
+        if let Some(project) = &untrusted {
+            remaining = budget;
+            for source in &mut sources[start..] {
+                source.state = SourceState::Excluded(format!(
+                    "project {} is explicitly untrusted in {}",
+                    project,
+                    codex_home.join("config.toml").display()
+                ));
+            }
+        }
     }
 
     let loaded = sources
@@ -1135,7 +1148,9 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
         paths,
         directory,
     );
+    let shadowed = pi_shadowed_context_file(directory);
     for ancestor in ancestors_from_root(directory) {
+        let start = sources.len();
         push_priority_candidates(
             &mut sources,
             &PI_INSTRUCTION_CANDIDATES
@@ -1148,7 +1163,20 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
             paths,
             directory,
         );
+        if let Some((main_file, worktree_file)) = &shadowed {
+            for source in &mut sources[start..] {
+                if matches!(
+                    source.state,
+                    SourceState::Startup | SourceState::SelectedEmpty
+                ) && fs::canonicalize(&source.path).ok().as_ref() == Some(main_file)
+                {
+                    source.state = SourceState::Shadowed(worktree_file.clone());
+                }
+            }
+        }
     }
+    let mut seen = HashSet::new();
+    sources.retain(|source| seen.insert(source.path.clone()));
     let loaded = sources
         .iter()
         .filter(|source| matches!(source.state, SourceState::Startup))
@@ -1168,6 +1196,7 @@ struct CodexSettings {
     fallback_names: Vec<String>,
     max_bytes: usize,
     warning: Option<String>,
+    projects: std::collections::BTreeMap<String, CodexProjectSettings>,
 }
 
 #[derive(Deserialize)]
@@ -1175,6 +1204,13 @@ struct RawCodexSettings {
     project_root_markers: Option<Vec<String>>,
     project_doc_fallback_filenames: Option<Vec<String>>,
     project_doc_max_bytes: Option<usize>,
+    #[serde(default)]
+    projects: std::collections::BTreeMap<String, CodexProjectSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexProjectSettings {
+    trust_level: Option<String>,
 }
 
 fn codex_settings(home: &Path) -> CodexSettings {
@@ -1183,6 +1219,7 @@ fn codex_settings(home: &Path) -> CodexSettings {
         fallback_names: Vec::new(),
         max_bytes: 32 * 1024,
         warning: None,
+        projects: Default::default(),
     };
     let path = home.join("config.toml");
     let source = match fs::read_to_string(&path) {
@@ -1200,25 +1237,186 @@ fn codex_settings(home: &Path) -> CodexSettings {
             return settings;
         }
     };
-    if let Some(markers) = value.project_root_markers
-        && !markers.is_empty()
-    {
+    if let Some(markers) = value.project_root_markers {
         settings.root_markers = markers;
     }
     if let Some(names) = value.project_doc_fallback_filenames {
-        settings.fallback_names = names;
+        let mut seen = HashSet::from(["AGENTS.override.md".to_owned(), "AGENTS.md".to_owned()]);
+        settings.fallback_names = names
+            .into_iter()
+            .filter(|name| {
+                if name.is_empty()
+                    || matches!(name.as_str(), "." | "..")
+                    || name.contains(['/', '\0'])
+                    || cfg!(windows) && name.contains(['\\', ':'])
+                {
+                    return false;
+                }
+                seen.insert(name.clone())
+            })
+            .collect();
     }
     if let Some(value) = value.project_doc_max_bytes {
-        if value > 0 {
-            settings.max_bytes = value;
+        settings.max_bytes = value;
+    }
+    settings.projects = value.projects;
+    settings
+}
+
+fn codex_untrusted_project(settings: &CodexSettings, directory: &Path) -> Option<String> {
+    let normalize = |path: &Path| {
+        let key = path.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            key.to_ascii_lowercase()
         } else {
-            settings.warning = Some(
-                "project_doc_max_bytes is zero; using the documented default until boundary behavior is verified"
-                    .into(),
-            );
+            key
+        }
+    };
+    for path in std::iter::once(directory.to_owned()).chain(codex_trust_root(directory)) {
+        for key in fs::canonicalize(&path)
+            .ok()
+            .iter()
+            .chain(std::iter::once(&path))
+            .map(|path| normalize(path))
+        {
+            let matched = settings.projects.get_key_value(&key).or_else(|| {
+                settings
+                    .projects
+                    .iter()
+                    .find(|(candidate, _)| normalize(Path::new(candidate)) == key)
+            });
+            if let Some((key, project)) = matched {
+                return (project.trust_level.as_deref() == Some("untrusted")).then(|| key.clone());
+            }
         }
     }
-    settings
+    None
+}
+
+// Codex checks the launch directory first, then a verified main-checkout trust key.
+fn codex_trust_root(directory: &Path) -> Option<PathBuf> {
+    let root = directory.ancestors().find(|ancestor| {
+        let git = ancestor.join(".git");
+        git.exists() && (!git.is_dir() || git.join("HEAD").exists())
+    })?;
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(root.to_owned());
+    }
+    let git_dir = codex_gitdir_target(&dot_git)?;
+    let metadata = fs::symlink_metadata(&git_dir).ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    let canonical = fs::canonicalize(&git_dir).ok()?;
+    let worktrees = canonical.parent()?;
+    if worktrees.file_name()? != "worktrees" {
+        return None;
+    }
+    let common = worktrees.parent()?;
+    let registered = canonical.join(codex_git_metadata(&canonical.join("gitdir"))?.trim());
+    if registered.file_name()? != ".git"
+        || fs::canonicalize(registered.parent()?).ok()? != fs::canonicalize(root).ok()?
+        || fs::canonicalize(
+            canonical.join(codex_git_metadata(&canonical.join("commondir"))?.trim()),
+        )
+        .ok()?
+            != common
+    {
+        return None;
+    }
+    let main = git_dir.parent()?.parent()?.parent()?;
+    let main_dot_git = main.join(".git");
+    let main_git_dir = if main_dot_git.is_dir() {
+        main_dot_git
+    } else {
+        codex_gitdir_target(&main_dot_git)?
+    };
+    (fs::canonicalize(main_git_dir).ok()? == common).then(|| main.to_owned())
+}
+
+fn codex_git_metadata(path: &Path) -> Option<String> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    let text = fs::read_to_string(path).ok()?;
+    (text.len() <= 64 * 1024 && !text.trim().is_empty()).then_some(text)
+}
+
+fn codex_gitdir_target(path: &Path) -> Option<PathBuf> {
+    let text = codex_git_metadata(path)?;
+    let target = text.trim().strip_prefix("gitdir:")?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    // Normalize relative metadata paths without resolving aliases used as trust keys.
+    let mut resolved = PathBuf::new();
+    for component in path.parent()?.join(target).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            component => resolved.push(component),
+        }
+    }
+    Some(resolved)
+}
+
+fn pi_shadowed_context_file(directory: &Path) -> Option<(PathBuf, PathBuf)> {
+    let root = directory
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())?;
+    let dot_git = root.join(".git");
+    let common = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = fs::read_to_string(dot_git).ok()?;
+        let git_dir = root.join(text.trim().strip_prefix("gitdir: ")?.trim());
+        if !git_dir.join("HEAD").exists() {
+            return None;
+        }
+        let commondir = git_dir.join("commondir");
+        if commondir.exists() {
+            git_dir.join(fs::read_to_string(commondir).ok()?.trim())
+        } else {
+            git_dir
+        }
+    };
+    let common = fs::canonicalize(common).ok()?;
+    let root = fs::canonicalize(root).ok()?;
+    let main = common.parent()?;
+    if root == main
+        || !root.starts_with(main)
+        || fs::canonicalize(main.join(".git")).ok()? != common
+    {
+        return None;
+    }
+    let selected = PI_INSTRUCTION_CANDIDATES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| regular_file(path) && fs::read(path).is_ok())?;
+    Some((main.join(selected.file_name()?), selected))
+}
+
+fn priority_same_file(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        match (fs::metadata(left), fs::metadata(right)) {
+            (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 fn push_priority_candidates(
@@ -1230,45 +1428,60 @@ fn push_priority_candidates(
     paths: &Paths,
     directory: &Path,
 ) {
-    let existing = candidates
-        .iter()
-        .filter(|path| regular_file(path))
-        .collect::<Vec<_>>();
+    let mut existing: Vec<PathBuf> = Vec::new();
+    for path in candidates.iter().filter(|path| regular_file(path)) {
+        if !existing.iter().any(|other| priority_same_file(path, other)) {
+            existing.push(path.clone());
+        }
+    }
     let winner = existing
         .iter()
         .find(|path| {
-            !skip_empty
-                || fs::read(path)
-                    .map(|bytes| !bytes.is_empty())
-                    .unwrap_or(false)
+            if skip_empty {
+                fs::read(path).is_ok_and(|bytes| !String::from_utf8_lossy(&bytes).trim().is_empty())
+            } else if remaining.is_none() {
+                // Pi tries the next candidate when reading a file fails.
+                fs::read(path).is_ok()
+            } else {
+                true
+            }
         })
-        .map(|path| (*path).clone());
-    for path in existing {
+        .cloned();
+    for path in &existing {
         let bytes = fs::read(path);
         let state = match bytes {
             Err(error) => SourceState::Unreadable(error.to_string()),
-            Ok(bytes) if bytes.is_empty() => {
-                if winner.as_ref().is_some_and(|winner| winner == path) {
-                    SourceState::SelectedEmpty
-                } else {
-                    SourceState::Empty
-                }
-            }
-            Ok(bytes) if winner.as_ref().is_some_and(|winner| winner == path) => {
+            Ok(bytes) if winner.as_ref() == Some(path) => {
                 if let Some(remaining) = remaining.as_deref_mut() {
-                    let included = bytes.len().min(*remaining);
-                    *remaining -= included;
-                    if included < bytes.len() {
-                        SourceState::Truncated {
-                            included,
-                            total: bytes.len(),
-                        }
+                    if *remaining == 0 {
+                        SourceState::Excluded("project instruction byte budget exhausted".into())
                     } else {
-                        SourceState::Startup
+                        let included = bytes.len().min(*remaining);
+                        if String::from_utf8_lossy(&bytes[..included])
+                            .trim()
+                            .is_empty()
+                        {
+                            SourceState::SelectedEmpty
+                        } else {
+                            *remaining -= included;
+                            if included < bytes.len() {
+                                SourceState::Truncated {
+                                    included,
+                                    total: bytes.len(),
+                                }
+                            } else {
+                                SourceState::Startup
+                            }
+                        }
                     }
+                } else if bytes.is_empty() {
+                    SourceState::SelectedEmpty
                 } else {
                     SourceState::Startup
                 }
+            }
+            Ok(bytes) if skip_empty && String::from_utf8_lossy(&bytes).trim().is_empty() => {
+                SourceState::Empty
             }
             Ok(_) => SourceState::Shadowed(winner.clone().unwrap_or_default()),
         };
@@ -1943,47 +2156,253 @@ mod tests {
     }
 
     #[test]
-    fn codex_skips_empty_overrides_and_applies_the_project_budget() {
+    fn codex_selects_empty_project_overrides_and_applies_the_project_budget() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        let cwd = root.join("app/deeper");
+        let home = temp.path().join(".codex");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(home.join("config.toml"), "project_doc_max_bytes = 5\n").unwrap();
+        fs::write(root.join("AGENTS.md"), "123").unwrap();
+        fs::write(root.join("app/AGENTS.md"), "456789").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "later").unwrap();
+        fs::write(home.join("AGENTS.md"), "user instructions").unwrap();
+
+        for empty in ["", " \n\t"] {
+            fs::write(root.join("AGENTS.override.md"), empty).unwrap();
+            fs::write(home.join("AGENTS.override.md"), empty).unwrap();
+            let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
+            let state = |path: PathBuf| {
+                &audit
+                    .sources
+                    .iter()
+                    .find(|source| source.path == path)
+                    .unwrap()
+                    .state
+            };
+            assert_eq!(state(home.join("AGENTS.md")), &SourceState::Startup);
+            assert_eq!(state(home.join("AGENTS.override.md")), &SourceState::Empty);
+            assert_eq!(
+                state(root.join("AGENTS.override.md")),
+                &SourceState::SelectedEmpty
+            );
+            assert_eq!(
+                state(root.join("AGENTS.md")),
+                &SourceState::Shadowed(root.join("AGENTS.override.md"))
+            );
+            assert_eq!(
+                state(root.join("app/AGENTS.md")),
+                &SourceState::Truncated {
+                    included: 5,
+                    total: 6
+                }
+            );
+            assert!(matches!(
+                state(cwd.join("AGENTS.md")),
+                SourceState::Excluded(_)
+            ));
+            assert!(audit.summary.contains("2 load at startup"));
+            assert!(audit.summary.contains("5/5"));
+        }
+
+        // A truncated whitespace-only prefix does not consume the project budget.
+        fs::write(root.join("AGENTS.override.md"), "     ignored suffix").unwrap();
+        let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
+        assert!(
+            audit
+                .sources
+                .iter()
+                .any(|source| source.path == root.join("AGENTS.override.md")
+                    && source.state == SourceState::SelectedEmpty)
+        );
+        assert!(
+            audit
+                .sources
+                .iter()
+                .any(|source| source.path == root.join("app/AGENTS.md")
+                    && source.state
+                        == SourceState::Truncated {
+                            included: 5,
+                            total: 6
+                        })
+        );
+    }
+
+    #[test]
+    fn codex_honors_empty_markers_zero_budget_and_unique_fallback_filenames() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("repo");
         let cwd = root.join("app");
+        let home = temp.path().join(".codex");
         fs::create_dir_all(&cwd).unwrap();
-        fs::create_dir_all(temp.path().join(".codex")).unwrap();
+        fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(root.join(".git")).unwrap();
-        fs::write(
-            temp.path().join(".codex/config.toml"),
-            "project_doc_max_bytes = 5\n",
+        fs::write(root.join("AGENTS.md"), "abc").unwrap();
+        fs::write(cwd.join("TEAM.md"), "def").unwrap();
+        fs::write(home.join("AGENTS.md"), "global").unwrap();
+        let fallbacks = r#"project_doc_fallback_filenames = ["AGENTS.md", "AGENTS.md", "", ".", "..", "../outside.md", "TEAM.md", "TEAM.md"]"#;
+        for (config, root_present, expected_bytes) in [
+            (
+                format!("{fallbacks}\nproject_doc_max_bytes = 6"),
+                true,
+                "6/6",
+            ),
+            (
+                format!("{fallbacks}\nproject_root_markers = []"),
+                false,
+                "3/32768",
+            ),
+            (
+                format!("{fallbacks}\nproject_doc_max_bytes = 0"),
+                true,
+                "0/0",
+            ),
+        ] {
+            fs::write(home.join("config.toml"), config).unwrap();
+            let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
+            assert!(audit.warnings.is_empty());
+            assert_eq!(
+                audit
+                    .sources
+                    .iter()
+                    .filter(|source| source.path == root.join("AGENTS.md"))
+                    .count(),
+                usize::from(root_present)
+            );
+            assert_eq!(
+                audit
+                    .sources
+                    .iter()
+                    .filter(|source| source.path == cwd.join("TEAM.md"))
+                    .count(),
+                1
+            );
+            assert!(audit.summary.contains(expected_bytes));
+            for source in &audit.sources {
+                if expected_bytes == "0/0" && source.scope != "user" {
+                    assert!(matches!(source.state, SourceState::Excluded(_)));
+                } else {
+                    assert_eq!(source.state, SourceState::Startup);
+                }
+            }
+        }
+        // An invalid fallback must never escape the directory to load another file.
+        fs::write(root.join("outside.md"), "outside").unwrap();
+        fs::write(home.join("config.toml"), "project_root_markers = []\nproject_doc_fallback_filenames = ['../outside.md', '', '.', '..']").unwrap();
+        let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
+        assert!(audit.sources.iter().all(|source| source.scope == "user"));
+    }
+
+    #[test]
+    fn codex_trust_matches_launch_directory_before_main_worktree() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        let cwd = root.join("app");
+        let home = temp.path().join(".codex");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        crate::git_worktree::git(&root, &["init", "-q"]).unwrap();
+        crate::git_worktree::git(
+            &root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "initial",
+            ],
         )
         .unwrap();
-        assert_eq!(codex_settings(&temp.path().join(".codex")).max_bytes, 5);
-        fs::write(root.join("AGENTS.override.md"), "").unwrap();
-        fs::write(root.join("AGENTS.md"), "123").unwrap();
-        fs::write(cwd.join("AGENTS.md"), "456789").unwrap();
-        fs::write(temp.path().join(".codex/AGENTS.md"), "user instructions").unwrap();
-
-        let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
-        for path in [root.join("AGENTS.md"), temp.path().join(".codex/AGENTS.md")] {
+        fs::write(root.join("AGENTS.md"), "repo").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "app").unwrap();
+        fs::write(home.join("AGENTS.md"), "global").unwrap();
+        let worktree = temp.path().join("linked");
+        crate::git_worktree::git(
+            &root,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        )
+        .unwrap();
+        fs::write(worktree.join("AGENTS.md"), "worktree").unwrap();
+        let root_key = toml::Value::String(fs::canonicalize(&root).unwrap().display().to_string());
+        let cwd_key = toml::Value::String(fs::canonicalize(&cwd).unwrap().display().to_string());
+        for launch in [&cwd, &worktree] {
+            fs::write(
+                home.join("config.toml"),
+                format!("[projects.{root_key}]\ntrust_level = 'untrusted'\n"),
+            )
+            .unwrap();
+            let audit = Audit::resolve(ContextRuntime::Codex, launch, &paths(temp.path()), None);
+            assert!(audit.sources.iter().any(|source| source.scope != "user"));
+            for source in &audit.sources {
+                if source.scope == "user" {
+                    assert_eq!(source.state, SourceState::Startup);
+                } else {
+                    assert!(
+                        matches!(&source.state, SourceState::Excluded(reason) if reason.contains("untrusted") && reason.contains("config.toml"))
+                    );
+                }
+            }
+            assert!(audit.summary.contains("0/32768"));
+        }
+        for launch_config in ["trust_level = 'trusted'", ""] {
+            fs::write(home.join("config.toml"), format!("[projects.{root_key}]\ntrust_level = 'untrusted'\n[projects.{cwd_key}]\n{launch_config}")).unwrap();
+            let audit = Audit::resolve(ContextRuntime::Codex, &cwd, &paths(temp.path()), None);
             assert!(
                 audit
                     .sources
                     .iter()
-                    .any(|source| source.path == path && source.state == SourceState::Startup)
+                    .all(|source| source.state == SourceState::Startup)
             );
         }
-        assert!(audit.sources.iter().any(|source| {
-            source.path == root.join("AGENTS.override.md")
-                && matches!(source.state, SourceState::Empty)
-        }));
-        assert!(audit.sources.iter().any(|source| {
-            source.path == cwd.join("AGENTS.md")
-                && matches!(
-                    source.state,
-                    SourceState::Truncated {
-                        included: 2,
-                        total: 6
-                    }
-                )
-        }));
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("alias");
+            std::os::unix::fs::symlink(&cwd, &alias).unwrap();
+            let alias_key = toml::Value::String(alias.display().to_string());
+            for canonical_entry in ["", "trust_level = 'trusted'"] {
+                let config = if canonical_entry.is_empty() {
+                    format!("[projects.{alias_key}]\ntrust_level = 'untrusted'")
+                } else {
+                    format!(
+                        "[projects.{alias_key}]\ntrust_level = 'untrusted'\n[projects.{cwd_key}]\n{canonical_entry}"
+                    )
+                };
+                fs::write(home.join("config.toml"), config).unwrap();
+                let audit =
+                    Audit::resolve(ContextRuntime::Codex, &alias, &paths(temp.path()), None);
+                let source = audit
+                    .sources
+                    .iter()
+                    .find(|source| source.path == alias.join("AGENTS.md"))
+                    .unwrap();
+                assert_eq!(
+                    matches!(source.state, SourceState::Excluded(_)),
+                    canonical_entry.is_empty()
+                );
+            }
+        }
+        // Arbitrary parent entries do not inherit outside a Git repository.
+        let outside = temp.path().join("outside/nested");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("AGENTS.md"), "outside").unwrap();
+        let parent_key = toml::Value::String(outside.parent().unwrap().display().to_string());
+        fs::write(
+            home.join("config.toml"),
+            format!("[projects.{parent_key}]\ntrust_level = 'untrusted'"),
+        )
+        .unwrap();
+        let audit = Audit::resolve(ContextRuntime::Codex, &outside, &paths(temp.path()), None);
+        assert!(
+            audit
+                .sources
+                .iter()
+                .all(|source| source.state == SourceState::Startup)
+        );
     }
 
     #[test]
@@ -2081,6 +2500,188 @@ mod tests {
             imports,
             [parent.join("../shared.md"), parent.join("./local.md")]
         );
+    }
+
+    #[test]
+    fn pi_deduplicates_global_paths_and_physical_candidate_aliases() {
+        let temp = TempDir::new().unwrap();
+        let global = temp.path().join(".pi/agent");
+        fs::create_dir_all(&global).unwrap();
+        for basename in ["AGENTS", "CLAUDE"] {
+            let cwd = global.join(basename);
+            fs::create_dir_all(&cwd).unwrap();
+            let normal = cwd.join(format!("{basename}.md"));
+            let uppercase = cwd.join(format!("{basename}.MD"));
+            fs::write(&normal, "instructions").unwrap();
+            // Hardlinks exercise identical file identity even on case-sensitive CI hosts.
+            if !uppercase.exists() {
+                fs::hard_link(&normal, &uppercase).unwrap();
+            }
+            let audit = Audit::resolve(ContextRuntime::Pi, &cwd, &paths(temp.path()), None);
+            assert_eq!(
+                audit
+                    .sources
+                    .iter()
+                    .filter(|source| source.path.parent() == Some(cwd.as_path()))
+                    .count(),
+                1
+            );
+        }
+        fs::write(global.join("AGENTS.md"), "global").unwrap();
+        let audit = Audit::resolve(ContextRuntime::Pi, &global, &paths(temp.path()), None);
+        let global_sources = audit
+            .sources
+            .iter()
+            .filter(|source| source.path == global.join("AGENTS.md"))
+            .collect::<Vec<_>>();
+        assert_eq!(global_sources.len(), 1);
+        assert_eq!(global_sources[0].scope, "user");
+        assert_eq!(global_sources[0].state, SourceState::Startup);
+
+        let cwd = temp.path().join("distinct");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(cwd.join("AGENTS.md"), "first").unwrap();
+        let uppercase = cwd.join("AGENTS.MD");
+        if !uppercase.exists() {
+            fs::write(&uppercase, "second").unwrap();
+            let audit = Audit::resolve(ContextRuntime::Pi, &cwd, &paths(temp.path()), None);
+            assert!(audit.sources.iter().any(|source| source.path == uppercase
+                && source.state == SourceState::Shadowed(cwd.join("AGENTS.md"))));
+        }
+    }
+
+    #[test]
+    fn pi_shadows_only_matching_main_checkout_files_for_nested_worktrees() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        crate::git_worktree::git(&root, &["init", "-q"]).unwrap();
+        fs::write(root.join("AGENTS.md"), "main").unwrap();
+        crate::git_worktree::git(&root, &["add", "-f", "AGENTS.md"]).unwrap();
+        crate::git_worktree::git(
+            &root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        )
+        .unwrap();
+        let nested = root.join(".worktrees/feat");
+        let sibling = temp.path().join("sibling");
+        for worktree in [&nested, &sibling] {
+            crate::git_worktree::git(
+                &root,
+                &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+            )
+            .unwrap();
+            let cwd = worktree.join("subdir");
+            fs::create_dir_all(&cwd).unwrap();
+            let audit = Audit::resolve(ContextRuntime::Pi, &cwd, &paths(temp.path()), None);
+            assert!(
+                audit
+                    .sources
+                    .iter()
+                    .any(|source| source.path == worktree.join("AGENTS.md")
+                        && source.state == SourceState::Startup)
+            );
+            let main = audit
+                .sources
+                .iter()
+                .find(|source| source.path == root.join("AGENTS.md"));
+            if worktree == &nested {
+                let canonical_selected = fs::canonicalize(worktree.join("AGENTS.md")).unwrap();
+                assert_eq!(
+                    main.unwrap().state,
+                    SourceState::Shadowed(canonical_selected)
+                );
+            } else {
+                assert!(main.is_none());
+            }
+        }
+        fs::write(nested.join("AGENTS.override.md"), "").unwrap();
+        let audit = Audit::resolve(ContextRuntime::Pi, &nested, &paths(temp.path()), None);
+        assert!(
+            audit
+                .sources
+                .iter()
+                .any(|source| source.path == root.join("AGENTS.md")
+                    && source.state == SourceState::Startup)
+        );
+        fs::write(root.join("AGENTS.override.md"), "main override").unwrap();
+        let audit = Audit::resolve(ContextRuntime::Pi, &nested, &paths(temp.path()), None);
+        assert!(
+            audit
+                .sources
+                .iter()
+                .any(|source| source.path == root.join("AGENTS.override.md")
+                    && source.state
+                        == SourceState::Shadowed(
+                            fs::canonicalize(nested.join("AGENTS.override.md")).unwrap()
+                        ))
+        );
+
+        // A bare repository's containing directory is not a main checkout.
+        let bare_parent = temp.path().join("bare-layout");
+        fs::create_dir_all(&bare_parent).unwrap();
+        fs::write(bare_parent.join("AGENTS.md"), "ancestor").unwrap();
+        let bare = bare_parent.join(".bare");
+        crate::git_worktree::git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                root.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let checkout = bare_parent.join("main");
+        crate::git_worktree::git(
+            &bare,
+            &["worktree", "add", "--detach", checkout.to_str().unwrap()],
+        )
+        .unwrap();
+        let audit = Audit::resolve(ContextRuntime::Pi, &checkout, &paths(temp.path()), None);
+        for file in [bare_parent.join("AGENTS.md"), checkout.join("AGENTS.md")] {
+            assert!(
+                audit
+                    .sources
+                    .iter()
+                    .any(|source| source.path == file && source.state == SourceState::Startup)
+            );
+        }
+
+        let host = temp.path().join("host");
+        fs::create_dir_all(&host).unwrap();
+        crate::git_worktree::git(&host, &["init", "-q"]).unwrap();
+        crate::git_worktree::git(
+            &host,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                root.to_str().unwrap(),
+                "sub",
+            ],
+        )
+        .unwrap();
+        fs::write(host.join("AGENTS.md"), "host").unwrap();
+        let submodule = host.join("sub");
+        let audit = Audit::resolve(ContextRuntime::Pi, &submodule, &paths(temp.path()), None);
+        for file in [host.join("AGENTS.md"), submodule.join("AGENTS.md")] {
+            assert!(
+                audit
+                    .sources
+                    .iter()
+                    .any(|source| source.path == file && source.state == SourceState::Startup)
+            );
+        }
     }
 
     #[test]

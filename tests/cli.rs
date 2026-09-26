@@ -608,9 +608,9 @@ fn codex_context_honors_custom_home_root_candidates_and_shared_budget() {
     for (path, status) in [
         (codex.join("AGENTS.md"), "at startup"),
         (root.join("AGENTS.override.md"), "empty"),
-        (root.join("AGENTS.md"), "at startup"),
+        (root.join("AGENTS.md"), "not selected"),
         (root.join("FIRST.md"), "not selected"),
-        (child.join("FIRST.md"), "partial"),
+        (child.join("FIRST.md"), "at startup"),
         (child.join("SECOND.md"), "not selected"),
         (cwd.join("AGENTS.override.md"), "partial"),
         (cwd.join("AGENTS.md"), "not selected"),

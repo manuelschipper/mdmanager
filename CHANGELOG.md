@@ -28,6 +28,19 @@
 - **Pi disable states its Codex effect** — the `local disable pi` plan says that the empty
   `AGENTS.override.md` also hides that directory's `AGENTS.md` from Codex, which selects the first
   existing file and then drops it when empty. mdmanager no longer probes `codex --version`.
+- **Codex instruction discovery** — Codex Context matches Codex 0.156.1: the first existing project
+  candidate in a directory wins even when empty (so an empty `AGENTS.override.md` hides
+  `AGENTS.md`), while the global level still falls through empty files. Fallback names are
+  validated and deduplicated, `project_root_markers = []` limits discovery to the launch
+  directory, a zero `project_doc_max_bytes` loads no project instructions, and files after an
+  exhausted budget are shown as not loaded.
+- **Codex project trust** — projects marked `trust_level = "untrusted"` in the user Codex config
+  show their project instructions as not loaded, as Codex skips them.
+- **Pi worktrees and duplicates** — in a linked worktree nested inside its main checkout, Pi Context
+  shows the main checkout's matching file as not loaded, as Pi does; a global file on the launch
+  path is listed once.
+- **Case-insensitive aliases** — one physical instruction file no longer shows phantom uppercase
+  candidates such as `AGENTS.MD` on case-insensitive filesystems.
 
 ## mdmanager 0.1.0 — Sep 6, 2026
 
