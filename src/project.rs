@@ -505,10 +505,23 @@ fn reject_target_symlink(path: &Path) -> Result<(), String> {
 }
 
 fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, String>, String> {
+    // A clone must render the same bytes, so Sections resolve inside the committed .mdmanager/.
+    let boundary = fs::canonicalize(root)
+        .map_err(|error| format!("cannot resolve project root {}: {error}", root.display()))?
+        .join(".mdmanager");
     let mut contents = IndexMap::new();
     for section in &manifest.sections {
         let path = root.join(".mdmanager").join(&section.path);
-        let content = fs::read_to_string(&path)
+        let resolved = fs::canonicalize(&path)
+            .map_err(|error| format!("cannot read project Section {}: {error}", path.display()))?;
+        if !resolved.starts_with(&boundary) {
+            return Err(format!(
+                "project Section {} resolves to {}, outside the repository's .mdmanager/",
+                path.display(),
+                resolved.display()
+            ));
+        }
+        let content = fs::read_to_string(&resolved)
             .map_err(|error| format!("cannot read project Section {}: {error}", path.display()))?;
         if content.is_empty() {
             return Err(format!("project Section {} is empty", path.display()));
@@ -829,6 +842,47 @@ mod tests {
         let error = create_plan(repository.path(), "agents", "# Again\n").unwrap_err();
 
         assert_eq!(error, "project already manages agents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_sections_cannot_resolve_outside_mdmanager() {
+        use std::os::unix::fs::symlink;
+
+        let source = "format = 1\n\n[[sections]]\nid = \"a\"\nname = \"A\"\npath = \"sections/a.md\"\n\n[targets.agents]\nsections = [\"a\"]\n";
+        let (temp, _) = workspace(source, &[("sections/a.md", "inside\n")]);
+        let mdmanager = temp.path().join(".mdmanager");
+        let manifest = mdmanager.join("project.toml");
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("a.md"), "external\n").unwrap();
+
+        // A symlink that stays inside .mdmanager/ keeps working.
+        fs::rename(mdmanager.join("sections/a.md"), mdmanager.join("a.md")).unwrap();
+        symlink("../a.md", mdmanager.join("sections/a.md")).unwrap();
+        assert_eq!(
+            Workspace::load(&manifest)
+                .unwrap()
+                .render("agents")
+                .unwrap(),
+            "inside\n"
+        );
+
+        // Neither a symlinked file nor a symlinked parent directory may leave it.
+        fs::remove_file(mdmanager.join("sections/a.md")).unwrap();
+        symlink(outside.path().join("a.md"), mdmanager.join("sections/a.md")).unwrap();
+        assert!(
+            Workspace::load(&manifest)
+                .unwrap_err()
+                .contains("outside the repository's .mdmanager/")
+        );
+        fs::remove_file(mdmanager.join("sections/a.md")).unwrap();
+        fs::remove_dir(mdmanager.join("sections")).unwrap();
+        symlink(outside.path(), mdmanager.join("sections")).unwrap();
+        assert!(
+            Workspace::load(&manifest)
+                .unwrap_err()
+                .contains("outside the repository's .mdmanager/")
+        );
     }
 
     #[cfg(unix)]

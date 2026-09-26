@@ -1,24 +1,38 @@
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{GlobalConfig, Paths, atomic_create};
+use crate::context::{claude_config_dir, pi_agent_dir};
+use crate::section::validate_relative_path;
 
 pub(crate) const COMMON_CONTENT: &str =
     "### Common\n\n<!-- Add instructions shared by your agents here before applying. -->\n";
 const GITIGNORE: &str = "/projects/\n/state/\n/backups/\n";
 
-pub(crate) fn manifest(targets: &[String]) -> Result<String, String> {
+pub(crate) fn manifest(paths: &Paths, targets: &[String]) -> Result<String, String> {
     let mut source = "[ui]\ntheme = \"gruvbox-dark\"\n\n[[sections]]\nid = \"common\"\nname = \"Common\"\npath = \"sections/common.md\"\n".to_owned();
     let mut seen = HashSet::new();
     for id in targets {
         if !seen.insert(id.as_str()) {
             return Err(format!("Global target {id} was given more than once"));
         }
-        let (path, title) = match id.as_str() {
-            "claude" => ("~/.claude/CLAUDE.md", "Global Claude"),
-            "codex" => ("~/.codex/AGENTS.md", "Global Codex"),
-            "pi" => ("~/.pi/agent/AGENTS.md", "Global Pi"),
+        // Targets follow the same runtime directory overrides that Context reads.
+        let (directory, variable, filename, title) = match id.as_str() {
+            "claude" => (
+                claude_config_dir(paths),
+                "CLAUDE_CONFIG_DIR",
+                "CLAUDE.md",
+                "Global Claude",
+            ),
+            "codex" => (codex_home(paths), "CODEX_HOME", "AGENTS.md", "Global Codex"),
+            "pi" => (
+                pi_agent_dir(paths),
+                "PI_CODING_AGENT_DIR",
+                "AGENTS.md",
+                "Global Pi",
+            ),
             "cursor" => {
                 return Err(
                     "Cursor has no Global Markdown target; use `mdmanager project adopt agents` for an existing AGENTS.md or `mdmanager project create agents --from FILE` to create one, and `mdmanager context --runtime cursor` to inspect it"
@@ -31,8 +45,21 @@ pub(crate) fn manifest(targets: &[String]) -> Result<String, String> {
                 ));
             }
         };
+        let path = directory.join(filename);
+        let relative = path
+            .strip_prefix(&paths.home)
+            .ok()
+            .and_then(Path::to_str)
+            .filter(|relative| validate_relative_path("target", relative).is_ok())
+            .ok_or_else(|| {
+                format!(
+                    "Global target {id} would be {}, which is not a clean path beneath HOME; set {variable} to a directory beneath HOME or unset it",
+                    path.display()
+                )
+            })?;
+        let path = toml::Value::String(format!("~/{relative}"));
         source.push_str(&format!(
-            "\n[targets.{id}]\npath = \"{path}\"\ntitle = \"{title}\"\n"
+            "\n[targets.{id}]\npath = {path}\ntitle = \"{title}\"\n"
         ));
     }
     if !targets.is_empty() {
@@ -53,7 +80,7 @@ pub(crate) fn common_path(paths: &Paths) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn create(paths: &Paths, targets: &[String]) -> Result<GlobalConfig, String> {
-    let source = manifest(targets)?;
+    let source = manifest(paths, targets)?;
     let common = common_path(paths)?;
     let gitignore = paths.data_dir.join(".gitignore");
     require_absent(&paths.config)?;
@@ -70,6 +97,17 @@ pub(crate) fn create(paths: &Paths, targets: &[String]) -> Result<GlobalConfig, 
         return Err(error);
     }
     GlobalConfig::load(paths)
+}
+
+// Mirrors Context's Codex resolution: CODEX_HOME applies only to the process's own HOME.
+fn codex_home(paths: &Paths) -> PathBuf {
+    if env::var_os("HOME").map(PathBuf::from).as_ref() == Some(&paths.home) {
+        env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths.home.join(".codex"))
+    } else {
+        paths.home.join(".codex")
+    }
 }
 
 fn require_absent(path: &Path) -> Result<(), String> {

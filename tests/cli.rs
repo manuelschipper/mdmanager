@@ -236,6 +236,38 @@ fn init_creates_exactly_the_selected_global_targets() {
 }
 
 #[test]
+fn init_targets_follow_runtime_directory_overrides() {
+    let home = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let init = |targets: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_mdmanager"))
+            .arg("init")
+            .args(targets)
+            .env("HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", home.path().join(".config/claude"))
+            .env("CODEX_HOME", outside.path())
+            .env_remove("PI_CODING_AGENT_DIR")
+            .output()
+            .unwrap()
+    };
+
+    // An override outside HOME cannot be a Global target, so nothing is written.
+    let rejected = init(&["claude", "codex"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8(rejected.stderr)
+            .unwrap()
+            .contains("CODEX_HOME")
+    );
+    assert!(!home.path().join(".mdmanager").exists());
+
+    assert!(init(&["claude", "pi"]).status.success());
+    let manifest = fs::read_to_string(home.path().join(".mdmanager/mdmanager.toml")).unwrap();
+    assert!(manifest.contains("path = \"~/.config/claude/CLAUDE.md\""));
+    assert!(manifest.contains("path = \"~/.pi/agent/AGENTS.md\""));
+}
+
+#[test]
 fn init_rejects_cursor_as_a_global_target_with_project_guidance() {
     let home = TempDir::new().unwrap();
     let output = mdmanager(home.path(), &["init", "cursor"]);
