@@ -41,6 +41,12 @@
   path is listed once.
 - **Case-insensitive aliases** — one physical instruction file no longer shows phantom uppercase
   candidates such as `AGENTS.MD` on case-insensitive filesystems.
+- **Serialized Global writes** — `mdmanager apply` and `doctor` repairs take an exclusive lock on
+  `~/.mdmanager/state/state.lock`, so concurrent agents can no longer interleave target writes or
+  lose ownership entries. A reviewed plan is checked again under the lock and refused if another
+  apply changed the targets first.
+- **TUI watches every Global target** — automatic reload now watches each configured Global target
+  path, including custom locations, and Claude's managed-policy `CLAUDE.md`.
 
 ## mdmanager 0.1.0 — Sep 6, 2026
 

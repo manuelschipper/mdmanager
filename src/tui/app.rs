@@ -154,6 +154,7 @@ impl App {
         ReloadInput {
             audit: &self.inspection.context,
             paths: &self.paths,
+            global: self.global.as_ref(),
             watch_root: &self.watch_root,
         }
     }
@@ -656,6 +657,7 @@ impl App {
         let input = ReloadInput {
             audit: &self.inspection.context,
             paths: &self.paths,
+            global: self.global.as_ref(),
             watch_root: &self.watch_root,
         };
         if self.watcher.poll_reload(&input) {

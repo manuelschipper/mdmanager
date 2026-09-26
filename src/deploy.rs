@@ -25,6 +25,16 @@ struct AppliedTarget {
     hash: String,
 }
 
+// Explicit unlock also releases the lock if a spawned process briefly inherited the
+// descriptor before exec. The stable lock file itself is never removed.
+struct GlobalMutationLock(fs::File);
+
+impl Drop for GlobalMutationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Global target status: how a configured Global target file on disk compares with
 /// the active Profile's rendered composition. `label()` owns the displayed status
@@ -133,6 +143,8 @@ pub(crate) fn matching_targets_on_disk(
 }
 
 pub(crate) fn repair_state(global: &GlobalConfig, profile: &str) -> Result<(), String> {
+    let _lock = lock_mutation(global)?;
+    ensure_state_still_invalid(global)?;
     global.ensure_unchanged()?;
     if !global.manifest.profiles.contains_key(profile) {
         return Err(format!(
@@ -165,6 +177,8 @@ pub(crate) fn repair_state(global: &GlobalConfig, profile: &str) -> Result<(), S
 }
 
 pub(crate) fn clear_state(global: &GlobalConfig) -> Result<(), String> {
+    let _lock = lock_mutation(global)?;
+    ensure_state_still_invalid(global)?;
     global.ensure_unchanged()?;
     save_state(global, &State::default())
 }
@@ -346,6 +360,9 @@ fn apply_inner(
     activate: bool,
     reviewed: Option<&[TargetView]>,
 ) -> Result<Vec<ApplyReport>, String> {
+    // Inspection, the reviewed-plan check, target writes and state saves form one
+    // transaction, so a concurrent writer cannot interleave or lose ownership entries.
+    let _lock = lock_mutation(global)?;
     global.ensure_unchanged()?;
     if !global.manifest.profiles.contains_key(profile) {
         return Err(format!(
@@ -437,6 +454,35 @@ fn apply_inner(
 
 fn state_path(global: &GlobalConfig) -> PathBuf {
     global.paths.state_dir.join("state.toml")
+}
+
+// A stable inode beside state serializes all Global deployment writers.
+// Dropping the handle releases the OS lock, including on failure or process exit.
+fn lock_mutation(global: &GlobalConfig) -> Result<GlobalMutationLock, String> {
+    let path = global.paths.state_dir.join("state.lock");
+    fs::create_dir_all(&global.paths.state_dir)
+        .map_err(|error| format!("cannot create Global state directory: {error}"))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("cannot open Global lock {}: {error}", path.display()))?;
+    file.lock()
+        .map_err(|error| format!("cannot lock Global deployment state: {error}"))?;
+    Ok(GlobalMutationLock(file))
+}
+
+// Doctor chose a repair after reading invalid state; another writer may have
+// replaced it with valid state before the lock was acquired.
+fn ensure_state_still_invalid(global: &GlobalConfig) -> Result<(), String> {
+    if load_state(global).is_ok() {
+        return Err(
+            "Global deployment state changed during repair; run `mdmanager doctor` again".into(),
+        );
+    }
+    Ok(())
 }
 
 fn load_state(global: &GlobalConfig) -> Result<State, String> {
@@ -799,7 +845,15 @@ claude = ["common"]
 
         let error = apply_reviewed(&global, "default", &reviewed, true).unwrap_err();
         assert!(error.contains("changed after review"));
-        assert_eq!(fs::read_to_string(target).unwrap(), "after review\n");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "after review\n");
+
+        // A plan reviewed before another writer's apply is stale once that apply commits.
+        let reviewed = inspect(&global, "default").unwrap();
+        apply(&global, "default", None, true, true).unwrap();
+        let state = fs::read_to_string(state_path(&global)).unwrap();
+        let error = apply_reviewed(&global, "default", &reviewed, true).unwrap_err();
+        assert!(error.contains("changed after review"));
+        assert_eq!(fs::read_to_string(state_path(&global)).unwrap(), state);
     }
 
     #[test]
@@ -1055,6 +1109,13 @@ claude = ["common"]
         );
         assert_eq!(matching_profiles_on_disk(&global).unwrap(), ["work"]);
 
+        // Doctor repairs only state that is still invalid once it holds the lock.
+        assert!(
+            repair_state(&global, "work")
+                .unwrap_err()
+                .contains("changed during repair")
+        );
+        fs::write(state_path(&global), "invalid").unwrap();
         repair_state(&global, "work").unwrap();
         let state = load_state(&global).unwrap();
         assert_eq!(
