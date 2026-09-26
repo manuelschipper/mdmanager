@@ -10,16 +10,17 @@ Claude works in their subtree.
 Claude Code 2.1.277 and later read `AGENTS.md` and `.claude/AGENTS.md` directly. By default Claude
 reads them only when no `CLAUDE.md`, `.claude/CLAUDE.md`, or `CLAUDE.local.md` exists in the launch
 directory or above it; the user and managed `CLAUDE.md` and `.claude/rules/` do not count. Any one of
-those files turns off every `AGENTS.md`, including subfolder files, and `mdmanager context` shows them
-as `not selected`. A subfolder `AGENTS.md` loads on demand unless that subfolder has its own `CLAUDE`
-file. An `AGENTS.md` that a `CLAUDE.md` imports or symlinks to loads once, through that file.
-Claude never reads `AGENTS.override.md` or `AGENTS.local.md`.
+those files turns off every `AGENTS.md`: `mdmanager context` shows the launch-path files as
+`not selected` and omits subfolder files. Otherwise a subfolder `AGENTS.md` loads on demand unless
+that subfolder has its own `CLAUDE` file. An `AGENTS.md` that a loading `CLAUDE.md` imports or
+symlinks to loads once, through that file. Claude never reads `AGENTS.override.md`,
+`AGENTS.local.md`, or anything under `.agents/`.
 
 The **Project instructions** setting changes this: `claude-md-and-agents-md` loads both,
 `claude-md` loads `CLAUDE.md` only, and `managed-only` loads only the managed `CLAUDE.md` at launch.
 mdmanager reads it from `pluginConfigs["agents-md@builtin"].options.instructionFiles` in user or
-managed settings files, and treats `"agents-md@builtin": false` under `enabledPlugins` in any settings
-file as `claude-md`. It does not see MDM or server-managed policy, `--settings` files, or the Claude
+managed settings files, and treats `"agents-md@builtin": false` under `enabledPlugins` as
+`claude-md` when it is the highest-precedence entry. It does not see MDM or server-managed policy, `--settings` files, or the Claude
 Code version; on older versions, or in the first session after upgrading, Claude reads `CLAUDE.md`
 files only.
 

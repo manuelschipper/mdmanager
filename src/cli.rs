@@ -286,7 +286,7 @@ fn context_command(paths: &Paths, runtime: &str, json: bool) -> Result<ExitCode,
             .map(|source| source.path.clone())
             .collect();
         let scan = crate::context::scan_claude_descendants(&directory, paths, seen);
-        audit.add_claude_scan(scan, global.as_ref());
+        audit.add_claude_scan(scan, paths, global.as_ref());
     }
     if json {
         println!("{}", context_json(&audit, paths)?);

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::config::Paths;
-use crate::context::{Audit, claude_config_dir, pi_agent_dir};
+use crate::context::{Audit, claude_config_dir, claude_managed_dir, pi_agent_dir};
 
 const AUTO_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -170,6 +170,8 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
         claude_config.join("CLAUDE.md"),
         claude_config.join("settings.json"),
         claude_config.join("settings.local.json"),
+        claude_managed_dir().join("managed-settings.json"),
+        claude_managed_dir().join("managed-settings.d"),
         codex_home.join("AGENTS.override.md"),
         codex_home.join("AGENTS.md"),
         codex_home.join("config.toml"),
