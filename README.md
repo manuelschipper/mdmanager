@@ -107,7 +107,8 @@ Project compositions stay self-contained, so teammates don't need your personal 
 compositions can reuse your personal Sections across repositories.
 
 Project and Local management require a Git worktree. Runtime behavior still applies: Codex and Pi's
-`AGENTS.override.md` replaces `AGENTS.md`, while Claude's `CLAUDE.local.md` adds instructions. Cursor
+`AGENTS.override.md` replaces `AGENTS.md`, while Claude's `CLAUDE.local.md` adds instructions and, by
+default, stops Claude reading `AGENTS.md`. Cursor
 has no Global Markdown target.
 
 ## Work with your coding agent

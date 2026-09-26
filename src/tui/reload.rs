@@ -96,6 +96,7 @@ fn hash_ancestor_candidates(
             "CLAUDE.MD",
             "CLAUDE.local.md",
             ".claude/CLAUDE.md",
+            ".claude/AGENTS.md",
             ".claude/settings.json",
             ".claude/settings.local.json",
         ] {

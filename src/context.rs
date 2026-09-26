@@ -217,25 +217,17 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
     let mut sources = Vec::new();
     let mut seen = HashSet::new();
     let config_dir = claude_config_dir(paths);
-
-    #[cfg(target_os = "macos")]
-    let policy = Path::new("/Library/Application Support/ClaudeCode/CLAUDE.md");
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let policy = Path::new("/etc/claude-code/CLAUDE.md");
-    #[cfg(target_os = "windows")]
-    let policy = Path::new(r"C:\Program Files\ClaudeCode\CLAUDE.md");
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "windows"
-    )))]
-    let policy = Path::new("/etc/claude-code/CLAUDE.md");
+    let instruction_files = claude_instruction_files(directory, paths);
+    // By default a CLAUDE file on the launch path stops every AGENTS.md from loading.
+    let agents_shadow = match instruction_files {
+        ClaudeInstructionFiles::ClaudeMdOrAgentsMd => claude_md_on_path(directory, paths),
+        _ => None,
+    };
 
     push_loaded(
         &mut sources,
         &mut seen,
-        policy,
+        &claude_managed_dir().join("CLAUDE.md"),
         "managed policy",
         paths,
         directory,
@@ -308,6 +300,31 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
             paths,
             directory,
         );
+        if matches!(
+            instruction_files,
+            ClaudeInstructionFiles::ClaudeMdOrAgentsMd
+                | ClaudeInstructionFiles::ClaudeMdAndAgentsMd
+        ) {
+            for agents in [
+                ancestor.join("AGENTS.md"),
+                ancestor.join(".claude/AGENTS.md"),
+            ] {
+                if regular_file(&agents) {
+                    let state = agents_shadow
+                        .clone()
+                        .map_or(SourceState::Startup, SourceState::Shadowed);
+                    push_with_state(
+                        &mut sources,
+                        &mut seen,
+                        &agents,
+                        &scope_for(&ancestor, directory),
+                        state,
+                        paths,
+                        directory,
+                    );
+                }
+            }
+        }
         push_rules(
             &mut sources,
             &mut seen,
@@ -318,7 +335,14 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
         );
     }
 
+    if instruction_files == ClaudeInstructionFiles::ManagedOnly {
+        // Only managed instructions load at launch; path-scoped rules still load on demand.
+        sources.retain(|source| {
+            source.scope == "managed policy" || matches!(source.state, SourceState::Conditional(_))
+        });
+    }
     annotate_claude_imports(&mut sources, paths);
+    skip_agents_md_loaded_through_claude_md(&mut sources);
     apply_claude_exclusions(&mut sources, directory, paths);
     sort_sources(&mut sources);
 
@@ -342,6 +366,12 @@ pub(crate) fn scan_claude_descendants(
 ) -> ClaudeScan {
     let mut sources = Vec::new();
     let mut unreadable = Vec::new();
+    let instruction_files = claude_instruction_files(directory, paths);
+    let agents_md_loads = match instruction_files {
+        ClaudeInstructionFiles::ClaudeMdOrAgentsMd => claude_md_on_path(directory, paths).is_none(),
+        ClaudeInstructionFiles::ClaudeMdAndAgentsMd => true,
+        ClaudeInstructionFiles::ClaudeMd | ClaudeInstructionFiles::ManagedOnly => false,
+    };
     let entries = WalkDir::new(directory)
         .follow_links(true)
         .min_depth(1)
@@ -387,6 +417,25 @@ pub(crate) fn scan_claude_descendants(
                 paths,
                 directory,
             );
+        } else if agents_md_loads
+            && name == "AGENTS.md"
+            && let Some(parent) = path.parent().filter(|parent| *parent != directory)
+            && !is_rule_path(path)
+            && !(instruction_files == ClaudeInstructionFiles::ClaudeMdOrAgentsMd
+                && has_claude_md(parent))
+        {
+            push_with_state(
+                &mut sources,
+                &mut seen,
+                path,
+                "nested instruction",
+                SourceState::Nested(format!(
+                    "Claude can load this after reading files under {}",
+                    display_path(parent, paths, directory)
+                )),
+                paths,
+                directory,
+            );
         } else if path.extension().is_some_and(|extension| extension == "md")
             && is_rule_path(path)
             && !seen.contains(path)
@@ -412,6 +461,7 @@ pub(crate) fn scan_claude_descendants(
     }
 
     annotate_claude_imports(&mut sources, paths);
+    skip_agents_md_loaded_through_claude_md(&mut sources);
     apply_claude_exclusions(&mut sources, directory, paths);
     sort_sources(&mut sources);
     ClaudeScan {
@@ -478,12 +528,27 @@ fn apply_claude_exclusions(sources: &mut [ContextSource], directory: &Path, path
 fn annotate_claude_imports(sources: &mut [ContextSource], paths: &Paths) {
     for source in sources {
         let name = source.path.file_name().and_then(|name| name.to_str());
-        if !matches!(name, Some("CLAUDE.md" | "CLAUDE.local.md")) {
+        if !matches!(name, Some("CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md")) {
             continue;
         }
         let parent = source.path.parent().unwrap_or(Path::new("."));
         source.imports = claude_imports(&source.content, parent, &paths.home);
     }
+}
+
+/// Drops an AGENTS.md that a listed CLAUDE file already loads by import or symlink;
+/// Claude reads it once, through that CLAUDE file.
+fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>) {
+    let loaded = sources
+        .iter()
+        .filter(|source| is_claude_instruction_path(&source.path) && !is_rule_path(&source.path))
+        .flat_map(|source| std::iter::once(&source.path).chain(&source.imports))
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect::<HashSet<_>>();
+    sources.retain(|source| {
+        source.path.file_name() != Some("AGENTS.md".as_ref())
+            || fs::canonicalize(&source.path).map_or(true, |path| !loaded.contains(&path))
+    });
 }
 
 fn claude_imports(content: &str, parent: &Path, home: &Path) -> Vec<PathBuf> {
@@ -565,6 +630,146 @@ fn markdown_without_code(content: &str) -> String {
         output.push('\n');
     }
     output
+}
+
+/// Claude's **Project instructions** setting, which decides whether `AGENTS.md` loads.
+/// The built-in `agents-md` plugin stores it; disabling that plugin reads `CLAUDE.md` only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaudeInstructionFiles {
+    /// Default: `AGENTS.md` loads only when no CLAUDE file is on the launch path.
+    ClaudeMdOrAgentsMd,
+    ClaudeMdAndAgentsMd,
+    ClaudeMd,
+    /// Only managed instructions at launch; subfolder files and path-scoped rules still load.
+    ManagedOnly,
+}
+
+fn claude_instruction_files(directory: &Path, paths: &Paths) -> ClaudeInstructionFiles {
+    let settings = claude_settings_files(directory, paths)
+        .into_iter()
+        .filter_map(|path| {
+            let value =
+                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&path).ok()?).ok()?;
+            Some((path, value))
+        })
+        .collect::<Vec<_>>();
+    let enabled = settings.iter().find_map(|(_, value)| {
+        value
+            .pointer("/enabledPlugins/agents-md@builtin")?
+            .as_bool()
+    });
+    if enabled == Some(false) {
+        return ClaudeInstructionFiles::ClaudeMd;
+    }
+    // Claude ignores pluginConfigs in project and local settings.
+    let user = claude_config_dir(paths).join("settings.json");
+    let configured = settings
+        .iter()
+        .filter(|(path, _)| path.starts_with(claude_managed_dir()) || *path == user)
+        .find_map(|(_, value)| {
+            value
+                .pointer("/pluginConfigs/agents-md@builtin/options/instructionFiles")?
+                .as_str()
+        });
+    match configured {
+        Some("claude-md-and-agents-md") => ClaudeInstructionFiles::ClaudeMdAndAgentsMd,
+        Some("claude-md") => ClaudeInstructionFiles::ClaudeMd,
+        Some("managed-only") => ClaudeInstructionFiles::ManagedOnly,
+        _ => ClaudeInstructionFiles::ClaudeMdOrAgentsMd,
+    }
+}
+
+/// Claude settings files that apply to `directory`, highest precedence first:
+/// managed drop-ins and file, local, project, then user.
+fn claude_settings_files(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
+    let managed = claude_managed_dir();
+    let mut files = fs::read_dir(managed.join("managed-settings.d"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                && !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        })
+        .collect::<Vec<_>>();
+    // Claude merges drop-ins alphabetically, so later files win.
+    files.sort();
+    files.reverse();
+    files.push(managed.join("managed-settings.json"));
+    files.extend(
+        directory
+            .ancestors()
+            .map(|ancestor| ancestor.join(".claude/settings.local.json")),
+    );
+    if let Ok(main_checkout) = crate::git_worktree::worktree_root(directory)
+        .and_then(|root| crate::git_worktree::main_worktree(&root))
+    {
+        files.push(main_checkout.join(".claude/settings.local.json"));
+    }
+    files.extend(
+        directory
+            .ancestors()
+            .map(|ancestor| ancestor.join(".claude/settings.json")),
+    );
+    files.push(claude_config_dir(paths).join("settings.json"));
+    files
+}
+
+/// Files that stop Claude's default `AGENTS.md` loading at their directory level.
+const CLAUDE_MD_FILES: [&str; 3] = ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"];
+
+/// The nearest CLAUDE file on the launch path; the user and managed CLAUDE.md do not count.
+fn claude_md_on_path(directory: &Path, paths: &Paths) -> Option<PathBuf> {
+    let user = claude_config_dir(paths).join("CLAUDE.md");
+    directory
+        .ancestors()
+        .flat_map(|ancestor| CLAUDE_MD_FILES.map(|name| ancestor.join(name)))
+        .find(|path| *path != user && regular_file(path))
+}
+
+fn has_claude_md(directory: &Path) -> bool {
+    CLAUDE_MD_FILES
+        .iter()
+        .any(|name| regular_file(&directory.join(name)))
+}
+
+/// `AGENTS.md` files Claude loads at startup in `directory` that a new `CLAUDE.local.md`
+/// there would stop it reading under the default **Project instructions** setting.
+pub(crate) fn agents_md_displaced_by_claude_local(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
+    if claude_instruction_files(directory, paths) != ClaudeInstructionFiles::ClaudeMdOrAgentsMd {
+        return Vec::new();
+    }
+    resolve_claude(directory, paths)
+        .sources
+        .into_iter()
+        .filter(|source| {
+            source.path.file_name() == Some("AGENTS.md".as_ref())
+                && source.state == SourceState::Startup
+        })
+        .map(|source| source.path)
+        .collect()
+}
+
+/// Claude's system directory for organization-managed instructions and settings.
+fn claude_managed_dir() -> &'static Path {
+    #[cfg(target_os = "macos")]
+    let directory = Path::new("/Library/Application Support/ClaudeCode");
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let directory = Path::new("/etc/claude-code");
+    #[cfg(target_os = "windows")]
+    let directory = Path::new(r"C:\Program Files\ClaudeCode");
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows"
+    )))]
+    let directory = Path::new("/etc/claude-code");
+    directory
 }
 
 fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
@@ -1290,6 +1495,144 @@ mod tests {
             source.path == cwd.join(".claude/rules/testing.md")
                 && source.group == SourceGroup::PathFiltered
         }));
+    }
+
+    #[test]
+    fn claude_reads_agents_md_only_without_claude_md_on_the_launch_path() {
+        let temp = TempDir::new().unwrap();
+        let home = paths(temp.path());
+        let root = temp.path().join("repo");
+        let cwd = root.join("app");
+        fs::create_dir_all(cwd.join("lib")).unwrap();
+        fs::create_dir_all(cwd.join("docs")).unwrap();
+        fs::create_dir_all(temp.path().join(".claude")).unwrap();
+        fs::write(temp.path().join(".claude/CLAUDE.md"), "user").unwrap();
+        fs::write(root.join("AGENTS.md"), "root agents").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "app agents").unwrap();
+        fs::write(cwd.join("lib/AGENTS.md"), "lib agents").unwrap();
+        fs::write(cwd.join("docs/AGENTS.md"), "docs agents").unwrap();
+        fs::write(cwd.join("docs/CLAUDE.md"), "docs claude").unwrap();
+        let state = |audit: &Audit, path: &Path| {
+            audit
+                .sources
+                .iter()
+                .find(|source| source.path == path)
+                .map(|source| source.state.clone())
+        };
+
+        let mut audit = Audit::resolve(ContextRuntime::Claude, &cwd, &home, None);
+        let seen = audit
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect();
+        audit.add_claude_scan(scan_claude_descendants(&cwd, &home, seen), None);
+        assert_eq!(
+            state(&audit, &root.join("AGENTS.md")),
+            Some(SourceState::Startup)
+        );
+        assert_eq!(
+            state(&audit, &cwd.join("AGENTS.md")),
+            Some(SourceState::Startup)
+        );
+        assert!(matches!(
+            state(&audit, &cwd.join("lib/AGENTS.md")),
+            Some(SourceState::Nested(_))
+        ));
+        assert_eq!(state(&audit, &cwd.join("docs/AGENTS.md")), None);
+        assert_eq!(
+            agents_md_displaced_by_claude_local(&cwd, &home),
+            [root.join("AGENTS.md"), cwd.join("AGENTS.md")]
+        );
+
+        // Any CLAUDE file on the launch path turns AGENTS.md off, including descendants.
+        fs::write(root.join("CLAUDE.local.md"), "local").unwrap();
+        let mut audit = Audit::resolve(ContextRuntime::Claude, &cwd, &home, None);
+        let seen = audit
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect();
+        audit.add_claude_scan(scan_claude_descendants(&cwd, &home, seen), None);
+        assert_eq!(
+            state(&audit, &cwd.join("AGENTS.md")),
+            Some(SourceState::Shadowed(root.join("CLAUDE.local.md")))
+        );
+        assert_eq!(state(&audit, &cwd.join("lib/AGENTS.md")), None);
+        assert!(agents_md_displaced_by_claude_local(&cwd, &home).is_empty());
+
+        // An AGENTS.md that a CLAUDE.md imports is read once, through the import.
+        fs::write(cwd.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();
+        let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &home, None);
+        assert_eq!(state(&audit, &cwd.join("AGENTS.md")), None);
+        assert!(audit.sources.iter().any(|source| {
+            source.path == cwd.join("CLAUDE.md") && source.imports == [cwd.join("AGENTS.md")]
+        }));
+    }
+
+    #[test]
+    fn claude_project_instructions_setting_selects_agents_md() {
+        let temp = TempDir::new().unwrap();
+        let home = paths(temp.path());
+        let cwd = temp.path().join("repo");
+        fs::create_dir_all(cwd.join(".claude/rules")).unwrap();
+        fs::create_dir_all(temp.path().join(".claude")).unwrap();
+        fs::write(cwd.join("CLAUDE.md"), "claude").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "agents").unwrap();
+        fs::write(cwd.join(".claude/rules/always.md"), "always").unwrap();
+        fs::write(
+            cwd.join(".claude/rules/tests.md"),
+            "---\npaths:\n  - 'tests/**'\n---\ntests\n",
+        )
+        .unwrap();
+        let loaded = |home: &Paths| {
+            Audit::resolve(ContextRuntime::Claude, &cwd, home, None)
+                .sources
+                .into_iter()
+                .filter(|source| {
+                    matches!(
+                        source.state,
+                        SourceState::Startup | SourceState::Conditional(_)
+                    )
+                })
+                .map(|source| source.path)
+                .collect::<Vec<_>>()
+        };
+        let set = |file: &Path, value: &str| fs::write(file, value).unwrap();
+        let user_settings = temp.path().join(".claude/settings.json");
+        let instruction_files = |value: &str| {
+            format!(
+                "{{\"pluginConfigs\":{{\"agents-md@builtin\":{{\"options\":{{\"instructionFiles\":\"{value}\"}}}}}}}}"
+            )
+        };
+
+        set(
+            &user_settings,
+            &instruction_files("claude-md-and-agents-md"),
+        );
+        assert!(loaded(&home).contains(&cwd.join("CLAUDE.md")));
+        assert!(loaded(&home).contains(&cwd.join("AGENTS.md")));
+
+        // Claude ignores pluginConfigs in project settings.
+        set(&user_settings, "{}");
+        set(
+            &cwd.join(".claude/settings.json"),
+            &instruction_files("claude-md-and-agents-md"),
+        );
+        assert!(!loaded(&home).contains(&cwd.join("AGENTS.md")));
+
+        set(&user_settings, &instruction_files("managed-only"));
+        assert_eq!(loaded(&home), [cwd.join(".claude/rules/tests.md")]);
+
+        // Disabling the built-in plugin in any scope reads CLAUDE.md files only.
+        fs::remove_file(cwd.join("CLAUDE.md")).unwrap();
+        set(&user_settings, "{}");
+        assert!(loaded(&home).contains(&cwd.join("AGENTS.md")));
+        set(
+            &cwd.join(".claude/settings.local.json"),
+            "{\"enabledPlugins\":{\"agents-md@builtin\":false}}",
+        );
+        assert!(!loaded(&home).contains(&cwd.join("AGENTS.md")));
     }
 
     #[cfg(unix)]

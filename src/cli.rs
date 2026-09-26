@@ -561,6 +561,16 @@ fn local_command(paths: &Paths, command: LocalCommand) -> Result<ExitCode, Strin
                     }
                 }
             );
+            if target == local::ManagedTarget::Claude
+                && let Some(root) = view.path.parent()
+            {
+                for agents in crate::context::agents_md_displaced_by_claude_local(root, paths) {
+                    println!(
+                        "Warning: Claude will stop reading {}. By default Claude reads AGENTS.md only when no CLAUDE.md or CLAUDE.local.md is on the launch path; set Project instructions to claude-md-and-agents-md in /config to keep both.",
+                        agents.display()
+                    );
+                }
+            }
             if !confirm_or_require_yes("Apply these managed local instructions?", yes)? {
                 println!("Cancelled.");
                 return Ok(ExitCode::FAILURE);
