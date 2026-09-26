@@ -349,6 +349,7 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
         });
     }
     annotate_claude_imports(&mut sources, paths);
+    skip_oversized_claude_files(&mut sources);
     apply_claude_exclusions(&mut sources, directory, paths);
     skip_agents_md_loaded_through_claude_md(&mut sources, paths);
     sort_sources(&mut sources);
@@ -473,6 +474,7 @@ pub(crate) fn scan_claude_descendants(
     }
 
     annotate_claude_imports(&mut sources, paths);
+    skip_oversized_claude_files(&mut sources);
     apply_claude_exclusions(&mut sources, directory, paths);
     sort_sources(&mut sources);
     ClaudeScan {
@@ -481,21 +483,33 @@ pub(crate) fn scan_claude_descendants(
     }
 }
 
+/// Claude skips an instruction file larger than 4 MiB instead of loading it.
+const CLAUDE_MAX_INSTRUCTION_BYTES: u64 = 4 * 1024 * 1024;
+
+fn skip_oversized_claude_files(sources: &mut [ContextSource]) {
+    for source in sources {
+        if matches!(
+            source.state,
+            SourceState::Shadowed(_) | SourceState::Unreadable(_)
+        ) {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&source.path) else {
+            continue;
+        };
+        if metadata.len() > CLAUDE_MAX_INSTRUCTION_BYTES {
+            source.state = SourceState::Excluded(format!(
+                "Claude skips instruction files over 4 MiB; this file is {} bytes",
+                metadata.len()
+            ));
+        }
+    }
+}
+
 fn apply_claude_exclusions(sources: &mut [ContextSource], directory: &Path, paths: &Paths) {
-    let mut settings = vec![claude_config_dir(paths).join("settings.json")];
-    for ancestor in ancestors_from_root(directory) {
-        settings.push(ancestor.join(".claude/settings.json"));
-        settings.push(ancestor.join(".claude/settings.local.json"));
-    }
-    if let Ok(main_checkout) = crate::git_worktree::worktree_root(directory)
-        .and_then(|root| crate::git_worktree::main_worktree(&root))
-    {
-        settings.push(main_checkout.join(".claude/settings.local.json"));
-    }
-    settings.sort();
-    settings.dedup();
+    // Arrays merge across every settings layer, managed settings included.
     let mut patterns = Vec::new();
-    for settings_path in settings {
+    for settings_path in claude_settings_files(directory, paths) {
         let Ok(source) = fs::read_to_string(&settings_path) else {
             continue;
         };
@@ -523,10 +537,16 @@ fn apply_claude_exclusions(sources: &mut [ContextSource], directory: &Path, path
         if source.scope == "managed policy" {
             continue;
         }
+        // A pattern can name a symlinked file by its link path or its resolved target.
+        let target = fs::canonicalize(&source.path).ok();
         if let Some((_, _, settings_path)) = patterns.iter().find(|(raw, pattern, _)| {
             pattern.matches_path(&source.path)
+                || target
+                    .as_ref()
+                    .is_some_and(|target| pattern.matches_path(target))
                 || (Path::new(raw).is_absolute()
-                    && fs::canonicalize(raw).ok() == fs::canonicalize(&source.path).ok())
+                    && target.is_some()
+                    && fs::canonicalize(raw).ok() == target)
         }) {
             source.state = SourceState::Excluded(format!(
                 "excluded by {}",
@@ -548,37 +568,47 @@ fn annotate_claude_imports(sources: &mut [ContextSource], paths: &Paths) {
 }
 
 /// Drops an AGENTS.md that a loading CLAUDE file already reads by symlink or import;
-/// Claude reads it once, through that CLAUDE file.
+/// Claude reads it once, through that CLAUDE file. A subfolder CLAUDE file loads only on
+/// demand, so it can hide only a subfolder AGENTS.md, never one that loads at startup.
 fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>, paths: &Paths) {
-    let mut loaded = HashSet::new();
-    for source in sources.iter().filter(|source| {
-        is_claude_instruction_path(&source.path)
-            && !is_rule_path(&source.path)
-            && !matches!(
-                source.state,
-                SourceState::Excluded(_) | SourceState::Shadowed(_)
-            )
-    }) {
-        loaded.extend(fs::canonicalize(&source.path).ok());
-        // Claude expands imports up to four hops deep.
-        let mut hop = source.imports.clone();
-        for _ in 0..4 {
-            let mut next = Vec::new();
-            for import in hop {
-                if let Ok(canonical) = fs::canonicalize(&import)
-                    && loaded.insert(canonical)
-                {
-                    let content = fs::read_to_string(&import).unwrap_or_default();
-                    let parent = import.parent().unwrap_or(Path::new("."));
-                    next.extend(claude_imports(&content, parent, &paths.home));
+    let loaded_by = |nested: bool| {
+        let mut loaded = HashSet::new();
+        for source in sources.iter().filter(|source| {
+            is_claude_instruction_path(&source.path)
+                && !is_rule_path(&source.path)
+                && (source.group == SourceGroup::Nested) == nested
+                && !matches!(
+                    source.state,
+                    SourceState::Excluded(_) | SourceState::Shadowed(_)
+                )
+        }) {
+            loaded.extend(fs::canonicalize(&source.path).ok());
+            // Claude expands imports up to four hops deep.
+            let mut hop = source.imports.clone();
+            for _ in 0..4 {
+                let mut next = Vec::new();
+                for import in hop {
+                    if let Ok(canonical) = fs::canonicalize(&import)
+                        && loaded.insert(canonical)
+                    {
+                        let content = fs::read_to_string(&import).unwrap_or_default();
+                        let parent = import.parent().unwrap_or(Path::new("."));
+                        next.extend(claude_imports(&content, parent, &paths.home));
+                    }
                 }
+                hop = next;
             }
-            hop = next;
         }
-    }
+        loaded
+    };
+    let startup = loaded_by(false);
+    let nested = loaded_by(true);
     sources.retain(|source| {
         source.path.file_name() != Some("AGENTS.md".as_ref())
-            || fs::canonicalize(&source.path).map_or(true, |path| !loaded.contains(&path))
+            || fs::canonicalize(&source.path).map_or(true, |path| {
+                !(startup.contains(&path)
+                    || source.group == SourceGroup::Nested && nested.contains(&path))
+            })
     });
 }
 
@@ -612,10 +642,23 @@ fn claude_imports(content: &str, parent: &Path, home: &Path) -> Vec<PathBuf> {
     imports
 }
 
+/// Content Claude scans for imports: code and block-level HTML comments are removed,
+/// because Claude strips those comments before injecting the file.
 fn markdown_without_code(content: &str) -> String {
     let mut output = String::with_capacity(content.len());
     let mut fence: Option<(char, usize)> = None;
+    let mut in_comment = false;
     for line in content.lines() {
+        let mut line = line;
+        if fence.is_none() && (in_comment || line.trim_start().starts_with("<!--")) {
+            let Some(end) = line.find("-->") else {
+                in_comment = true;
+                output.push('\n');
+                continue;
+            };
+            in_comment = false;
+            line = &line[end + 3..];
+        }
         let trimmed = line.trim_start();
         let marker = trimmed
             .chars()
@@ -710,8 +753,11 @@ fn claude_instruction_files(directory: &Path, paths: &Paths) -> ClaudeInstructio
     }
 }
 
-/// Claude settings files that apply to `directory`, highest precedence first:
-/// managed drop-ins and file, local, project, then user.
+/// Claude settings files that apply to a session launched in `directory`, highest precedence
+/// first: managed drop-ins and file, local, project, then user. Project settings come from the
+/// launch directory only. In a Git repository the local file lives at the main checkout's root
+/// and wins over one an older Claude left in the launch directory; outside Git, or when the
+/// repository root is the home directory, it stays beside the project settings.
 fn claude_settings_files(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
     let managed = claude_managed_dir();
     let mut files = fs::read_dir(managed.join("managed-settings.d"))
@@ -731,22 +777,16 @@ fn claude_settings_files(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
     files.sort();
     files.reverse();
     files.push(managed.join("managed-settings.json"));
-    files.extend(
-        directory
-            .ancestors()
-            .map(|ancestor| ancestor.join(".claude/settings.local.json")),
-    );
-    if let Ok(main_checkout) = crate::git_worktree::worktree_root(directory)
-        .and_then(|root| crate::git_worktree::main_worktree(&root))
+    if let Ok(root) = crate::git_worktree::worktree_root(directory)
+        && fs::canonicalize(&root).ok() != fs::canonicalize(&paths.home).ok()
+        && let Ok(main_checkout) = crate::git_worktree::main_worktree(&root)
     {
         files.push(main_checkout.join(".claude/settings.local.json"));
     }
-    files.extend(
-        directory
-            .ancestors()
-            .map(|ancestor| ancestor.join(".claude/settings.json")),
-    );
+    files.push(directory.join(".claude/settings.local.json"));
+    files.push(directory.join(".claude/settings.json"));
     files.push(claude_config_dir(paths).join("settings.json"));
+    files.dedup();
     files
 }
 
@@ -1492,8 +1532,10 @@ mod tests {
         let cwd = root.join("app");
         fs::create_dir_all(cwd.join("tests")).unwrap();
         fs::create_dir_all(cwd.join(".claude/rules")).unwrap();
-        fs::write(root.join("CLAUDE.md"), "root").unwrap();
-        fs::write(cwd.join("CLAUDE.md"), "app").unwrap();
+        // Claude loads a file of exactly 4 MiB and skips a larger one.
+        let limit = CLAUDE_MAX_INSTRUCTION_BYTES as usize;
+        fs::write(root.join("CLAUDE.md"), "r".repeat(limit + 1)).unwrap();
+        fs::write(cwd.join("CLAUDE.md"), "a".repeat(limit)).unwrap();
         fs::write(cwd.join("tests/CLAUDE.md"), "tests").unwrap();
         fs::write(
             cwd.join(".claude/rules/testing.md"),
@@ -1504,6 +1546,10 @@ mod tests {
         let mut audit = Audit::resolve(ContextRuntime::Claude, &cwd, &paths(temp.path()), None);
         assert!(audit.sources.iter().any(|source| {
             source.path == cwd.join("CLAUDE.md") && matches!(source.state, SourceState::Startup)
+        }));
+        assert!(audit.sources.iter().any(|source| {
+            source.path == root.join("CLAUDE.md")
+                && matches!(source.state, SourceState::Excluded(_))
         }));
         assert!(
             audit
@@ -1536,8 +1582,11 @@ mod tests {
         let cwd = root.join("app");
         fs::create_dir_all(cwd.join("lib")).unwrap();
         fs::create_dir_all(cwd.join("docs")).unwrap();
+        fs::create_dir_all(cwd.join("sub")).unwrap();
         fs::create_dir_all(temp.path().join(".claude")).unwrap();
         fs::write(temp.path().join(".claude/CLAUDE.md"), "user").unwrap();
+        // A subfolder CLAUDE.md loads on demand, so its import cannot hide a startup AGENTS.md.
+        fs::write(cwd.join("sub/CLAUDE.md"), "@../AGENTS.md").unwrap();
         fs::write(root.join("AGENTS.md"), "root agents").unwrap();
         fs::write(cwd.join("AGENTS.md"), "app agents").unwrap();
         fs::write(cwd.join("lib/AGENTS.md"), "lib agents").unwrap();
@@ -1744,20 +1793,32 @@ mod tests {
             cwd.join(".claude/rules/file.md"),
         )
         .unwrap();
+        // An exclusion glob can name a linked rule by its resolved target.
+        fs::write(
+            cwd.join(".claude/settings.json"),
+            format!(
+                "{{\"claudeMdExcludes\":[{}]}}",
+                serde_json::to_string(&fs::canonicalize(&shared).unwrap().join("*.md")).unwrap()
+            ),
+        )
+        .unwrap();
 
         let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &paths(temp.path()), None);
-        assert!(
+        let state = |path: &Path| {
             audit
                 .sources
                 .iter()
-                .any(|source| source.path == cwd.join(".claude/rules/file.md"))
+                .find(|source| source.path == path)
+                .map(|source| source.state.clone())
+        };
+        assert_eq!(
+            state(&cwd.join(".claude/rules/file.md")),
+            Some(SourceState::Startup)
         );
-        assert!(
-            audit
-                .sources
-                .iter()
-                .any(|source| source.path == cwd.join(".claude/rules/shared/directory.md"))
-        );
+        assert!(matches!(
+            state(&cwd.join(".claude/rules/shared/directory.md")),
+            Some(SourceState::Excluded(_))
+        ));
     }
 
     #[test]
@@ -1784,20 +1845,40 @@ mod tests {
         )
         .unwrap();
 
-        let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &paths(temp.path()), None);
-        let source = audit
-            .sources
-            .iter()
-            .find(|source| source.path == instruction)
-            .unwrap();
-        assert!(matches!(source.state, SourceState::Excluded(_)));
-        assert!(
-            source
-                .state
-                .reason(&paths(temp.path()), &cwd)
-                .unwrap()
-                .contains(".claude/settings.local.json")
-        );
+        // Project settings apply only from the launch directory; local settings from the root.
+        let sub = cwd.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("CLAUDE.md"), "sub").unwrap();
+        fs::write(
+            cwd.join(".claude/settings.json"),
+            format!(
+                "{{\"claudeMdExcludes\":[{}]}}",
+                serde_json::to_string(&sub.join("CLAUDE.md")).unwrap()
+            ),
+        )
+        .unwrap();
+
+        for directory in [&cwd, &sub] {
+            let audit =
+                Audit::resolve(ContextRuntime::Claude, directory, &paths(temp.path()), None);
+            let source = audit
+                .sources
+                .iter()
+                .find(|source| source.path == instruction)
+                .unwrap();
+            assert!(matches!(source.state, SourceState::Excluded(_)));
+            assert!(
+                source
+                    .state
+                    .reason(&paths(temp.path()), directory)
+                    .unwrap()
+                    .contains(".claude/settings.local.json")
+            );
+        }
+        let audit = Audit::resolve(ContextRuntime::Claude, &sub, &paths(temp.path()), None);
+        assert!(audit.sources.iter().any(|source| {
+            source.path == sub.join("CLAUDE.md") && source.state == SourceState::Startup
+        }));
     }
 
     #[test]
@@ -1991,7 +2072,7 @@ mod tests {
         let parent = Path::new("/repo/docs");
         let home = Path::new("/home/test");
         let imports = claude_imports(
-            "@./local.md @../shared.md `@inline.md`\n```md\n@fenced.md\n```\n~~~\n@also-fenced.md\n~~~\n",
+            "@./local.md @../shared.md `@inline.md`\n```md\n@fenced.md\n```\n~~~\n@also-fenced.md\n~~~\n<!-- @hidden.md -->\n<!--\n@multiline-hidden.md\n-->\n",
             parent,
             home,
         );

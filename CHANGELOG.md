@@ -11,6 +11,14 @@
   new `CLAUDE.local.md` would stop Claude reading the repository's `AGENTS.md`.
 - **Disable AGENTS.md for Claude** — `mdmanager local disable claude AGENTS.md` adds the file to
   `claudeMdExcludes` instead of rejecting it.
+- **Claude settings scope** — Claude Context reads project `.claude/settings.json` only from the
+  launch directory and `.claude/settings.local.json` from the repository (main checkout) root and
+  then the launch directory, as Claude does, instead of from every ancestor. `claudeMdExcludes`
+  patterns now also come from managed settings and match a symlinked file's resolved target.
+- **Oversized Claude instructions** — instruction files over 4 MiB show as `excluded`, with their
+  size, because Claude skips them.
+- **HTML comments in Claude imports** — `@path` text inside block-level HTML comments is no longer
+  listed as an import, matching Claude, which strips those comments.
 
 ## mdmanager 0.1.0 — Sep 6, 2026
 
