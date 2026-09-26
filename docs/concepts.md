@@ -4,7 +4,7 @@ mdmanager's awareness is broader than its ownership.
 
 The coding agent and CLI own instruction and deployment changes. The TUI browses Context, Markdown,
 composition status, and differences; it automatically reloads after disk changes and writes only its
-theme preference.
+theme and Markdown rendering preferences.
 
 ## Context
 

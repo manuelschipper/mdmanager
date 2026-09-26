@@ -14,6 +14,9 @@ mdmanager init claude codex
 ```
 
 Bare `mdmanager init` creates the Personal Section library without Global targets or Profiles.
+Global targets use the directories Context inspects, so `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
+`PI_CODING_AGENT_DIR` apply. `init` stops when one of them is outside home; move it beneath home or
+unset it.
 
 ```text
 ~/.mdmanager/
@@ -165,9 +168,11 @@ sections = ["common"]
 sections = ["common", "claude"]
 ```
 
-Project Section paths are relative to `.mdmanager/`. The `agents` and `claude` targets map to root
-`AGENTS.md` and `CLAUDE.md`. Lists are non-empty and duplicate-free. One Section is preserved
-byte-for-byte; multiple Sections are joined with one blank line. Symlinked targets are rejected.
+Project Section paths are relative to `.mdmanager/` and must resolve inside it, so a clone renders
+the same bytes; symlinks leading outside, including a symlinked `sections/` directory, are
+rejected. The `agents` and `claude` targets map to root `AGENTS.md` and `CLAUDE.md`. Lists are
+non-empty and duplicate-free. One Section is preserved byte-for-byte; multiple Sections are joined
+with one blank line. Symlinked targets are rejected.
 
 ## Local Instructions
 
@@ -196,6 +201,9 @@ edit each ordered list to add Sections. Missing referenced Sections make the com
 
 Do not hand-edit `~/.mdmanager/state/`. Global backups are in `~/.mdmanager/backups/`.
 Invalid `overlays.toml` blocks writes; use your valid copy or recover manually.
+Global writers (`apply` and `doctor` repairs) serialize through `state.lock` in
+`~/.mdmanager/state/`; a reviewed plan is checked again under the lock and refused if another
+apply changed it first.
 Local has no backup or repair; `doctor` repairs Global only. Local writers in the same
 repository (including linked worktrees) serialize through `overlays.lock` beside
 `overlays.toml`. Waiting begins after review; the plan is checked again under the lock.

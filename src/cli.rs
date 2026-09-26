@@ -5,13 +5,13 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use crate::config::{GlobalConfig, Paths, target_display_name};
-use crate::context::{Audit, ContextRuntime, SourceGroup};
+use crate::context::{Audit, ContextRuntime, SourceGroup, SourceState};
 use crate::deploy::{self, GlobalTargetStatus};
 use crate::local;
 use crate::project;
 use crate::scaffold;
 
-const TUI_HELP: &str = "Documentation:\n  Run `mdmanager docs` to list the bundled guides.\n  Run `mdmanager docs start` for the agent-driven workflow or `mdmanager docs migrate` for migration.\n\nTUI:\n  Run `mdmanager` or `mdmanager tui` to browse files, Context, status, and differences.\n  Up/Down           select or scroll one line\n  Shift+Up/Down     scroll the visible document by a page\n  Enter             inspect the selection\n  r                 search and choose a Context runtime\n  t                 search, preview, and save the UI theme\n  Left/Right        choose the previous/next Context runtime\n  /                 search an open document\n  g                 go to a source line\n  d                 toggle a meaningful managed-target difference\n  Esc               go back; from the overview, quit\n  ?                 contextual help\n  q or Ctrl+C       quit\n\nCoding agents edit instruction sources and manifests. The TUI only writes its theme preference; management and deployment operations use the CLI while it auto-reloads.";
+const TUI_HELP: &str = "Documentation:\n  Run `mdmanager docs` to list the bundled guides.\n  Run `mdmanager docs start` for the agent-driven workflow or `mdmanager docs migrate` for migration.\n\nTUI:\n  Run `mdmanager` or `mdmanager tui` to browse files, Context, status, and differences.\n  Up/Down           select or scroll one line\n  Shift+Up/Down     scroll the visible document by a page\n  Enter             inspect the selection\n  r                 search and choose a Context runtime\n  t                 search, preview, and save the UI theme\n  Left/Right        choose the previous/next Context runtime\n  /                 search an open document\n  g                 go to a source line\n  d                 toggle a meaningful managed-target difference\n  m                 switch a document between rendered and raw Markdown\n  Esc               go back; from the overview, quit\n  ?                 contextual help\n  q or Ctrl+C       quit\n\nCoding agents edit instruction sources and manifests. The TUI only writes its theme and Markdown rendering preferences; management and deployment operations use the CLI while it auto-reloads.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -286,6 +286,12 @@ fn context_command(paths: &Paths, runtime: &str, json: bool) -> Result<ExitCode,
             .map(|source| source.path.clone())
             .collect();
         let scan = crate::context::scan_claude_descendants(&directory, paths, seen);
+        // Unreadable descendants make subfolder discovery incomplete.
+        audit.warnings.extend(
+            scan.unreadable
+                .iter()
+                .map(|path| format!("cannot read {}", path.display())),
+        );
         audit.add_claude_scan(scan, paths, global.as_ref());
     }
     if json {
@@ -304,6 +310,9 @@ fn print_context(audit: &Audit, paths: &Paths) {
             matches!(
                 source.group,
                 SourceGroup::PathFiltered | SourceGroup::Nested
+            ) && matches!(
+                source.state,
+                SourceState::Conditional(_) | SourceState::Relevant(_) | SourceState::Nested(_)
             )
         })
         .count();

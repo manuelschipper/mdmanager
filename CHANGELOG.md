@@ -47,6 +47,16 @@
   apply changed the targets first.
 - **TUI watches every Global target** — automatic reload now watches each configured Global target
   path, including custom locations, and Claude's managed-policy `CLAUDE.md`.
+- **Project Sections stay inside `.mdmanager/`** — Project loading resolves Section paths through
+  symlinks and rejects any Section, including one under a symlinked `sections/` directory, that
+  resolves outside the repository's `.mdmanager/`, so committed compositions render the same bytes
+  in every clone.
+- **`init` follows runtime directory overrides** — `mdmanager init` writes Global targets under
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `PI_CODING_AGENT_DIR` when set, matching what Context
+  inspects, and stops without writing when an override is outside HOME.
+- **Context reports incomplete scans** — unreadable subfolder Claude instruction files appear as
+  warnings in `mdmanager context` text and JSON, and the "load when relevant" count excludes files
+  that won't load.
 
 ## mdmanager 0.1.0 — Sep 6, 2026
 
