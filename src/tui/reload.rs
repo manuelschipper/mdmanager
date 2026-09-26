@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use walkdir::{DirEntry, WalkDir};
 
-use crate::config::Paths;
+use crate::config::{GlobalConfig, Paths};
 use crate::context::{Audit, claude_config_dir, claude_managed_dir, pi_agent_dir};
 
 const AUTO_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
@@ -16,6 +16,7 @@ const AUTO_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) struct ReloadInput<'a> {
     pub(super) audit: &'a Audit,
     pub(super) paths: &'a Paths,
+    pub(super) global: Option<&'a GlobalConfig>,
     pub(super) watch_root: &'a Option<PathBuf>,
 }
 
@@ -157,6 +158,14 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
     ] {
         hash_tree(&path, &mut hasher, false);
     }
+    // Global targets can live anywhere; `mdmanager status` compares each configured path.
+    if let Some(global) = input.global {
+        for target in global.target_names() {
+            if let Ok(path) = global.target_path(target) {
+                hash_tree(&path, &mut hasher, false);
+            }
+        }
+    }
     let codex_home = if env::var_os("HOME").as_deref() == Some(input.paths.home.as_os_str()) {
         env::var_os("CODEX_HOME")
             .map(PathBuf::from)
@@ -170,6 +179,7 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
         claude_config.join("CLAUDE.md"),
         claude_config.join("settings.json"),
         claude_config.join("settings.local.json"),
+        claude_managed_dir().join("CLAUDE.md"),
         claude_managed_dir().join("managed-settings.json"),
         claude_managed_dir().join("managed-settings.d"),
         codex_home.join("AGENTS.override.md"),
@@ -250,6 +260,7 @@ mod tests {
         let initial = current_watch_signature(&ReloadInput {
             audit: &app.inspection.context,
             paths: &app.paths,
+            global: app.global.as_ref(),
             watch_root: &app.watch_root,
         });
         let transcript = home
@@ -261,6 +272,7 @@ mod tests {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
+                global: app.global.as_ref(),
                 watch_root: &app.watch_root
             }),
             initial
@@ -272,6 +284,7 @@ mod tests {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
+                global: app.global.as_ref(),
                 watch_root: &app.watch_root
             }),
             initial
@@ -295,21 +308,50 @@ mod tests {
         );
         let ancestor = workspace.path().join("CLAUDE.md");
         fs::write(&ancestor, "# Before\n").unwrap();
-        let app = App::new_at(Paths::for_home(home.path()), None, directory).unwrap();
-        let initial = current_watch_signature(&ReloadInput {
-            audit: &app.inspection.context,
-            paths: &app.paths,
-            watch_root: &app.watch_root,
-        });
-        fs::write(ancestor, "# After\n").unwrap();
-        assert_ne!(
+        let paths = Paths::for_home(home.path());
+        fs::create_dir_all(paths.config.parent().unwrap().join("sections")).unwrap();
+        fs::write(
+            paths.config.parent().unwrap().join("sections/common.md"),
+            "# Common\n",
+        )
+        .unwrap();
+        fs::write(
+            &paths.config,
+            r#"
+[[sections]]
+id = "common"
+name = "Common"
+path = "sections/common.md"
+
+[targets.custom]
+path = "~/custom/AGENTS.md"
+title = "Custom"
+
+[profiles.default]
+custom = ["common"]
+"#,
+        )
+        .unwrap();
+        let global = GlobalConfig::load(&paths).unwrap();
+        let app = App::new_at(paths, Some(global), directory).unwrap();
+        let signature = |app: &App| {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
+                global: app.global.as_ref(),
+                watch_root: &app.watch_root,
+            })
+        };
+        let initial = signature(&app);
+        fs::write(ancestor, "# After\n").unwrap();
+        assert_ne!(signature(&app), initial);
+
+        // A Global target outside every runtime's default location still refreshes Home.
+        let before = signature(&app);
+        let custom = home.path().join("custom/AGENTS.md");
+        fs::create_dir_all(custom.parent().unwrap()).unwrap();
+        fs::write(custom, "# Edited\n").unwrap();
+        assert_ne!(signature(&app), before);
     }
 
     #[test]
@@ -361,6 +403,7 @@ mod tests {
                 current_watch_signature(&ReloadInput {
                     audit: &app.inspection.context,
                     paths: &app.paths,
+                    global: app.global.as_ref(),
                     watch_root: &app.watch_root,
                 })
             };
@@ -459,6 +502,7 @@ mod tests {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
+                global: app.global.as_ref(),
                 watch_root: &app.watch_root,
             })
         };
@@ -542,6 +586,7 @@ mod tests {
         let initial = current_watch_signature(&ReloadInput {
             audit: &app.inspection.context,
             paths: &app.paths,
+            global: app.global.as_ref(),
             watch_root: &app.watch_root,
         });
 
@@ -550,6 +595,7 @@ mod tests {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
+                global: app.global.as_ref(),
                 watch_root: &app.watch_root
             }),
             initial
@@ -560,6 +606,7 @@ mod tests {
             current_watch_signature(&ReloadInput {
                 audit: &app.inspection.context,
                 paths: &app.paths,
+                global: app.global.as_ref(),
                 watch_root: &app.watch_root
             }),
             initial
