@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## mdmanager 0.2.0 — Sep 25, 2026
 
 - **Claude reads AGENTS.md** — `mdmanager context --runtime claude` reports `AGENTS.md` and
   `.claude/AGENTS.md` the way Claude Code 2.1.277+ loads them: only when no `CLAUDE.md` or
