@@ -12,8 +12,9 @@ reads them only when no `CLAUDE.md`, `.claude/CLAUDE.md`, or `CLAUDE.local.md` e
 directory or above it; the user and managed `CLAUDE.md` and `.claude/rules/` do not count. Any one of
 those files turns off every `AGENTS.md`: `mdmanager context` shows the launch-path files as
 `not selected` and omits subfolder files. Otherwise a subfolder `AGENTS.md` loads on demand unless
-that subfolder has its own `CLAUDE` file. An `AGENTS.md` that a loading `CLAUDE.md` imports or
-symlinks to loads once, through that file. Claude never reads `AGENTS.override.md`,
+that subfolder has its own `CLAUDE` file. An `AGENTS.md` that a startup `CLAUDE.md` imports or
+symlinks to loads once, through that file; a subfolder `CLAUDE.md` that imports it does not stop it
+loading at startup. Claude never reads `AGENTS.override.md`,
 `AGENTS.local.md`, or anything under `.agents/`.
 
 The **Project instructions** setting changes this: `claude-md-and-agents-md` loads both,
@@ -41,8 +42,8 @@ before relying on the reported loading behavior.
 
 To disable a shared Claude rule only on this machine, the user's coding agent should:
 
-1. Add the rule's exact absolute path to `claudeMdExcludes` in
-   `.claude/settings.local.json`.
+1. Add the rule's exact absolute path to `claudeMdExcludes` in `.claude/settings.local.json` at
+   the repository root; in a linked worktree, use the main checkout's root.
 2. Preserve every existing setting and exclusion.
 3. Do not rename, blank, or edit the shared rule file.
 4. Run `mdmanager context --runtime claude` and verify that the rule is `excluded` and the reason
@@ -50,10 +51,14 @@ To disable a shared Claude rule only on this machine, the user's coding agent sh
 
 The same steps disable a shared `AGENTS.md` that Claude reads directly. Claude matches
 `claudeMdExcludes` patterns against absolute file paths. A bare relative name such
-as `CLAUDE.md` does not match a project file.
+as `CLAUDE.md` does not match a project file. For a symlinked file, a pattern can name either the
+link path or its resolved target.
 
 The same setting can exclude an inherited `CLAUDE.md`. Remove only an exclusion the user asked the
-agent to remove; broader globs may come from another settings layer.
+agent to remove; broader globs may come from another settings layer. mdmanager merges exclusions
+from user settings, the managed settings file and drop-ins, the local settings file, and the
+`.claude/settings.json` in the launch directory. A `.claude/settings.json` in a parent directory
+does not apply, so start in the directory that holds it.
 
 ## Local Instructions
 
