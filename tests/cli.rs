@@ -1416,64 +1416,6 @@ fn managed_local_apply_preserves_a_preexisting_ignore_rule() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn pi_disable_classifies_child_codex_version_probes() {
-    use std::os::unix::fs::PermissionsExt;
-    for (probe, verified) in [
-        (Some("printf 'codex-cli 0.147.0\\n'"), true),
-        (Some("printf 'codex-cli 9.99.0\\n'"), false),
-        (None, false),
-        (Some("exit 1"), false),
-        (Some("printf 'malformed\\n'"), false),
-    ] {
-        let home = TempDir::new().unwrap();
-        let repository = TempDir::new().unwrap();
-        let bin = runtime_path();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(repository.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::write(repository.path().join("AGENTS.md"), "shared").unwrap();
-        if let Some(probe) = probe {
-            let executable = bin.path().join("codex");
-            fs::write(
-                &executable,
-                format!("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n{probe}\n"),
-            )
-            .unwrap();
-            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
-            .args(["local", "disable", "pi", "--yes"])
-            .env("HOME", home.path())
-            .env("CODEX_HOME", home.path().join("codex"))
-            .env("PATH", bin.path())
-            .current_dir(repository.path())
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        let plan = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(
-            plan.lines().any(|line| line == "Codex compatibility"),
-            verified
-        );
-        assert_eq!(
-            plan.lines()
-                .any(|line| line == "Codex compatibility warning"),
-            !verified
-        );
-        assert_eq!(
-            fs::read(repository.path().join("AGENTS.override.md")).unwrap(),
-            b""
-        );
-    }
-}
-
 #[test]
 fn pi_disable_adds_and_restores_its_exclusion() {
     let home = TempDir::new().unwrap();

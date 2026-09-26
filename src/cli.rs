@@ -418,6 +418,13 @@ fn local_command(paths: &Paths, command: LocalCommand) -> Result<ExitCode, Strin
                     println!("{:<18} none", target.filename());
                 }
             }
+            for (path, pattern) in repository.unignored_outputs()? {
+                println!(
+                    "Warning: {} is not ignored by Git; add {pattern} to {}",
+                    path.display(),
+                    repository.common_git_dir.join("info/exclude").display()
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         LocalCommand::Disable {

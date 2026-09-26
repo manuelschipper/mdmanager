@@ -151,7 +151,9 @@ mdmanager local status
 Local disable for Claude updates `.claude/settings.local.json`'s `claudeMdExcludes` list. Local
 disable for Pi writes `AGENTS.override.md`. Both plans show a missing common `.git/info/exclude`
 rule before confirmation and add only that rule; `--yes` still prints the plan. Restore removes the
-Git rule only when mdmanager added it, so pre-existing ignore rules remain. Here, disable accepts
+Git rule only when mdmanager added it, so pre-existing ignore rules remain. Because linked worktrees
+share that file, a rule another worktree's mdmanager-owned output still relies on stays, and that
+output takes ownership of it. Here, disable accepts
 `claude` or `pi`; Codex has no verified local-disable mechanism.
 
 To reuse a Personal Section in committed Project Instructions, copy it into

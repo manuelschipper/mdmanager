@@ -19,6 +19,15 @@
   size, because Claude skips them.
 - **HTML comments in Claude imports** — `@path` text inside block-level HTML comments is no longer
   listed as an import, matching Claude, which strips those comments.
+- **Shared Local exclusions survive restores** — `mdmanager local restore` no longer removes a
+  common `.git/info/exclude` rule that another linked worktree's mdmanager-owned output still
+  relies on; ownership moves to that output. Previously a restore in one worktree could leave
+  another worktree's private `AGENTS.override.md` unignored, so `git add .` could commit it.
+- **Local status flags unignored outputs** — `mdmanager local status` warns, with the exact rule to
+  add, when an owned Local output or disable exists but Git no longer ignores it.
+- **Pi disable states its Codex effect** — the `local disable pi` plan says that the empty
+  `AGENTS.override.md` also hides that directory's `AGENTS.md` from Codex, which selects the first
+  existing file and then drops it when empty. mdmanager no longer probes `codex --version`.
 
 ## mdmanager 0.1.0 — Sep 6, 2026
 
