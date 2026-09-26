@@ -14,8 +14,6 @@ use crate::context::PI_INSTRUCTION_CANDIDATES;
 use crate::deploy::unified_diff;
 use crate::git_worktree::git;
 
-const VERIFIED_CODEX_EMPTY_OVERRIDE_VERSIONS: [&str; 1] = ["0.147.0"];
-
 /// Local-disable runtime: a runtime with a verified local disable mechanism.
 /// Unsupported: Codex local disable; `parse()` rejects `codex` with the reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,6 +266,12 @@ enum DisableOwned {
 
 impl DisableOwned {
     fn owned(&self) -> &Owned {
+        match self {
+            Self::Pi { owned, .. } | Self::Claude { owned, .. } => owned,
+        }
+    }
+
+    fn owned_mut(&mut self) -> &mut Owned {
         match self {
             Self::Pi { owned, .. } | Self::Claude { owned, .. } => owned,
         }
@@ -841,7 +845,7 @@ impl LocalRepository {
                 }
             }
         };
-        let exclusion_edit = owned_exclusion_removal(owned)?;
+        let exclusion_edit = release_exclusion(&mut state, &state_key)?;
         if let Some(replacement) = replacement {
             atomic_write(&path, replacement.as_bytes())?;
         } else {
@@ -889,6 +893,43 @@ impl LocalRepository {
             }
             Err(error) => Err(format!("cannot read owned overlay {}: {error}", owned.path)),
         }
+    }
+
+    /// Owned outputs this worktree relies on that exist but Git no longer ignores, each with the
+    /// info/exclude pattern that would ignore it again. Includes the shared Claude settings.
+    pub(crate) fn unignored_outputs(&self) -> Result<Vec<(PathBuf, String)>, String> {
+        let state = self.load_state()?;
+        let mut owned = [ManagedTarget::Agents, ManagedTarget::Claude]
+            .into_iter()
+            .filter_map(|target| state.managed.get(&self.managed_state_key(target)))
+            .chain(
+                state
+                    .disables
+                    .get(&self.disable_state_key(DisableRuntime::Pi))
+                    .map(DisableOwned::owned),
+            )
+            .map(|owned| (self.root.clone(), owned))
+            .collect::<Vec<_>>();
+        if let Some(disable) = state
+            .disables
+            .get(&self.disable_state_key(DisableRuntime::Claude))
+        {
+            owned.push((
+                crate::git_worktree::main_worktree(&self.root)?,
+                disable.owned(),
+            ));
+        }
+        let mut unignored = Vec::new();
+        for (worktree, owned) in owned {
+            let path = PathBuf::from(&owned.path);
+            if path.is_file() {
+                let exclusion = self.exclusion_for(&worktree, &path)?;
+                if exclusion.needs_write {
+                    unignored.push((path, exclusion.pattern));
+                }
+            }
+        }
+        Ok(unignored)
     }
 
     pub(crate) fn create_managed(
@@ -1140,22 +1181,6 @@ impl LocalRepository {
     }
 
     fn pi_disable_plan(&self, source: PathBuf) -> Result<DisablePlan, String> {
-        let codex = match codex_version() {
-            Ok(version) if VERIFIED_CODEX_EMPTY_OVERRIDE_VERSIONS.contains(&version.as_str()) => {
-                format!(
-                    "Codex compatibility\n  The installed Codex skips the empty override, so {} still loads for Codex.",
-                    source.display()
-                )
-            }
-            Ok(_) => format!(
-                "Codex compatibility warning\n  The installed Codex version has not been verified to skip empty overrides. This override may also suppress {} for Codex in this directory.",
-                source.display()
-            ),
-            Err(_) => format!(
-                "Codex compatibility warning\n  Codex was not detected. If Codex is used later or elsewhere, this override may also suppress {} for Codex in this directory.",
-                source.display()
-            ),
-        };
         let directory = source
             .parent()
             .ok_or_else(|| "source has no parent directory".to_owned())?;
@@ -1181,7 +1206,7 @@ impl LocalRepository {
             source: source.clone(),
             output: output.clone(),
             text: format!(
-                "Shared file\n  {} will not be modified.\n\nCreate\n  {}\n  zero bytes{}\n\nPi\n  The override shadows this directory's regular candidate.\n\n{codex}\n\nA new Pi session is required.",
+                "Shared file\n  {} will not be modified.\n\nCreate\n  {}\n  zero bytes{}\n\nPi\n  The override shadows this directory's regular candidate.\n\nCodex\n  Codex also selects the empty override, so it hides this directory's AGENTS.md from Codex.\n\nA new Pi session is required.",
                 source.display(),
                 output.display(),
                 exclusion_text.as_deref().unwrap_or_default(),
@@ -1396,27 +1421,6 @@ fn local_commit_boundary(stage: &str) -> Result<(), String> {
     })
 }
 
-fn codex_version() -> Result<String, String> {
-    let output = Command::new("codex")
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("cannot detect Codex version: {error}"))?;
-    if !output.status.success() {
-        return Err("cannot detect Codex version".into());
-    }
-    let source = String::from_utf8(output.stdout)
-        .map_err(|_| "Codex version output is not UTF-8".to_owned())?;
-    source
-        .split_whitespace()
-        .find(|part| {
-            part.chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_digit())
-        })
-        .map(str::to_owned)
-        .ok_or_else(|| "cannot parse Codex version".to_owned())
-}
-
 fn logical_launch_path(path: &Path) -> PathBuf {
     let Ok(current) = std::env::current_dir() else {
         return path.to_owned();
@@ -1489,10 +1493,35 @@ fn apply_exclusion(exclusion: &Exclusion, worktree: &Path, output: &Path) -> Res
     Ok(())
 }
 
-fn owned_exclusion_removal(owned: &Owned) -> Result<Option<(PathBuf, String)>, String> {
-    let Some(OwnedExclusion { path, pattern }) = &owned.exclusion else {
+// info/exclude is shared by every linked worktree, so a rule the restored disable added may
+// also be what ignores another worktree's owned output. While any such output remains, the rule
+// stays and its ownership moves there, so the last dependent output removes it.
+fn release_exclusion(
+    state: &mut State,
+    restored: &str,
+) -> Result<Option<(PathBuf, String)>, String> {
+    let Some(OwnedExclusion { path, pattern }) = state.disables[restored].owned().exclusion.clone()
+    else {
         return Ok(None);
     };
+    let mut dependents = Vec::new();
+    for (key, owned) in state.managed.iter_mut().chain(
+        state
+            .disables
+            .iter_mut()
+            .filter(|(key, _)| *key != restored)
+            .map(|(key, disable)| (key, disable.owned_mut())),
+    ) {
+        if owned_pattern(key, &owned.path)? == pattern {
+            dependents.push(owned);
+        }
+    }
+    if !dependents.is_empty() {
+        if dependents.iter().all(|owned| owned.exclusion.is_none()) {
+            dependents[0].exclusion = Some(OwnedExclusion { path, pattern });
+        }
+        return Ok(None);
+    }
     let path = PathBuf::from(path);
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -1509,6 +1538,23 @@ fn owned_exclusion_removal(owned: &Owned) -> Result<Option<(PathBuf, String)>, S
         })
         .collect::<String>();
     Ok(Some((path, output)))
+}
+
+/// The info/exclude pattern an owned output needs, relative to its own worktree. Worktree-scoped
+/// keys end in the SHA-256 of that worktree's root; Claude's settings live in the main worktree.
+fn owned_pattern(key: &str, path: &str) -> Result<String, String> {
+    let path = Path::new(path);
+    let worktree = match key.split_once(':') {
+        Some((_, worktree_key)) => path
+            .ancestors()
+            .find(|ancestor| sha256_hex(ancestor.to_string_lossy().as_bytes()) == worktree_key),
+        None => path.parent().and_then(Path::parent),
+    }
+    .ok_or("invalid Local ownership destination; inspect overlays.toml and recover manually")?;
+    Ok(format!(
+        "/{}",
+        path.strip_prefix(worktree).unwrap().to_string_lossy()
+    ))
 }
 
 fn git_status(directory: &Path, arguments: &[&str]) -> Result<bool, String> {
@@ -3050,5 +3096,90 @@ mod tests {
                 exclusion
             );
         }
+    }
+
+    #[test]
+    fn restore_keeps_a_shared_exclusion_until_the_last_worktree_output_is_gone() {
+        let home = TempDir::new().unwrap();
+        let main = TempDir::new().unwrap();
+        let linked_parent = TempDir::new().unwrap();
+        let linked = linked_parent.path().join("linked");
+        git(main.path(), &["init", "-q"]).unwrap();
+        fs::write(main.path().join("AGENTS.md"), "shared\n").unwrap();
+        git(main.path(), &["add", "AGENTS.md"]).unwrap();
+        git(
+            main.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        git(
+            main.path(),
+            &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+        )
+        .unwrap();
+        let paths = Paths::for_home(home.path());
+        personal_section(&paths, "private\n");
+        let main_repo = LocalRepository::discover(main.path(), &paths).unwrap();
+        let linked_repo = LocalRepository::discover(&linked, &paths).unwrap();
+        let exclude = main_repo.common_git_dir.join("info/exclude");
+        let original = fs::read_to_string(&exclude).unwrap();
+        let ignored = |repo: &LocalRepository| {
+            git_status(&repo.root, &["check-ignore", "-q", "AGENTS.override.md"]).unwrap()
+        };
+
+        // Main adds and owns the rule; the linked disable relies on it without owning it.
+        for repo in [&main_repo, &linked_repo] {
+            let plan = repo
+                .disable_plan(DisableRuntime::Pi, &repo.root.join("AGENTS.md"))
+                .unwrap();
+            repo.apply_disable(&plan).unwrap();
+        }
+        main_repo.restore_disable(DisableRuntime::Pi).unwrap();
+        assert!(ignored(&linked_repo));
+        assert!(linked_repo.unignored_outputs().unwrap().is_empty());
+        linked_repo.restore_disable(DisableRuntime::Pi).unwrap();
+        assert_eq!(fs::read_to_string(&exclude).unwrap(), original);
+
+        // The same hand-off keeps a linked managed output private.
+        main_repo
+            .apply_disable(
+                &main_repo
+                    .disable_plan(DisableRuntime::Pi, &main.path().join("AGENTS.md"))
+                    .unwrap(),
+            )
+            .unwrap();
+        linked_repo
+            .create_managed(ManagedTarget::Agents, "local")
+            .unwrap();
+        let plan = linked_repo.managed_plan(ManagedTarget::Agents).unwrap();
+        assert!(plan.exclusion_write().is_none());
+        linked_repo.apply_managed(&plan).unwrap();
+        main_repo.restore_disable(DisableRuntime::Pi).unwrap();
+        assert!(ignored(&linked_repo));
+        assert!(
+            main_repo.load_state().unwrap().managed
+                [&linked_repo.managed_state_key(ManagedTarget::Agents)]
+                .exclusion
+                .is_some()
+        );
+
+        // Status reports an owned output whose rule was removed outside mdmanager.
+        fs::write(&exclude, &original).unwrap();
+        assert_eq!(
+            linked_repo.unignored_outputs().unwrap(),
+            [(
+                linked_repo.root.join("AGENTS.override.md"),
+                "/AGENTS.override.md".to_owned()
+            )]
+        );
+        assert!(main_repo.unignored_outputs().unwrap().is_empty());
     }
 }
