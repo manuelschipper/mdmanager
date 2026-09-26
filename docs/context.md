@@ -14,7 +14,7 @@ mdmanager context --runtime claude --json
 It reports files that load at startup, sources that load when relevant, candidates skipped because
 another filename won, empty or truncated sources, and Claude exclusions. It honors `CODEX_HOME`,
 `CLAUDE_CONFIG_DIR`, and `PI_CODING_AGENT_DIR`. Claude subfolder scanning finds `CLAUDE.md`,
-`CLAUDE.local.md`, and `.claude/rules/**/*.md` files without a fixed entry limit. It skips `.git` and
+`CLAUDE.local.md`, `AGENTS.md`, and `.claude/rules/**/*.md` files without a fixed entry limit. It skips `.git` and
 non-rule symlinked directories; Claude rule symlinks are followed.
 
 ## Managed versus observed

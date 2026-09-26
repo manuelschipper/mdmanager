@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Claude reads AGENTS.md** — `mdmanager context --runtime claude` reports `AGENTS.md` and
+  `.claude/AGENTS.md` the way Claude Code 2.1.277+ loads them: only when no `CLAUDE.md` or
+  `CLAUDE.local.md` is on the launch path, or as `not selected` when one is. It follows the
+  **Project instructions** setting and a disabled `agents-md` plugin, lists subfolder `AGENTS.md`
+  files, and does not repeat an `AGENTS.md` that a `CLAUDE.md` imports.
+- **Local Claude instructions warn about AGENTS.md** — `mdmanager local apply claude` warns when the
+  new `CLAUDE.local.md` would stop Claude reading the repository's `AGENTS.md`.
+- **Disable AGENTS.md for Claude** — `mdmanager local disable claude AGENTS.md` adds the file to
+  `claudeMdExcludes` instead of rejecting it.
+
 ## mdmanager 0.1.0 — Sep 6, 2026
 
 - **Binary installation** — Install verified Linux and macOS binaries for x86_64 and

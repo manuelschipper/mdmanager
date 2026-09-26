@@ -131,7 +131,7 @@ impl ContextUi {
             Ok(scan) => {
                 let unreadable = scan.unreadable.clone();
                 let selected = self.selected().map(|source| source.path.clone());
-                self.audit.add_claude_scan(scan, global);
+                self.audit.add_claude_scan(scan, &self.paths, global);
                 if let Some(index) = selected.and_then(|path| {
                     self.audit
                         .sources

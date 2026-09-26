@@ -539,7 +539,7 @@ impl LocalRepository {
                 (self.root.clone(), parent.join("AGENTS.override.md"))
             }
             DisableOwned::Claude { recovery, .. } => {
-                if !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md")
+                if !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md")
                     || source
                         .ancestors()
                         .any(|ancestor| ancestor.ends_with(".claude/rules"))
@@ -672,7 +672,7 @@ impl LocalRepository {
                 let is_rule = source
                     .ancestors()
                     .any(|ancestor| ancestor.ends_with(".claude/rules"));
-                if is_rule || !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md") {
+                if is_rule || !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md") {
                     return Err(format!(
                         "{} is not a Claude instruction file mdmanager.ai can disable",
                         source.display()
@@ -1567,8 +1567,17 @@ mod tests {
         fs::create_dir(repository.path().join(".pi")).unwrap();
         fs::write(repository.path().join(".pi/SYSTEM.md"), "system\n").unwrap();
 
+        fs::create_dir(repository.path().join("nested")).unwrap();
+        fs::write(
+            repository.path().join("nested/AGENTS.override.md"),
+            "codex\n",
+        )
+        .unwrap();
         let wrong_claude = local_repository
-            .disable_plan(DisableRuntime::Claude, &repository.path().join("AGENTS.md"))
+            .disable_plan(
+                DisableRuntime::Claude,
+                &repository.path().join("nested/AGENTS.override.md"),
+            )
             .unwrap_err();
         assert!(wrong_claude.contains("not a Claude instruction file"));
 
