@@ -37,8 +37,9 @@ as `~/AGENTS.md` or `~/.cursor/rules/`, therefore apply to every project below t
 legacy `.cursorrules` file as an always-applied rule from the root Git reports, or from the launch
 directory outside a repository.
 
-- Markdown is decoded first: a UTF-8 byte-order mark is dropped, UTF-16 with a byte-order mark is
-  decoded, and CRLF line endings become LF. Files detected as binary are skipped and reported as
+- Markdown and rules are decoded first: a UTF-8 byte-order mark is dropped, UTF-16 with a
+  byte-order mark is decoded, and CRLF line endings become LF when at least 5% of line endings are
+  CRLF (for UTF-16, within its first 8 KiB). Files detected as binary are skipped and reported as
   excluded. Other encoding detection is not modeled.
 - Each decoded Markdown file is cut at 100 KiB; Context reports a longer file as partial.
 - A Markdown file whose file identity or loaded text matches one already kept from the same or a

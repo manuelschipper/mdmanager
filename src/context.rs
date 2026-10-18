@@ -984,7 +984,6 @@ fn resolve_cursor(directory: &Path, paths: &Paths) -> Audit {
             &mut sources,
             &mut seen,
             &ancestor.join(".cursor/rules"),
-            cursor_rule_state,
             paths,
             directory,
         );
@@ -1048,9 +1047,7 @@ fn resolve_cursor_agent(directory: &Path, paths: &Paths) -> Audit {
         .flat_map(|ancestor| CURSOR_AGENT_MARKDOWN.map(|name| ancestor.join(name)))
         .filter(|path| regular_file(path))
         .map(|path| {
-            let text = fs::read(&path)
-                .map_err(|error| SourceState::Unreadable(error.to_string()))
-                .and_then(|bytes| cursor_agent_text(&bytes));
+            let text = cursor_agent_read(&path);
             (path, text)
         })
         .collect::<Vec<_>>();
@@ -1059,17 +1056,15 @@ fn resolve_cursor_agent(directory: &Path, paths: &Paths) -> Audit {
     let mut sources = Vec::new();
     let rules = root.join(".cursorrules");
     if regular_file(&rules) {
-        let (state, content) = match fs::read(&rules)
-            .map_err(|error| SourceState::Unreadable(error.to_string()))
-            .and_then(|bytes| cursor_agent_text(&bytes))
-        {
+        let (state, content) = match cursor_agent_read(&rules) {
             Ok(text) => (SourceState::Startup, text),
             Err(state) => (state, String::new()),
         };
+        let scope = scope_for(&root, directory);
         push_cursor_agent_source(
             &mut sources,
             &rules,
-            &root,
+            scope,
             state,
             content,
             paths,
@@ -1078,23 +1073,23 @@ fn resolve_cursor_agent(directory: &Path, paths: &Paths) -> Audit {
     }
     // Cursor CLI collects from the launch directory upward: each directory's rules first, then
     // its Markdown in `CURSOR_AGENT_MARKDOWN` order.
-    let mut seen = HashSet::new();
     for ancestor in directory.ancestors() {
-        push_cursor_rules(
-            &mut sources,
-            &mut seen,
-            &ancestor.join(".cursor/rules"),
-            cursor_agent_rule_state,
-            paths,
-            directory,
-        );
+        for rule in cursor_rule_files(&ancestor.join(".cursor/rules")) {
+            let (state, content) = match cursor_agent_read(&rule) {
+                Ok(text) => (cursor_agent_rule_state(&text), text),
+                Err(state) => (state, String::new()),
+            };
+            let scope = "project rule".to_owned();
+            push_cursor_agent_source(&mut sources, &rule, scope, state, content, paths, directory);
+        }
         for ((path, text), state) in markdown.iter().zip(&states) {
             if path.parent() == Some(ancestor) {
                 let content = text.as_ref().cloned().unwrap_or_default();
+                let scope = scope_for(ancestor, directory);
                 push_cursor_agent_source(
                     &mut sources,
                     path,
-                    ancestor,
+                    scope,
                     state.clone(),
                     content,
                     paths,
@@ -1169,11 +1164,19 @@ fn cursor_agent_markdown_states(
     states.into_iter().flatten().collect()
 }
 
-/// Cursor CLI's text reader: it skips files it detects as binary, decodes UTF-16 with a
-/// byte-order mark, drops a UTF-8 byte-order mark, and converts CRLF to LF when at least 5% of
-/// line endings are CRLF. Its statistical detection of BOM-less UTF-16 and legacy encodings is not
-/// modeled; such files are read as lossy UTF-8.
+fn cursor_agent_read(path: &Path) -> Result<String, SourceState> {
+    fs::read(path)
+        .map_err(|error| SourceState::Unreadable(error.to_string()))
+        .and_then(|bytes| cursor_agent_text(&bytes))
+}
+
+/// Cursor CLI's text reader for instruction Markdown and rules: it skips files it detects as
+/// binary, decodes UTF-16 with a byte-order mark, drops a UTF-8 byte-order mark, and converts CRLF
+/// to LF when at least 5% of line endings are CRLF. UTF-8 counts line endings across the file;
+/// UTF-16 counts them in its first 8 KiB only. Its statistical detection of BOM-less UTF-16 and
+/// legacy encodings is not modeled; such files are read as lossy UTF-8.
 fn cursor_agent_text(bytes: &[u8]) -> Result<String, SourceState> {
+    const SAMPLE_BYTES: usize = 8192;
     let utf16 = |bytes: &[u8], decode: fn([u8; 2]) -> u16| {
         let units = bytes
             .chunks_exact(2)
@@ -1181,13 +1184,18 @@ fn cursor_agent_text(bytes: &[u8]) -> Result<String, SourceState> {
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&units)
     };
-    let text = match bytes {
-        [0xFF, 0xFE, third, fourth, ..] if *third != 0 || *fourth != 0 => {
-            utf16(&bytes[2..], u16::from_le_bytes)
-        }
-        [0xFE, 0xFF, _, _, ..] => utf16(&bytes[2..], u16::from_be_bytes),
-        _ => {
-            let sample = &bytes[..bytes.len().min(8192)];
+    let sample = &bytes[..bytes.len().min(SAMPLE_BYTES)];
+    let utf16_order: Option<fn([u8; 2]) -> u16> = match bytes {
+        [0xFF, 0xFE, third, fourth, ..] if *third != 0 || *fourth != 0 => Some(u16::from_le_bytes),
+        [0xFE, 0xFF, _, _, ..] => Some(u16::from_be_bytes),
+        _ => None,
+    };
+    let (text, crlf) = match utf16_order {
+        Some(order) => (
+            utf16(&bytes[2..], order),
+            mostly_crlf(&utf16(&sample[2..], order)),
+        ),
+        None => {
             let control = sample
                 .iter()
                 .filter(|byte| **byte < 32 && !matches!(byte, b'\t' | b'\n' | b'\r'))
@@ -1197,17 +1205,22 @@ fn cursor_agent_text(bytes: &[u8]) -> Result<String, SourceState> {
                     "Cursor CLI skips files it detects as binary".into(),
                 ));
             }
-            String::from_utf8_lossy(bytes).into_owned()
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            let crlf = mostly_crlf(&text);
+            (text, crlf)
         }
     };
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let newlines = text.matches('\n').count();
-    let crlf = text.matches("\r\n").count();
-    Ok(if newlines > 0 && crlf * 100 >= newlines * 5 {
+    Ok(if crlf {
         text.replace("\r\n", "\n")
     } else {
         text.to_owned()
     })
+}
+
+fn mostly_crlf(text: &str) -> bool {
+    let newlines = text.matches('\n').count();
+    newlines > 0 && text.matches("\r\n").count() * 100 >= newlines * 5
 }
 
 /// The body Cursor CLI loads for an instruction Markdown file, with its truncation notice.
@@ -1232,10 +1245,11 @@ fn cursor_agent_body(text: &str, name: &str) -> (String, SourceState) {
     )
 }
 
+/// Pushes a source with Cursor CLI's decoded text, which a strict UTF-8 reread would lose.
 fn push_cursor_agent_source(
     sources: &mut Vec<ContextSource>,
     path: &Path,
-    ancestor: &Path,
+    scope: String,
     state: SourceState,
     content: String,
     paths: &Paths,
@@ -1244,8 +1258,8 @@ fn push_cursor_agent_source(
     sources.push(ContextSource {
         path: path.to_owned(),
         display: display_path(path, paths, directory),
-        scope: scope_for(ancestor, directory),
-        group: SourceGroup::Startup,
+        scope,
+        group: source_group(&state),
         state,
         content,
         imports: Vec::new(),
@@ -1399,12 +1413,29 @@ fn push_cursor_rules(
     sources: &mut Vec<ContextSource>,
     seen: &mut HashSet<PathBuf>,
     root: &Path,
-    rule_state: fn(&str) -> SourceState,
     paths: &Paths,
     directory: &Path,
 ) {
+    for rule in cursor_rule_files(root) {
+        let state = fs::read_to_string(&rule).map_or_else(
+            |error| SourceState::Unreadable(error.to_string()),
+            |content| cursor_rule_state(&content),
+        );
+        push_with_state(
+            sources,
+            seen,
+            &rule,
+            "project rule",
+            state,
+            paths,
+            directory,
+        );
+    }
+}
+
+fn cursor_rule_files(root: &Path) -> Vec<PathBuf> {
     if !root.is_dir() {
-        return;
+        return Vec::new();
     }
     let mut rules = WalkDir::new(root)
         .follow_links(true)
@@ -1420,21 +1451,7 @@ fn push_cursor_rules(
         .map(DirEntry::into_path)
         .collect::<Vec<_>>();
     rules.sort();
-    for rule in rules {
-        let state = fs::read_to_string(&rule).map_or_else(
-            |error| SourceState::Unreadable(error.to_string()),
-            |content| rule_state(&content),
-        );
-        push_with_state(
-            sources,
-            seen,
-            &rule,
-            "project rule",
-            state,
-            paths,
-            directory,
-        );
-    }
+    rules
 }
 
 fn cursor_rule_state(content: &str) -> SourceState {
@@ -1986,13 +2003,17 @@ fn push_with_state(
     paths: &Paths,
     directory: &Path,
 ) {
-    let group = match state {
+    if seen.insert(path.to_owned()) {
+        let group = source_group(&state);
+        push_source(sources, path, scope, group, state, paths, directory);
+    }
+}
+
+const fn source_group(state: &SourceState) -> SourceGroup {
+    match state {
         SourceState::Conditional(_) | SourceState::Relevant(_) => SourceGroup::PathFiltered,
         SourceState::Nested(_) => SourceGroup::Nested,
         _ => SourceGroup::Startup,
-    };
-    if seen.insert(path.to_owned()) {
-        push_source(sources, path, scope, group, state, paths, directory);
     }
 }
 
@@ -2928,9 +2949,33 @@ mod tests {
                 "globs.mdc",
                 "---\nglobs: src/{a,b}.rs, Cargo.toml\n---\nrust\n",
             ),
+            // Rules go through the same text reader as Markdown.
+            ("bom.mdc", "\u{feff}---\nalwaysApply: true\n---\nactive\n"),
+            ("binary.mdc", "---\nalwaysApply: true\n---\nbinary\0body\n"),
         ] {
             fs::write(root.join(".cursor/rules").join(name), rule).unwrap();
         }
+        // UTF-16 picks its line-ending mode from the first 8 KiB, which here is all LF, so the
+        // later CRLF endings stay and push the decoded text past the cut.
+        let mut utf16 = vec![0xFF, 0xFE];
+        let mixed = format!("{}{}", "a\n".repeat(2100), "b\r\n".repeat(40_000));
+        utf16.extend(mixed.encode_utf16().flat_map(u16::to_le_bytes));
+        fs::create_dir_all(temp.path().join("utf16")).unwrap();
+        fs::write(temp.path().join("utf16/AGENTS.md"), utf16).unwrap();
+        let utf16_audit = Audit::resolve(
+            ContextRuntime::CursorAgent,
+            &temp.path().join("utf16"),
+            &paths(temp.path()),
+            None,
+        );
+        assert!(utf16_audit.sources.iter().any(|source| {
+            source.path == temp.path().join("utf16/AGENTS.md")
+                && source.state
+                    == SourceState::Truncated {
+                        included: CURSOR_AGENT_MAX_MARKDOWN_BYTES,
+                        total: mixed.len(),
+                    }
+        }));
 
         let audit = Audit::resolve(ContextRuntime::CursorAgent, &cwd, &paths(temp.path()), None);
         let position = |path: PathBuf| audit.sources.iter().position(|source| source.path == path);
@@ -2942,6 +2987,7 @@ mod tests {
             root.join("AGENTS.md"),
             root.join(".cursorrules"),
             root.join(".cursor/rules/leading-blank.mdc"),
+            root.join(".cursor/rules/bom.mdc"),
         ] {
             assert_eq!(state(path), Some(SourceState::Startup));
         }
@@ -2966,6 +3012,7 @@ mod tests {
             cwd.join("AGENTS.md"),
             root.join(".cursor/rules/bare.mdc"),
             root.join(".cursor/rules/header-only.mdc"),
+            root.join(".cursor/rules/binary.mdc"),
         ] {
             assert!(matches!(state(path), Some(SourceState::Excluded(_))));
         }
