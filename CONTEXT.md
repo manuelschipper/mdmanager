@@ -50,10 +50,11 @@ nearest Git root as the project root and reports the effective root-to-launch ch
 scan descendants below the launch directory.
 
 The Cursor CLI (`cursor-agent`) is a separate runtime modeled on observed, undocumented behavior.
-It loads `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, and `.cursor/rules/**/*.mdc` from every
-directory between the filesystem root and the launch directory, plus root `.cursorrules`. It cuts
-each Markdown file at 100 KiB, skips Markdown already loaded from the same or a higher directory,
-skips rules without complete frontmatter, and attaches subfolder files on demand.
+It loads `.cursor/rules/**/*.mdc`, `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` from every
+directory from the launch directory up to the filesystem root, plus `.cursorrules` at the Git root.
+It decodes Markdown and cuts it at 100 KiB, skips binary files and Markdown already loaded from the
+same or a higher directory, parses rule headers with its own rules, and attaches subfolder files on
+demand.
 
 Cursor User and Team Rules live in Cursor settings and are not inspectable as Markdown files.
 Editor Context reports root `CLAUDE.md` as uncertain, noting that only Cursor CLI documents it.

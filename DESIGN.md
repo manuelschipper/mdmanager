@@ -180,8 +180,8 @@ the source full-screen in every layout. Claude
 descendant scanning has no entry cap. It skips **.git** and non-rule symlinked directories; symlinked
 Claude rule files and directories are followed. Cursor editor Context resolves `AGENTS.md` plus
 `.cursor/rules/**/*.mdc` from the nearest Git root through the launch directory. Cursor CLI Context
-resolves `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, and those rules from the filesystem root
-through the launch directory, plus root `.cursorrules`. Neither scans descendants below the launch
+resolves those rules, `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` from the launch directory up
+to the filesystem root, plus `.cursorrules` at the Git root. Neither scans descendants below the launch
 directory.
 
 ## Documents
