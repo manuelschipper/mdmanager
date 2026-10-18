@@ -9,7 +9,7 @@ those instructions without taking ownership of it.
 - [Context](context.md) — managed versus observed Markdown.
 - [Claude](claude.md) — `CLAUDE.md`, rules, imports, and exclusions.
 - [Codex](codex.md) — `AGENTS.md` discovery and overrides.
-- [Cursor](cursor.md) — `AGENTS.md` and `.cursor/rules/*.mdc` discovery.
+- [Cursor](cursor.md) — editor and CLI `AGENTS.md`, `CLAUDE.md`, and `.cursor/rules/*.mdc` discovery.
 - [Pi](pi.md) — instruction-file selection.
 - [Concepts](concepts.md) — scopes, rendering, and status.
 - [Configuration](configuration.md) — Global, Project, and Local manifests plus UI preferences.

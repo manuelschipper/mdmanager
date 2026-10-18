@@ -30,7 +30,8 @@ mdmanager local restore RUNTIME [--yes]
 ```
 
 `context`, `docs`, the TUI, and Project commands need no personal configuration. Context accepts
-`claude` (default), `codex`, `cursor`, or `pi`; JSON reports the same resolution details.
+`claude` (default), `codex`, `cursor` (editor), `cursor-agent` (CLI), or `pi`; JSON reports the same
+resolution details.
 
 `init` accepts Global targets `claude`, `codex`, and `pi` and creates exactly those targets without
 deploying them. `apply PROFILE` writes that Profile's targets, not every catalog Target. With no

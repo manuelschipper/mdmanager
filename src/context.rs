@@ -25,17 +25,25 @@ pub(crate) enum ContextRuntime {
     Claude,
     Codex,
     Cursor,
+    CursorAgent,
     Pi,
 }
 
 impl ContextRuntime {
-    pub(crate) const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Cursor, Self::Pi];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Cursor,
+        Self::CursorAgent,
+        Self::Pi,
+    ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
-            Self::Cursor => "Cursor",
+            Self::Cursor => "Cursor editor",
+            Self::CursorAgent => "Cursor CLI",
             Self::Pi => "Pi",
         }
     }
@@ -45,9 +53,10 @@ impl ContextRuntime {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "cursor" => Ok(Self::Cursor),
+            "cursor-agent" => Ok(Self::CursorAgent),
             "pi" => Ok(Self::Pi),
             _ => Err(format!(
-                "unknown runtime {raw}; expected claude, codex, cursor, or pi"
+                "unknown runtime {raw}; expected claude, codex, cursor, cursor-agent, or pi"
             )),
         }
     }
@@ -57,6 +66,7 @@ impl ContextRuntime {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::CursorAgent => "cursor-agent",
             Self::Pi => "pi",
         }
     }
@@ -189,6 +199,7 @@ impl Audit {
             ContextRuntime::Claude => resolve_claude(&directory, paths),
             ContextRuntime::Codex => resolve_codex(&directory, paths),
             ContextRuntime::Cursor => resolve_cursor(&directory, paths),
+            ContextRuntime::CursorAgent => resolve_cursor_agent(&directory, paths),
             ContextRuntime::Pi => resolve_pi(&directory, paths),
         };
         if let Some(global) = global {
@@ -972,6 +983,7 @@ fn resolve_cursor(directory: &Path, paths: &Paths) -> Audit {
             &mut sources,
             &mut seen,
             &ancestor.join(".cursor/rules"),
+            cursor_rule_state,
             paths,
             directory,
         );
@@ -1008,10 +1020,123 @@ fn resolve_cursor(directory: &Path, paths: &Paths) -> Audit {
     }
 }
 
+/// Cursor CLI includes only the first 100 KiB of each instruction Markdown file.
+const CURSOR_AGENT_MAX_MARKDOWN_BYTES: usize = 100 * 1024;
+
+/// Cursor CLI behavior observed in `cursor-agent` 2026.10.16; Cursor documents only root
+/// `AGENTS.md`, `CLAUDE.md` and `.cursor/rules`. Every directory from the filesystem root to the
+/// launch directory contributes, so files above the project, such as `~/AGENTS.md`, load too.
+/// Subfolder files below the launch directory attach on demand and are not scanned.
+fn resolve_cursor_agent(directory: &Path, paths: &Paths) -> Audit {
+    let root = directory
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .unwrap_or(directory);
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    push_loaded(
+        &mut sources,
+        &mut seen,
+        &root.join(".cursorrules"),
+        &scope_for(root, directory),
+        paths,
+        directory,
+    );
+
+    // Cursor CLI drops an instruction file whose file identity or trimmed content already
+    // loaded from the same or a higher directory.
+    let mut loaded: Vec<(PathBuf, String)> = Vec::new();
+    for ancestor in ancestors_from_root(directory) {
+        for name in ["AGENTS.md", "CLAUDE.md", "CLAUDE.local.md"] {
+            let path = ancestor.join(name);
+            if !regular_file(&path) {
+                continue;
+            }
+            let state = match fs::read(&path) {
+                Err(error) => SourceState::Unreadable(error.to_string()),
+                Ok(bytes) => {
+                    let content = String::from_utf8_lossy(&bytes).trim().to_owned();
+                    match loaded.iter().find(|(other, other_content)| {
+                        *other_content == content || priority_same_file(&path, other)
+                    }) {
+                        Some((original, _)) => SourceState::Shadowed(original.clone()),
+                        None => {
+                            loaded.push((path.clone(), content));
+                            cursor_agent_markdown_state(&bytes)
+                        }
+                    }
+                }
+            };
+            push_with_state(
+                &mut sources,
+                &mut seen,
+                &path,
+                &scope_for(&ancestor, directory),
+                state,
+                paths,
+                directory,
+            );
+        }
+        push_cursor_rules(
+            &mut sources,
+            &mut seen,
+            &ancestor.join(".cursor/rules"),
+            cursor_agent_rule_state,
+            paths,
+            directory,
+        );
+    }
+
+    sort_sources(&mut sources);
+    let startup = sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.state,
+                SourceState::Startup | SourceState::Truncated { .. }
+            )
+        })
+        .count();
+    Audit {
+        runtime: ContextRuntime::CursorAgent,
+        directory: directory.to_owned(),
+        sources,
+        warnings: Vec::new(),
+        summary: format!(
+            "{startup} load at startup · User and Team Rules live in Cursor settings and are not inspectable"
+        ),
+    }
+}
+
+fn cursor_agent_markdown_state(bytes: &[u8]) -> SourceState {
+    if bytes.len() <= CURSOR_AGENT_MAX_MARKDOWN_BYTES {
+        return SourceState::Startup;
+    }
+    // Cursor CLI backs the cut up to a UTF-8 character boundary.
+    let mut included = CURSOR_AGENT_MAX_MARKDOWN_BYTES;
+    while bytes[included] & 0xC0 == 0x80 {
+        included -= 1;
+    }
+    SourceState::Truncated {
+        included,
+        total: bytes.len(),
+    }
+}
+
+fn cursor_agent_rule_state(content: &str) -> SourceState {
+    match rule_frontmatter(content) {
+        Ok(Some(_)) => cursor_rule_state(content),
+        _ => SourceState::Excluded(
+            "Cursor CLI skips rules without a complete frontmatter header".into(),
+        ),
+    }
+}
+
 fn push_cursor_rules(
     sources: &mut Vec<ContextSource>,
     seen: &mut HashSet<PathBuf>,
     root: &Path,
+    rule_state: fn(&str) -> SourceState,
     paths: &Paths,
     directory: &Path,
 ) {
@@ -1035,7 +1160,7 @@ fn push_cursor_rules(
     for rule in rules {
         let state = fs::read_to_string(&rule).map_or_else(
             |error| SourceState::Unreadable(error.to_string()),
-            |content| cursor_rule_state(&content),
+            |content| rule_state(&content),
         );
         push_with_state(
             sources,
@@ -2484,6 +2609,71 @@ mod tests {
                 .iter()
                 .all(|source| source.path != root.join(".cursor/rules/ignored.md"))
         );
+    }
+
+    #[test]
+    fn cursor_agent_loads_every_ancestor_and_skips_duplicates_and_bare_rules() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        let cwd = root.join("app");
+        fs::create_dir_all(cwd.join("sub")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".cursor/rules")).unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "above the project").unwrap();
+        fs::write(root.join("AGENTS.md"), "root agents\n").unwrap();
+        symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
+        // The cut lands inside a two-byte character and backs up to its start.
+        let mut local = "a".repeat(CURSOR_AGENT_MAX_MARKDOWN_BYTES - 1);
+        local.push_str("é and more");
+        fs::write(root.join("CLAUDE.local.md"), &local).unwrap();
+        fs::write(root.join(".cursorrules"), "legacy").unwrap();
+        fs::write(cwd.join("CLAUDE.md"), "root agents").unwrap();
+        fs::write(cwd.join("sub/AGENTS.md"), "on demand").unwrap();
+        fs::write(
+            root.join(".cursor/rules/always.mdc"),
+            "---\nalwaysApply: true\n---\nalways\n",
+        )
+        .unwrap();
+        fs::write(root.join(".cursor/rules/bare.mdc"), "no header").unwrap();
+
+        let audit = Audit::resolve(ContextRuntime::CursorAgent, &cwd, &paths(temp.path()), None);
+        let state = |path: PathBuf| {
+            audit
+                .sources
+                .iter()
+                .find(|source| source.path == path)
+                .map(|source| source.state.clone())
+        };
+
+        for path in [
+            temp.path().join("AGENTS.md"),
+            root.join("AGENTS.md"),
+            root.join(".cursorrules"),
+            root.join(".cursor/rules/always.mdc"),
+        ] {
+            assert_eq!(state(path), Some(SourceState::Startup));
+        }
+        assert_eq!(
+            state(root.join("CLAUDE.local.md")),
+            Some(SourceState::Truncated {
+                included: CURSOR_AGENT_MAX_MARKDOWN_BYTES - 1,
+                total: local.len(),
+            })
+        );
+        for path in [root.join("CLAUDE.md"), cwd.join("CLAUDE.md")] {
+            assert_eq!(
+                state(path),
+                Some(SourceState::Shadowed(root.join("AGENTS.md")))
+            );
+        }
+        assert!(matches!(
+            state(root.join(".cursor/rules/bare.mdc")),
+            Some(SourceState::Excluded(_))
+        ));
+        assert_eq!(state(cwd.join("sub/AGENTS.md")), None);
+        assert!(audit.summary.starts_with("5 load at startup"));
     }
 
     #[test]

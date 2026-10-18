@@ -178,9 +178,11 @@ Below 100 columns, Context stacks the preview below the chain when the page body
 30 rows; shorter bodies show only the chain. An empty source list has no preview. Enter opens
 the source full-screen in every layout. Claude
 descendant scanning has no entry cap. It skips **.git** and non-rule symlinked directories; symlinked
-Claude rule files and directories are followed. Cursor Context resolves `AGENTS.md` plus
-`.cursor/rules/**/*.mdc` from the nearest Git root through the launch directory; it does not scan
-descendants below the launch directory.
+Claude rule files and directories are followed. Cursor editor Context resolves `AGENTS.md` plus
+`.cursor/rules/**/*.mdc` from the nearest Git root through the launch directory. Cursor CLI Context
+resolves `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, and those rules from the filesystem root
+through the launch directory, plus root `.cursorrules`. Neither scans descendants below the launch
+directory.
 
 ## Documents
 

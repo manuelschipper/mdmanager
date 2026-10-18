@@ -44,14 +44,20 @@ scope.
 
 ## Cursor
 
-Cursor uses `AGENTS.md` plus Project Rules under `.cursor/rules/`. Rules can load always, for
+The Cursor editor uses `AGENTS.md` plus Project Rules under `.cursor/rules/`. Rules can load always, for
 matching globs, when Cursor decides they are relevant, or when selected manually. Context uses the
 nearest Git root as the project root and reports the effective root-to-launch chain; it does not
 scan descendants below the launch directory.
 
+The Cursor CLI (`cursor-agent`) is a separate runtime modeled on observed, undocumented behavior.
+It loads `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, and `.cursor/rules/**/*.mdc` from every
+directory between the filesystem root and the launch directory, plus root `.cursorrules`. It cuts
+each Markdown file at 100 KiB, skips Markdown already loaded from the same or a higher directory,
+skips rules without complete frontmatter, and attaches subfolder files on demand.
+
 Cursor User and Team Rules live in Cursor settings and are not inspectable as Markdown files.
-Context reports root `CLAUDE.md` as uncertain, noting that only Cursor CLI documents it. Cursor has
-no documented Global Markdown or Local override target.
+Editor Context reports root `CLAUDE.md` as uncertain, noting that only Cursor CLI documents it.
+Cursor has no documented Global Markdown or Local override target.
 
 ## Ownership
 

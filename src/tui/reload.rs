@@ -96,6 +96,7 @@ fn hash_ancestor_candidates(
             "CLAUDE.md",
             "CLAUDE.MD",
             "CLAUDE.local.md",
+            ".cursorrules",
             ".claude/CLAUDE.md",
             ".claude/AGENTS.md",
             ".claude/settings.json",
@@ -130,6 +131,7 @@ fn relevant_project_file(path: &Path) -> bool {
             | "CLAUDE.md"
             | "CLAUDE.MD"
             | "CLAUDE.local.md"
+            | ".cursorrules"
             | "project.toml"
             | "local.toml"
             | "settings.json"

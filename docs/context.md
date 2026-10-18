@@ -7,6 +7,7 @@ directory?"
 mdmanager context --runtime claude
 mdmanager context --runtime codex
 mdmanager context --runtime cursor
+mdmanager context --runtime cursor-agent
 mdmanager context --runtime pi
 mdmanager context --runtime claude --json
 ```
