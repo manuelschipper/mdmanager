@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## mdmanager 0.3.0 — Oct 19, 2026
 
 - **Cursor CLI runtime** — `mdmanager context --runtime cursor-agent` and the TUI's **Cursor CLI**
   runtime report what `cursor-agent` loads: `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, and
