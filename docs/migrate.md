@@ -36,7 +36,7 @@ separate. Do not copy an injected global target title into a Global Section.
 ## 3. Create and verify sources
 
 If no global source exists, `mdmanager init GLOBAL_TARGET...` creates only the selected Claude,
-Codex, or Pi targets without deployment. Bare `mdmanager init` creates only the Personal Section
+Codex, Cursor, or Pi targets without deployment. Bare `mdmanager init` creates only the Personal Section
 library. Edit `~/.mdmanager/mdmanager.toml` and its Sections, then run
 `mdmanager render PROFILE TARGET` for every composition. Compare each result with the resolved old
 output and explain every difference.

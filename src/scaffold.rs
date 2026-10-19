@@ -33,15 +33,17 @@ pub(crate) fn manifest(paths: &Paths, targets: &[String]) -> Result<String, Stri
                 "AGENTS.md",
                 "Global Pi",
             ),
-            "cursor" => {
-                return Err(
-                    "Cursor has no Global Markdown target; use `mdmanager project adopt agents` for an existing AGENTS.md or `mdmanager project create agents --from FILE` to create one, and `mdmanager context --runtime cursor` to inspect it"
-                        .into(),
-                );
-            }
+            // Cursor's agent, in the CLI and the editor, reads `.cursor/rules` in every directory up
+            // to the filesystem root, so a rule in HOME reaches it for every project below HOME.
+            "cursor" => (
+                paths.home.join(".cursor/rules"),
+                "HOME",
+                "mdmanager.mdc",
+                "Global Cursor",
+            ),
             _ => {
                 return Err(format!(
-                    "unknown Global target {id}; expected claude, codex, or pi"
+                    "unknown Global target {id}; expected claude, codex, cursor, or pi"
                 ));
             }
         };

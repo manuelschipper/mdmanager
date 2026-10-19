@@ -242,7 +242,15 @@ impl GlobalConfig {
                 self.target_names().collect::<Vec<_>>().join(", ")
             )
         })?;
-        let mut output = format!("# {}\n", target_config.title.trim());
+        let mut output = if is_cursor_rule(Path::new(&target_config.path)) {
+            // Cursor loads a rule at startup only with this header.
+            format!(
+                "---\nalwaysApply: true\n---\n\n# {}\n",
+                target_config.title.trim()
+            )
+        } else {
+            format!("# {}\n", target_config.title.trim())
+        };
         for id in ids {
             let content = self
                 .contents
@@ -267,6 +275,16 @@ impl GlobalConfig {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(crate::section::render_format_1(&contents))
     }
+}
+
+/// A Cursor rule Target: a `.mdc` file below a `.cursor/rules` directory. Only Cursor reads these,
+/// so a home-level rule reaches the Cursor CLI and editor without other runtimes loading it.
+pub(crate) fn is_cursor_rule(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    path.extension().is_some_and(|extension| extension == "mdc")
+        && components
+            .windows(2)
+            .any(|pair| pair[0].as_os_str() == ".cursor" && pair[1].as_os_str() == "rules")
 }
 
 fn validate_manifest(manifest: &Manifest, paths: &Paths) -> Result<(), String> {
@@ -299,9 +317,10 @@ fn validate_manifest(manifest: &Manifest, paths: &Paths) -> Result<(), String> {
         if !matches!(
             output.file_name().and_then(|name| name.to_str()),
             Some("AGENTS.md" | "CLAUDE.md")
-        ) {
+        ) && !is_cursor_rule(&output)
+        {
             return Err(format!(
-                "target {id} path must end with AGENTS.md or CLAUDE.md"
+                "target {id} path must end with AGENTS.md or CLAUDE.md, or be a .mdc file under .cursor/rules"
             ));
         }
         if !output_paths.insert(output) {
@@ -879,13 +898,15 @@ path = "sections/local.md"
 
     #[test]
     fn rejects_targets_outside_the_supported_file_families() {
-        let source = VALID.replace("~/.claude/CLAUDE.md", "~/.claude/rules/shared.md");
-        let (_temp, global) = global(&source, &[("sections/common.md", "text")]);
-        assert!(
-            global
-                .unwrap_err()
-                .contains("must end with AGENTS.md or CLAUDE.md")
-        );
+        for path in ["~/.claude/rules/shared.md", "~/.cursor/shared.mdc"] {
+            let source = VALID.replace("~/.claude/CLAUDE.md", path);
+            let (_temp, global) = global(&source, &[("sections/common.md", "text")]);
+            assert!(
+                global
+                    .unwrap_err()
+                    .contains("must end with AGENTS.md or CLAUDE.md")
+            );
+        }
     }
 
     #[test]

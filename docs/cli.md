@@ -33,11 +33,10 @@ mdmanager local restore RUNTIME [--yes]
 `claude` (default), `codex`, `cursor` (editor), `cursor-agent` (CLI), or `pi`; JSON reports the same
 resolution details.
 
-`init` accepts Global targets `claude`, `codex`, and `pi` and creates exactly those targets without
-deploying them. `apply PROFILE` writes that Profile's targets, not every catalog Target. With no
-arguments `init` creates only the Personal Section library. Cursor uses project
-`AGENTS.md` and has no Global target, so `init cursor` stops with directed project and Context
-guidance.
+`init` accepts Global targets `claude`, `codex`, `cursor`, and `pi` and creates exactly those
+targets without deploying them. `cursor` is the rule `~/.cursor/rules/mdmanager.mdc`, which the
+Cursor CLI and editor load for projects below HOME. `apply PROFILE` writes that Profile's targets,
+not every catalog Target. With no arguments `init` creates only the Personal Section library.
 
 Project targets are `agents` (`AGENTS.md`) and `claude` (`CLAUDE.md`). Local targets render
 `AGENTS.override.md` and `CLAUDE.local.md`. `SECTION` names a Personal Section; Local compositions

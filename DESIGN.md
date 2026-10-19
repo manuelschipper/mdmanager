@@ -17,7 +17,8 @@ saves on Enter, and restores the previous palette on Esc; see [TUI themes](docs/
 
 ### Managed
 
-- Global configured **CLAUDE.md** and **AGENTS.md** targets.
+- Global configured **CLAUDE.md** and **AGENTS.md** targets, and always-applied Cursor rule
+  targets under **.cursor/rules/**, such as **~/.cursor/rules/mdmanager.mdc**.
 - Project root **CLAUDE.md** and **AGENTS.md**.
 - Local **CLAUDE.local.md** and **AGENTS.override.md**.
 
@@ -178,11 +179,10 @@ Below 100 columns, Context stacks the preview below the chain when the page body
 30 rows; shorter bodies show only the chain. An empty source list has no preview. Enter opens
 the source full-screen in every layout. Claude
 descendant scanning has no entry cap. It skips **.git** and non-rule symlinked directories; symlinked
-Claude rule files and directories are followed. Cursor editor Context resolves `AGENTS.md` plus
-`.cursor/rules/**/*.mdc` from the nearest Git root through the launch directory. Cursor CLI Context
-resolves those rules, `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` from the launch directory up
-to the filesystem root, plus `.cursorrules` at the Git root. Neither scans descendants below the launch
-directory.
+Claude rule files and directories are followed. Cursor editor and CLI Context resolve
+`.cursor/rules/**/*.mdc`, `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` from the launch directory
+up to the filesystem root, plus `.cursorrules` at the Git root. Neither scans descendants below the
+launch directory.
 
 ## Documents
 

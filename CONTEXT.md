@@ -44,26 +44,26 @@ scope.
 
 ## Cursor
 
-The Cursor editor uses `AGENTS.md` plus Project Rules under `.cursor/rules/`. Rules can load always, for
-matching globs, when Cursor decides they are relevant, or when selected manually. Context uses the
-nearest Git root as the project root and reports the effective root-to-launch chain; it does not
-scan descendants below the launch directory.
+The Cursor CLI (`cursor-agent`) and the Cursor editor's agent share one rule loader, modeled on
+observed, undocumented behavior. It loads `.cursor/rules/**/*.mdc`, `CLAUDE.md`, `CLAUDE.local.md`,
+and `AGENTS.md` from every directory from the launch directory (the editor's workspace folder) up to
+the filesystem root, plus `.cursorrules` at the Git root. It decodes Markdown and cuts it at
+100 KiB, skips binary files, parses rule headers with its own rules, and attaches subfolder files on
+demand. Rules can load always, for matching globs, when Cursor decides they are relevant, or when
+selected manually.
 
-The Cursor CLI (`cursor-agent`) is a separate runtime modeled on observed, undocumented behavior.
-It loads `.cursor/rules/**/*.mdc`, `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` from every
-directory from the launch directory up to the filesystem root, plus `.cursorrules` at the Git root.
-It decodes Markdown and cuts it at 100 KiB, skips binary files and Markdown already loaded from the
-same or a higher directory, parses rule headers with its own rules, and attaches subfolder files on
-demand.
+The CLI also skips Markdown already loaded from the same or a higher directory and always loads the
+Claude files. The editor keeps duplicates and loads the Claude files only when its third-party
+extensibility setting is on, so editor Context reports them as uncertain.
 
 Cursor User and Team Rules live in Cursor settings and are not inspectable as Markdown files.
-Editor Context reports root `CLAUDE.md` as uncertain, noting that only Cursor CLI documents it.
-Cursor has no documented Global Markdown or Local override target.
+Cursor's Global target is an always-applied rule at `~/.cursor/rules/mdmanager.mdc`; Cursor has no
+Local override target.
 
 ## Ownership
 
 ```text
-Global   configured CLAUDE.md / AGENTS.md Targets
+Global   configured CLAUDE.md / AGENTS.md Targets and Cursor rule Targets
 Project  root CLAUDE.md / AGENTS.md
 Local    CLAUDE.local.md / AGENTS.override.md
 ```
