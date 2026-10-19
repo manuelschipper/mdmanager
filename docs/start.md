@@ -70,12 +70,12 @@ are outside its scope.
   Codex. `CLAUDE.local.md` adds instructions after `CLAUDE.md` for Claude, but by default it also
   stops Claude reading `AGENTS.md`; see [Claude](claude.md#agentsmd).
 - **Global Instructions** are personal machine configuration. `[targets.*]` is the shared catalog.
-  Profiles compose Personal Sections into the catalog Targets they name. Cursor has no documented
-  Global Markdown target.
+  Profiles compose Personal Sections into the catalog Targets they name. Cursor's Global target is
+  the rule `~/.cursor/rules/mdmanager.mdc`; see [Cursor](cursor.md#managed-files).
 
 Project and Local Instructions require a Git worktree. Global and Local compositions resolve
 Personal Sections through `~/.mdmanager/mdmanager.toml`; **mdmanager init [GLOBAL_TARGET...]**
-creates the library and exactly the requested Claude, Codex, or Pi targets without deploying them.
+creates the library and exactly the requested Claude, Codex, Cursor, or Pi targets without deploying them.
 With no targets it creates only the library.
 
 ## Symlink aliases

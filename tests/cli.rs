@@ -268,16 +268,43 @@ fn init_targets_follow_runtime_directory_overrides() {
 }
 
 #[test]
-fn init_rejects_cursor_as_a_global_target_with_project_guidance() {
-    let home = TempDir::new().unwrap();
-    let output = mdmanager(home.path(), &["init", "cursor"]);
+fn cursor_global_rule_deploys_and_loads_at_startup() {
+    let temp = TempDir::new().unwrap();
+    // Context walks the resolved launch directory, so HOME must use the same spelling.
+    let home = fs::canonicalize(temp.path()).unwrap();
+    assert!(mdmanager(&home, &["init", "cursor"]).status.success());
+    fs::write(
+        home.join(".mdmanager/sections/common.md"),
+        "### Common\n\nShared rule.\n",
+    )
+    .unwrap();
+    assert!(
+        mdmanager(&home, &["apply", "default", "--yes"])
+            .status
+            .success()
+    );
+    let rule = home.join(".cursor/rules/mdmanager.mdc");
 
-    assert!(!output.status.success());
-    let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("mdmanager project adopt agents"));
-    assert!(error.contains("mdmanager project create agents --from FILE"));
-    assert!(error.contains("mdmanager context --runtime cursor"));
-    assert!(!home.path().join(".mdmanager").exists());
+    // A project below HOME gets the rule from Cursor's ancestor walk, in the CLI and the editor.
+    let repository = home.join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    for runtime in ["cursor", "cursor-agent"] {
+        let output = mdmanager_in(
+            &home,
+            &repository,
+            &["context", "--runtime", runtime, "--json"],
+        );
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let source = json["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["path"] == rule.to_str().unwrap())
+            .unwrap();
+        assert_eq!(source["status"], "at startup");
+        assert_eq!(source["managed"]["target"], "cursor");
+    }
 }
 
 #[test]
@@ -338,7 +365,7 @@ fn help_exposes_commands_targets_and_navigation_keys() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("Usage: mdmanager init [GLOBAL_TARGET]..."));
-    assert!(help.contains("claude, codex, pi"));
+    assert!(help.contains("claude, codex, cursor, pi"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_mdmanager"))
         .args(["tui", "--help"])
@@ -521,7 +548,7 @@ fn cursor_context_reports_agents_and_cursor_rules() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json["sources"].as_array().unwrap().iter().any(|source| {
         source["display"] == "./.cursor/rules/incomplete.mdc"
-            && source["status"] == "uncertain"
+            && source["status"] == "excluded"
             && source["reason"]
                 .as_str()
                 .is_some_and(|reason| !reason.is_empty())

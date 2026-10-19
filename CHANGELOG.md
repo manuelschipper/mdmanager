@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Cursor Global target** — `mdmanager init cursor` adds a `cursor` Global target that renders
+  `~/.cursor/rules/mdmanager.mdc` with an `alwaysApply: true` header. The Cursor CLI and editor
+  load it for every project below your home directory, and no other runtime reads `.cursor/rules`,
+  so your Profiles reach Cursor without leaking into Claude, Codex, or Pi. Global target paths may
+  now also be a `.mdc` file under `.cursor/rules/`.
+- **Cursor editor Context** — `mdmanager context --runtime cursor` now models the editor's bundled
+  agent (Cursor 3.21.18), which shares the CLI's loader: it reads `.cursor/rules`, `AGENTS.md`, and
+  the Claude files from the workspace folder up to the filesystem root. Unlike the CLI it keeps
+  duplicate Markdown, and it reports `CLAUDE.md` and `CLAUDE.local.md` as uncertain because the
+  editor loads them only when its third-party extensibility setting is on. Rules in your home
+  directory show as `user rule`.
+
 ## mdmanager 0.3.0 — Oct 19, 2026
 
 - **Cursor CLI runtime** — `mdmanager context --runtime cursor-agent` and the TUI's **Cursor CLI**

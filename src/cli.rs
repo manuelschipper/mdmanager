@@ -32,10 +32,10 @@ enum Command {
     },
     /// Create the Personal Section library and selected Global targets without deploying.
     #[command(
-        long_about = "Create the Personal Section library and selected Global targets without deploying.\n\nAvailable Global targets: claude, codex, pi. Pass none to create only the Personal Section library. Cursor uses project AGENTS.md and has no Global target."
+        long_about = "Create the Personal Section library and selected Global targets without deploying.\n\nAvailable Global targets: claude, codex, cursor, pi. Pass none to create only the Personal Section library. cursor writes the always-applied rule ~/.cursor/rules/mdmanager.mdc, which the Cursor CLI and editor load for projects below HOME."
     )]
     Init {
-        /// Global targets to configure: claude, codex, pi.
+        /// Global targets to configure: claude, codex, cursor, pi.
         #[arg(value_name = "GLOBAL_TARGET")]
         targets: Vec<String>,
     },

@@ -75,7 +75,8 @@ Global requirements:
 
 - IDs use lowercase ASCII letters, digits, `-`, or `_`, and start with a letter.
 - Section paths are relative and their UTF-8 files are non-empty.
-- Target paths remain beneath home and end with `AGENTS.md` or `CLAUDE.md`.
+- Target paths remain beneath home and end with `AGENTS.md` or `CLAUDE.md`, or are a `.mdc` Cursor
+  rule under `.cursor/rules/`. A rule renders with an `alwaysApply: true` header before its title.
 - Section IDs and expanded target paths are unique.
 - `[targets.*]` is the shared catalog. Each Profile names a non-empty subset of those Targets.
   Lists are non-empty and duplicate-free; unknown Target keys fail.

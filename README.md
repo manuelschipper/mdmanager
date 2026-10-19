@@ -108,8 +108,8 @@ compositions can reuse your personal Sections across repositories.
 
 Project and Local management require a Git worktree. Runtime behavior still applies: Codex and Pi's
 `AGENTS.override.md` replaces `AGENTS.md`, while Claude's `CLAUDE.local.md` adds instructions and, by
-default, stops Claude reading `AGENTS.md`. Cursor
-has no Global Markdown target.
+default, stops Claude reading `AGENTS.md`. Cursor's Global target is the rule
+`~/.cursor/rules/mdmanager.mdc`, which its CLI and editor load for projects below your home directory.
 
 ## Work with your coding agent
 
