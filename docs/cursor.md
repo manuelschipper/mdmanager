@@ -1,7 +1,7 @@
 # Cursor context
 
 The Cursor CLI (`cursor-agent`) and the Cursor editor's agent share one rule loader. mdmanager
-models it from behavior observed in `cursor-agent` 2026.10.16 and the Cursor 3.21.18 editor.
+models it from behavior observed in `cursor-agent` 2026.10.16 and the Cursor 3.25.9 editor.
 Cursor documents little of it, so a later release can change it.
 
 ```sh
@@ -30,8 +30,8 @@ directory outside a repository.
 - Each decoded Markdown file is cut at 100 KiB; Context reports a longer file as partial.
 - A rule that does not start with a `---` header followed by more text is skipped and reported as
   excluded. Only an unquoted `alwaysApply: true` makes a rule always apply.
-- `AGENTS.md`, `CLAUDE.md`, and rules in subfolders below the launch directory attach after the
-  agent reads files there. Context does not scan them.
+- `AGENTS.md`, `CLAUDE.md`, and rules in subfolders below the launch directory were observed to
+  attach only after the agent reads files there. Context does not scan them.
 - `.cursorignore` can hide instruction files; Context does not model it.
 
 The two runtimes differ in two ways:

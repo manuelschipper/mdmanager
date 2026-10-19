@@ -954,7 +954,7 @@ const CURSOR_AGENT_MAX_MARKDOWN_BYTES: usize = 100 * 1024;
 /// Cursor's per-directory Markdown collection order.
 const CURSOR_AGENT_MARKDOWN: [&str; 3] = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
 
-/// Cursor's agent rule loader, observed in `cursor-agent` 2026.10.16 and the Cursor 3.21.18
+/// Cursor's agent rule loader, observed in `cursor-agent` 2026.10.16 and the Cursor 3.25.9
 /// editor's bundled agent; Cursor documents only root `AGENTS.md`, `CLAUDE.md` and
 /// `.cursor/rules`. Every directory from the launch directory (the editor's workspace folder) up
 /// to the filesystem root contributes, so files above the project, such as

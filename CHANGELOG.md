@@ -8,7 +8,7 @@
   so your Profiles reach Cursor without leaking into Claude, Codex, or Pi. Global target paths may
   now also be a `.mdc` file under `.cursor/rules/`.
 - **Cursor editor Context** — `mdmanager context --runtime cursor` now models the editor's bundled
-  agent (Cursor 3.21.18), which shares the CLI's loader: it reads `.cursor/rules`, `AGENTS.md`, and
+  agent (Cursor 3.25.9), which shares the CLI's loader: it reads `.cursor/rules`, `AGENTS.md`, and
   the Claude files from the workspace folder up to the filesystem root. Unlike the CLI it keeps
   duplicate Markdown, and it reports `CLAUDE.md` and `CLAUDE.local.md` as uncertain because the
   editor loads them only when its third-party extensibility setting is on. Rules in your home

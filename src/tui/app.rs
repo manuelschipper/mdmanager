@@ -41,6 +41,7 @@ use self::overview::{
 use self::reload::{ReloadInput, ReloadWatcher, current_watch_signature};
 use super::context_ui;
 use super::{ACTIVE_THEME, activate_theme, active_theme, reset_theme};
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -847,16 +848,22 @@ fn discovered_global_sources(
             .filter_map(|id| global.target_path(id).ok())
             .collect()
     });
+    let mut seen = HashSet::new();
     ContextRuntime::ALL
         .into_iter()
-        .filter_map(|runtime| {
+        .flat_map(|runtime| {
+            // Cursor has no user instruction file; its always-applied home rules play that role,
+            // and both Cursor runtimes report the same files.
+            let cursor = matches!(
+                runtime,
+                ContextRuntime::Cursor | ContextRuntime::CursorAgent
+            );
             Audit::resolve(runtime, directory, paths, None)
                 .sources
                 .into_iter()
-                .find(|source| {
-                    source.scope == "user"
+                .filter(move |source| {
+                    (source.scope == "user" || cursor && source.scope == "user rule")
                         && source.group == SourceGroup::Startup
-                        && !configured.contains(&source.path)
                         && matches!(
                             source.state,
                             SourceState::Startup
@@ -864,7 +871,11 @@ fn discovered_global_sources(
                                 | SourceState::Truncated { .. }
                         )
                 })
-                .map(|source| (runtime, source))
+                .take(if cursor { usize::MAX } else { 1 })
+                .map(move |source| (runtime, source))
+        })
+        .filter(|(_, source)| {
+            !configured.contains(&source.path) && seen.insert(source.path.clone())
         })
         .collect()
 }
@@ -3264,6 +3275,36 @@ agents = ["common"]
                 .nth(app.section_index),
             Some("agents")
         );
+    }
+
+    #[test]
+    fn home_lists_each_unconfigured_cursor_home_rule_once() {
+        let temp = TempDir::new().unwrap();
+        // Context walks the resolved launch directory, so HOME must use the same spelling.
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let repository = home.join("repo");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(home.join(".cursor/rules")).unwrap();
+        for name in ["team.mdc", "style.mdc"] {
+            fs::write(
+                home.join(".cursor/rules").join(name),
+                "---\nalwaysApply: true\n---\nrule\n",
+            )
+            .unwrap();
+        }
+
+        let app = App::new_at(Paths::for_home(&home), None, repository).unwrap();
+
+        for name in ["team.mdc", "style.mdc"] {
+            let rule = home.join(".cursor/rules").join(name);
+            assert_eq!(
+                app.global_sources
+                    .iter()
+                    .filter(|(_, source)| source.path == rule)
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
