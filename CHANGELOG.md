@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## mdmanager 0.4.0 — Oct 19, 2026
 
 - **Cursor Global target** — `mdmanager init cursor` adds a `cursor` Global target that renders
   `~/.cursor/rules/mdmanager.mdc` with an `alwaysApply: true` header. The Cursor CLI and editor
