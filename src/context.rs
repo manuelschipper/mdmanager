@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::config::{GlobalConfig, Paths};
 use crate::deploy;
+use crate::git_worktree;
 
 /// Pi candidate order: the first existing file wins, even an empty override.
 pub(crate) const PI_INSTRUCTION_CANDIDATES: [&str; 5] = [
@@ -25,17 +26,25 @@ pub(crate) enum ContextRuntime {
     Claude,
     Codex,
     Cursor,
+    CursorAgent,
     Pi,
 }
 
 impl ContextRuntime {
-    pub(crate) const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Cursor, Self::Pi];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Cursor,
+        Self::CursorAgent,
+        Self::Pi,
+    ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
-            Self::Cursor => "Cursor",
+            Self::Cursor => "Cursor editor",
+            Self::CursorAgent => "Cursor CLI",
             Self::Pi => "Pi",
         }
     }
@@ -45,9 +54,10 @@ impl ContextRuntime {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "cursor" => Ok(Self::Cursor),
+            "cursor-agent" => Ok(Self::CursorAgent),
             "pi" => Ok(Self::Pi),
             _ => Err(format!(
-                "unknown runtime {raw}; expected claude, codex, cursor, or pi"
+                "unknown runtime {raw}; expected claude, codex, cursor, cursor-agent, or pi"
             )),
         }
     }
@@ -57,6 +67,7 @@ impl ContextRuntime {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::CursorAgent => "cursor-agent",
             Self::Pi => "pi",
         }
     }
@@ -189,6 +200,7 @@ impl Audit {
             ContextRuntime::Claude => resolve_claude(&directory, paths),
             ContextRuntime::Codex => resolve_codex(&directory, paths),
             ContextRuntime::Cursor => resolve_cursor(&directory, paths),
+            ContextRuntime::CursorAgent => resolve_cursor_agent(&directory, paths),
             ContextRuntime::Pi => resolve_pi(&directory, paths),
         };
         if let Some(global) = global {
@@ -1008,6 +1020,395 @@ fn resolve_cursor(directory: &Path, paths: &Paths) -> Audit {
     }
 }
 
+/// Cursor CLI includes only the first 100 KiB of each instruction Markdown file's decoded text.
+const CURSOR_AGENT_MAX_MARKDOWN_BYTES: usize = 100 * 1024;
+
+/// Cursor CLI's per-directory Markdown collection order.
+const CURSOR_AGENT_MARKDOWN: [&str; 3] = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
+
+/// Cursor CLI behavior observed in `cursor-agent` 2026.10.16; Cursor documents only root
+/// `AGENTS.md`, `CLAUDE.md` and `.cursor/rules`. Every directory from the launch directory up to
+/// the filesystem root contributes, so files above the project, such as `~/AGENTS.md`, load too.
+/// Subfolder files below the launch directory attach on demand and are not scanned.
+fn resolve_cursor_agent(directory: &Path, paths: &Paths) -> Audit {
+    // Cursor CLI asks Git for the project root and falls back to the launch directory. Git
+    // reports a resolved path; keep the launch directory's spelling for display.
+    let root = git_worktree::worktree_root(directory).map_or_else(
+        |_| directory.to_owned(),
+        |root| {
+            directory
+                .ancestors()
+                .find(|ancestor| fs::canonicalize(ancestor).ok().as_ref() == Some(&root))
+                .map_or(root, Path::to_owned)
+        },
+    );
+    let markdown = directory
+        .ancestors()
+        .flat_map(|ancestor| CURSOR_AGENT_MARKDOWN.map(|name| ancestor.join(name)))
+        .filter(|path| regular_file(path))
+        .map(|path| {
+            let text = cursor_agent_read(&path);
+            (path, text)
+        })
+        .collect::<Vec<_>>();
+    let states = cursor_agent_markdown_states(&markdown);
+
+    let mut sources = Vec::new();
+    let rules = root.join(".cursorrules");
+    if regular_file(&rules) {
+        let (state, content) = match cursor_agent_read(&rules) {
+            Ok(text) => (SourceState::Startup, text),
+            Err(state) => (state, String::new()),
+        };
+        let scope = scope_for(&root, directory);
+        push_cursor_agent_source(
+            &mut sources,
+            &rules,
+            scope,
+            state,
+            content,
+            paths,
+            directory,
+        );
+    }
+    // Cursor CLI collects from the launch directory upward: each directory's rules first, then
+    // its Markdown in `CURSOR_AGENT_MARKDOWN` order.
+    for ancestor in directory.ancestors() {
+        for rule in cursor_rule_files(&ancestor.join(".cursor/rules")) {
+            let (state, content) = match cursor_agent_read(&rule) {
+                Ok(text) => (cursor_agent_rule_state(&text), text),
+                Err(state) => (state, String::new()),
+            };
+            let scope = "project rule".to_owned();
+            push_cursor_agent_source(&mut sources, &rule, scope, state, content, paths, directory);
+        }
+        for ((path, text), state) in markdown.iter().zip(&states) {
+            if path.parent() == Some(ancestor) {
+                let content = text.as_ref().cloned().unwrap_or_default();
+                let scope = scope_for(ancestor, directory);
+                push_cursor_agent_source(
+                    &mut sources,
+                    path,
+                    scope,
+                    state.clone(),
+                    content,
+                    paths,
+                    directory,
+                );
+            }
+        }
+    }
+
+    sort_sources(&mut sources);
+    let startup = sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.state,
+                SourceState::Startup | SourceState::Truncated { .. }
+            )
+        })
+        .count();
+    Audit {
+        runtime: ContextRuntime::CursorAgent,
+        directory: directory.to_owned(),
+        sources,
+        warnings: Vec::new(),
+        summary: format!(
+            "{startup} load at startup · User and Team Rules live in Cursor settings and are not inspectable"
+        ),
+    }
+}
+
+/// Cursor CLI drops a Markdown file whose file identity or trimmed loaded body (after truncation)
+/// matches one already kept. Winners are chosen from the highest directory down, `AGENTS.md`
+/// first within a directory; this does not change the collection order.
+fn cursor_agent_markdown_states(
+    markdown: &[(PathBuf, Result<String, SourceState>)],
+) -> Vec<SourceState> {
+    let mut states = markdown
+        .iter()
+        .map(|(_, text)| text.as_ref().err().cloned())
+        .collect::<Vec<_>>();
+    let mut order = (0..markdown.len())
+        .filter(|index| markdown[*index].1.is_ok())
+        .collect::<Vec<_>>();
+    order.sort_by_key(|index| {
+        let path = &markdown[*index].0;
+        (path.components().count(), !path.ends_with("AGENTS.md"))
+    });
+    let mut kept: Vec<(&Path, String)> = Vec::new();
+    for index in order {
+        let (path, Ok(text)) = &markdown[index] else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        let (body, state) = cursor_agent_body(text, &name);
+        let body = body.trim().to_owned();
+        states[index] = Some(
+            match kept
+                .iter()
+                .find(|(other, other_body)| *other_body == body || priority_same_file(path, other))
+            {
+                Some((original, _)) => SourceState::Shadowed(original.to_path_buf()),
+                None => {
+                    kept.push((path, body));
+                    state
+                }
+            },
+        );
+    }
+    states.into_iter().flatten().collect()
+}
+
+fn cursor_agent_read(path: &Path) -> Result<String, SourceState> {
+    fs::read(path)
+        .map_err(|error| SourceState::Unreadable(error.to_string()))
+        .and_then(|bytes| cursor_agent_text(&bytes))
+}
+
+/// Cursor CLI's text reader for instruction Markdown and rules: it skips files it detects as
+/// binary, decodes UTF-16 with a byte-order mark, drops a UTF-8 byte-order mark, and converts CRLF
+/// to LF when at least 5% of line endings are CRLF. UTF-8 counts line endings across the file;
+/// UTF-16 counts them in its first 8 KiB only. Its statistical detection of BOM-less UTF-16 and
+/// legacy encodings is not modeled; such files are read as lossy UTF-8.
+fn cursor_agent_text(bytes: &[u8]) -> Result<String, SourceState> {
+    const SAMPLE_BYTES: usize = 8192;
+    let utf16 = |bytes: &[u8], decode: fn([u8; 2]) -> u16| {
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| decode([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    };
+    let sample = &bytes[..bytes.len().min(SAMPLE_BYTES)];
+    let utf16_order: Option<fn([u8; 2]) -> u16> = match bytes {
+        [0xFF, 0xFE, third, fourth, ..] if *third != 0 || *fourth != 0 => Some(u16::from_le_bytes),
+        [0xFE, 0xFF, _, _, ..] => Some(u16::from_be_bytes),
+        _ => None,
+    };
+    let (text, crlf) = match utf16_order {
+        Some(order) => (
+            utf16(&bytes[2..], order),
+            mostly_crlf(&utf16(&sample[2..], order)),
+        ),
+        None => {
+            let control = sample
+                .iter()
+                .filter(|byte| **byte < 32 && !matches!(byte, b'\t' | b'\n' | b'\r'))
+                .count();
+            if sample.contains(&0) || (control > 0 && control * 20 >= sample.len()) {
+                return Err(SourceState::Excluded(
+                    "Cursor CLI skips files it detects as binary".into(),
+                ));
+            }
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            let crlf = mostly_crlf(&text);
+            (text, crlf)
+        }
+    };
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    Ok(if crlf {
+        text.replace("\r\n", "\n")
+    } else {
+        text.to_owned()
+    })
+}
+
+fn mostly_crlf(text: &str) -> bool {
+    let newlines = text.matches('\n').count();
+    newlines > 0 && text.matches("\r\n").count() * 100 >= newlines * 5
+}
+
+/// The body Cursor CLI loads for an instruction Markdown file, with its truncation notice.
+fn cursor_agent_body(text: &str, name: &str) -> (String, SourceState) {
+    if text.len() <= CURSOR_AGENT_MAX_MARKDOWN_BYTES {
+        return (text.to_owned(), SourceState::Startup);
+    }
+    let mut included = CURSOR_AGENT_MAX_MARKDOWN_BYTES;
+    while !text.is_char_boundary(included) {
+        included -= 1;
+    }
+    let notice = format!(
+        "[truncated: {name} is {} KB; only the first 100 KB is included]",
+        (text.len() as f64 / 1024.0).round()
+    );
+    (
+        format!("{}\n\n{notice}", &text[..included]),
+        SourceState::Truncated {
+            included,
+            total: text.len(),
+        },
+    )
+}
+
+/// Pushes a source with Cursor CLI's decoded text, which a strict UTF-8 reread would lose.
+fn push_cursor_agent_source(
+    sources: &mut Vec<ContextSource>,
+    path: &Path,
+    scope: String,
+    state: SourceState,
+    content: String,
+    paths: &Paths,
+    directory: &Path,
+) {
+    sources.push(ContextSource {
+        path: path.to_owned(),
+        display: display_path(path, paths, directory),
+        scope,
+        group: source_group(&state),
+        state,
+        content,
+        imports: Vec::new(),
+        managed: None,
+    });
+}
+
+enum CursorAgentValue {
+    Bool(bool),
+    Text(String),
+    List(Vec<String>),
+}
+
+/// Port of Cursor CLI's rule header parser. It accepts a header after leading whitespace, needs
+/// some text, even a newline, after the closing `---`, types only unquoted `true`/`false` as
+/// booleans, reads list items only when indented, and lets a repeated key win.
+fn cursor_agent_rule_state(content: &str) -> SourceState {
+    let trimmed = content.trim_start();
+    let parts = trimmed
+        .split("---")
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if !trimmed.starts_with("---") || parts.len() < 2 {
+        return SourceState::Excluded(
+            "Cursor CLI skips rules that lack a `---` header with text after it".into(),
+        );
+    }
+    let mut fields: HashMap<String, CursorAgentValue> = HashMap::new();
+    let mut in_metadata = false;
+    let mut list: Option<String> = None;
+    for line in parts[0].trim().split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(key) = &list
+            && let Some(item) = cursor_agent_list_item(line)
+        {
+            if let Some(CursorAgentValue::List(items)) = fields.get_mut(key) {
+                items.push(cursor_agent_unquote(item).to_owned());
+            }
+            continue;
+        }
+        if in_metadata && (line.starts_with("  ") || line.starts_with('\t')) {
+            let Some((key, value)) = line.trim().split_once(':') else {
+                continue;
+            };
+            let (key, value) = (format!("metadata.{}", key.trim()), value.trim());
+            list = value.is_empty().then(|| key.clone());
+            let value = if value.is_empty() {
+                CursorAgentValue::List(Vec::new())
+            } else {
+                cursor_agent_scalar(value)
+            };
+            fields.insert(key, value);
+            continue;
+        }
+        in_metadata = false;
+        list = None;
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if value.is_empty() && key == "metadata" {
+            in_metadata = true;
+        } else if value.is_empty() && key == "globs" {
+            fields.insert(key.into(), CursorAgentValue::List(Vec::new()));
+            list = Some(key.into());
+        } else {
+            fields.insert(key.into(), cursor_agent_scalar(value));
+        }
+    }
+
+    if matches!(
+        fields.get("alwaysApply"),
+        Some(CursorAgentValue::Bool(true))
+    ) {
+        return SourceState::Startup;
+    }
+    let globs = match fields.get("globs") {
+        Some(CursorAgentValue::Text(raw)) => cursor_agent_globs(raw),
+        Some(CursorAgentValue::List(items)) => items
+            .iter()
+            .map(|item| item.trim().to_owned())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !globs.is_empty() {
+        return SourceState::Conditional(format!("declares globs: {}", globs.join(", ")));
+    }
+    if let Some(CursorAgentValue::Text(description)) = fields.get("description")
+        && !description.trim().is_empty()
+    {
+        return SourceState::Relevant(format!(
+            "Cursor decides when this rule is relevant: {description}"
+        ));
+    }
+    SourceState::Relevant("loaded when explicitly selected in Cursor".into())
+}
+
+fn cursor_agent_scalar(value: &str) -> CursorAgentValue {
+    match value {
+        "true" => CursorAgentValue::Bool(true),
+        "false" => CursorAgentValue::Bool(false),
+        _ => CursorAgentValue::Text(cursor_agent_unquote(value).to_owned()),
+    }
+}
+
+fn cursor_agent_unquote(value: &str) -> &str {
+    ['"', '\'']
+        .into_iter()
+        .find_map(|quote| value.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(value)
+}
+
+/// An indented `- item` line; Cursor CLI ignores unindented list items.
+fn cursor_agent_list_item(line: &str) -> Option<&str> {
+    let rest = line.trim_start();
+    let after = rest.strip_prefix('-').filter(|_| rest.len() < line.len())?;
+    let item = after.trim_start();
+    (item.len() < after.len()).then_some(item)
+}
+
+/// Splits a `globs` string on commas outside `{...}` alternatives, as Cursor CLI does.
+fn cursor_agent_globs(raw: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let (mut start, mut depth) = (0, 0_usize);
+    for (index, character) in raw.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&raw[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        parts.extend(raw[start..].split(','));
+    } else {
+        parts.push(&raw[start..]);
+    }
+    parts
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn push_cursor_rules(
     sources: &mut Vec<ContextSource>,
     seen: &mut HashSet<PathBuf>,
@@ -1015,8 +1416,26 @@ fn push_cursor_rules(
     paths: &Paths,
     directory: &Path,
 ) {
+    for rule in cursor_rule_files(root) {
+        let state = fs::read_to_string(&rule).map_or_else(
+            |error| SourceState::Unreadable(error.to_string()),
+            |content| cursor_rule_state(&content),
+        );
+        push_with_state(
+            sources,
+            seen,
+            &rule,
+            "project rule",
+            state,
+            paths,
+            directory,
+        );
+    }
+}
+
+fn cursor_rule_files(root: &Path) -> Vec<PathBuf> {
     if !root.is_dir() {
-        return;
+        return Vec::new();
     }
     let mut rules = WalkDir::new(root)
         .follow_links(true)
@@ -1032,21 +1451,7 @@ fn push_cursor_rules(
         .map(DirEntry::into_path)
         .collect::<Vec<_>>();
     rules.sort();
-    for rule in rules {
-        let state = fs::read_to_string(&rule).map_or_else(
-            |error| SourceState::Unreadable(error.to_string()),
-            |content| cursor_rule_state(&content),
-        );
-        push_with_state(
-            sources,
-            seen,
-            &rule,
-            "project rule",
-            state,
-            paths,
-            directory,
-        );
-    }
+    rules
 }
 
 fn cursor_rule_state(content: &str) -> SourceState {
@@ -1598,13 +2003,17 @@ fn push_with_state(
     paths: &Paths,
     directory: &Path,
 ) {
-    let group = match state {
+    if seen.insert(path.to_owned()) {
+        let group = source_group(&state);
+        push_source(sources, path, scope, group, state, paths, directory);
+    }
+}
+
+const fn source_group(state: &SourceState) -> SourceGroup {
+    match state {
         SourceState::Conditional(_) | SourceState::Relevant(_) => SourceGroup::PathFiltered,
         SourceState::Nested(_) => SourceGroup::Nested,
         _ => SourceGroup::Startup,
-    };
-    if seen.insert(path.to_owned()) {
-        push_source(sources, path, scope, group, state, paths, directory);
     }
 }
 
@@ -2484,6 +2893,148 @@ mod tests {
                 .iter()
                 .all(|source| source.path != root.join(".cursor/rules/ignored.md"))
         );
+    }
+
+    #[test]
+    fn cursor_agent_reports_the_cli_load_chain() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        let cwd = root.join("app");
+        fs::create_dir_all(cwd.join("sub")).unwrap();
+        fs::create_dir_all(root.join(".cursor/rules")).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(temp.path().join("AGENTS.md"), "cursor-agent fixture: above").unwrap();
+        fs::write(root.join("AGENTS.md"), "cursor-agent fixture:\nroot\n").unwrap();
+        symlink(root.join("AGENTS.md"), root.join("CLAUDE.md")).unwrap();
+        // The cut lands inside a two-byte character and backs up to its start.
+        let mut local = "a".repeat(CURSOR_AGENT_MAX_MARKDOWN_BYTES - 1);
+        local.push_str("é and more");
+        fs::write(root.join("CLAUDE.local.md"), &local).unwrap();
+        fs::write(root.join(".cursorrules"), "legacy").unwrap();
+        // Only the Git root's .cursorrules loads.
+        fs::write(cwd.join(".cursorrules"), "not loaded").unwrap();
+        // CRLF is normalized before duplicates are compared.
+        fs::write(cwd.join("CLAUDE.md"), "cursor-agent fixture:\r\nroot\r\n").unwrap();
+        // Invalid UTF-8 past the cut must not stop the audit.
+        fs::write(
+            cwd.join("CLAUDE.local.md"),
+            vec![0x80; CURSOR_AGENT_MAX_MARKDOWN_BYTES + 1],
+        )
+        .unwrap();
+        fs::write(cwd.join("AGENTS.md"), b"binary\0instructions").unwrap();
+        fs::write(cwd.join("sub/AGENTS.md"), "on demand").unwrap();
+        for (name, rule) in [
+            (
+                "leading-blank.mdc",
+                "\n---\nalwaysApply: true\n---\nalways\n",
+            ),
+            ("quoted.mdc", "---\nalwaysApply: \"true\"\n---\nmanual\n"),
+            (
+                "repeated.mdc",
+                "---\nalwaysApply: true\nalwaysApply: false\n---\nmanual\n",
+            ),
+            ("header-only.mdc", "---\nalwaysApply: true\n---"),
+            ("bare.mdc", "no header"),
+            (
+                "globs.mdc",
+                "---\nglobs: src/{a,b}.rs, Cargo.toml\n---\nrust\n",
+            ),
+            // Rules go through the same text reader as Markdown.
+            ("bom.mdc", "\u{feff}---\nalwaysApply: true\n---\nactive\n"),
+            ("binary.mdc", "---\nalwaysApply: true\n---\nbinary\0body\n"),
+        ] {
+            fs::write(root.join(".cursor/rules").join(name), rule).unwrap();
+        }
+        // UTF-16 picks its line-ending mode from the first 8 KiB, which here is all LF, so the
+        // later CRLF endings stay and push the decoded text past the cut.
+        let mut utf16 = vec![0xFF, 0xFE];
+        let mixed = format!("{}{}", "a\n".repeat(2100), "b\r\n".repeat(40_000));
+        utf16.extend(mixed.encode_utf16().flat_map(u16::to_le_bytes));
+        fs::create_dir_all(temp.path().join("utf16")).unwrap();
+        fs::write(temp.path().join("utf16/AGENTS.md"), utf16).unwrap();
+        let utf16_audit = Audit::resolve(
+            ContextRuntime::CursorAgent,
+            &temp.path().join("utf16"),
+            &paths(temp.path()),
+            None,
+        );
+        assert!(utf16_audit.sources.iter().any(|source| {
+            source.path == temp.path().join("utf16/AGENTS.md")
+                && source.state
+                    == SourceState::Truncated {
+                        included: CURSOR_AGENT_MAX_MARKDOWN_BYTES,
+                        total: mixed.len(),
+                    }
+        }));
+
+        let audit = Audit::resolve(ContextRuntime::CursorAgent, &cwd, &paths(temp.path()), None);
+        let position = |path: PathBuf| audit.sources.iter().position(|source| source.path == path);
+        let state = |path: PathBuf| position(path).map(|index| audit.sources[index].state.clone());
+        let rule = |name: &str| state(root.join(".cursor/rules").join(name));
+
+        for path in [
+            temp.path().join("AGENTS.md"),
+            root.join("AGENTS.md"),
+            root.join(".cursorrules"),
+            root.join(".cursor/rules/leading-blank.mdc"),
+            root.join(".cursor/rules/bom.mdc"),
+        ] {
+            assert_eq!(state(path), Some(SourceState::Startup));
+        }
+        assert_eq!(
+            state(root.join("CLAUDE.local.md")),
+            Some(SourceState::Truncated {
+                included: CURSOR_AGENT_MAX_MARKDOWN_BYTES - 1,
+                total: local.len(),
+            })
+        );
+        assert!(matches!(
+            state(cwd.join("CLAUDE.local.md")),
+            Some(SourceState::Truncated { .. })
+        ));
+        for path in [root.join("CLAUDE.md"), cwd.join("CLAUDE.md")] {
+            assert_eq!(
+                state(path),
+                Some(SourceState::Shadowed(root.join("AGENTS.md")))
+            );
+        }
+        for path in [
+            cwd.join("AGENTS.md"),
+            root.join(".cursor/rules/bare.mdc"),
+            root.join(".cursor/rules/header-only.mdc"),
+            root.join(".cursor/rules/binary.mdc"),
+        ] {
+            assert!(matches!(state(path), Some(SourceState::Excluded(_))));
+        }
+        for name in ["quoted.mdc", "repeated.mdc"] {
+            assert_eq!(
+                rule(name),
+                Some(SourceState::Relevant(
+                    "loaded when explicitly selected in Cursor".into()
+                ))
+            );
+        }
+        assert_eq!(
+            rule("globs.mdc"),
+            Some(SourceState::Conditional(
+                "declares globs: src/{a,b}.rs, Cargo.toml".into()
+            ))
+        );
+        assert_eq!(state(cwd.join(".cursorrules")), None);
+        assert_eq!(state(cwd.join("sub/AGENTS.md")), None);
+        // Collection runs from the launch directory upward.
+        assert!(position(cwd.join("CLAUDE.md")) < position(root.join("AGENTS.md")));
+        assert!(position(root.join("AGENTS.md")) < position(temp.path().join("AGENTS.md")));
     }
 
     #[test]

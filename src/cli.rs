@@ -44,7 +44,7 @@ enum Command {
     Tui,
     /// Show the Markdown instruction files a runtime would load.
     Context {
-        /// Runtime to inspect: claude, codex, cursor, or pi.
+        /// Runtime to inspect: claude, codex, cursor (editor), cursor-agent (CLI), or pi.
         #[arg(long, default_value = "claude")]
         runtime: String,
         /// Emit stable machine-readable output.

@@ -39,7 +39,7 @@ const TOPICS: &[Topic] = &[
     ),
     topic!(
         "cursor",
-        "Understand Cursor AGENTS.md and Project Rules.",
+        "Understand Cursor editor and CLI instructions and Project Rules.",
         "../docs/cursor.md"
     ),
     topic!(

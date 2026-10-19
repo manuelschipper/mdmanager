@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Cursor CLI runtime** — `mdmanager context --runtime cursor-agent` and the TUI's **Cursor CLI**
+  runtime report what `cursor-agent` loads: `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, and
+  `.cursor/rules/**/*.mdc` from every directory up to the filesystem root (including `~/AGENTS.md`),
+  plus `.cursorrules` at the Git root, in the CLI's launch-directory-upward order. Files over
+  100 KiB of decoded text show as partial, duplicates already loaded from a higher directory as
+  `not selected`, and binary files and rules the CLI cannot parse as `excluded`. This follows
+  observed `cursor-agent` 2026.10.16 behavior, which Cursor does not document. The `cursor` runtime
+  is now labeled **Cursor editor**.
+
 ## mdmanager 0.2.0 — Sep 25, 2026
 
 - **Claude reads AGENTS.md** — `mdmanager context --runtime claude` reports `AGENTS.md` and
