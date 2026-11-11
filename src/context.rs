@@ -423,8 +423,7 @@ pub(crate) fn scan_claude_descendants(
             continue;
         }
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy();
-        if matches!(name.as_ref(), "CLAUDE.md" | "CLAUDE.local.md")
+        if is_claude_instruction_path(path)
             && path.parent().is_some_and(|parent| parent != directory)
             && !is_rule_path(path)
         {
@@ -441,7 +440,7 @@ pub(crate) fn scan_claude_descendants(
                 directory,
             );
         } else if agents_md_loads
-            && name == "AGENTS.md"
+            && claude_filename_matches(path, "AGENTS.md")
             && let Some(parent) = path.parent().filter(|parent| *parent != directory)
             && !is_rule_path(path)
             && !path
@@ -571,8 +570,10 @@ fn apply_claude_exclusions(sources: &mut [ContextSource], directory: &Path, path
 
 fn annotate_claude_imports(sources: &mut [ContextSource], paths: &Paths) {
     for source in sources {
-        let name = source.path.file_name().and_then(|name| name.to_str());
-        if !matches!(name, Some("CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md")) {
+        if !["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
+            .iter()
+            .any(|name| claude_filename_matches(&source.path, name))
+        {
             continue;
         }
         let parent = source.path.parent().unwrap_or(Path::new("."));
@@ -617,7 +618,7 @@ fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>, pat
     let startup = loaded_by(false);
     let nested = loaded_by(true);
     sources.retain(|source| {
-        source.path.file_name() != Some("AGENTS.md".as_ref())
+        !claude_filename_matches(&source.path, "AGENTS.md")
             || fs::canonicalize(&source.path).map_or(true, |path| {
                 !(startup.contains(&path)
                     || source.group == SourceGroup::Nested && nested.contains(&path))
@@ -740,9 +741,11 @@ fn claude_instruction_files(directory: &Path, paths: &Paths) -> ClaudeInstructio
             Some((path, value))
         })
         .collect::<Vec<_>>();
+    // Claude Code 2.1.311 prefers the new ID within each settings file.
     let enabled = settings.iter().find_map(|(_, value)| {
         value
-            .pointer("/enabledPlugins/agents-md@builtin")?
+            .pointer("/enabledPlugins/cc-plugin-agents-md@builtin")
+            .or_else(|| value.pointer("/enabledPlugins/agents-md@builtin"))?
             .as_bool()
     });
     if enabled == Some(false) {
@@ -755,7 +758,10 @@ fn claude_instruction_files(directory: &Path, paths: &Paths) -> ClaudeInstructio
         .filter(|(path, _)| path.starts_with(claude_managed_dir()) || *path == user)
         .find_map(|(_, value)| {
             value
-                .pointer("/pluginConfigs/agents-md@builtin/options/instructionFiles")?
+                .pointer("/pluginConfigs/cc-plugin-agents-md@builtin/options/instructionFiles")
+                .or_else(|| {
+                    value.pointer("/pluginConfigs/agents-md@builtin/options/instructionFiles")
+                })?
                 .as_str()
         });
     match configured {
@@ -1992,10 +1998,38 @@ fn is_rule_path(path: &Path) -> bool {
 }
 
 fn is_claude_instruction_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, "CLAUDE.md" | "CLAUDE.local.md"))
+    ["CLAUDE.md", "CLAUDE.local.md"]
+        .iter()
+        .any(|name| claude_filename_matches(path, name))
         || is_rule_path(path)
+}
+
+fn claude_filename_matches(path: &Path, name: &str) -> bool {
+    path.file_name().is_some_and(|file_name| {
+        if file_name == name {
+            return true;
+        }
+        if !file_name.eq_ignore_ascii_case(name) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            // Compare directory entries so a separate symlink alias does not count.
+            match (
+                fs::symlink_metadata(path),
+                fs::symlink_metadata(path.with_file_name(name)),
+            ) {
+                (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            priority_same_file(path, &path.with_file_name(name))
+        }
+    })
 }
 
 fn ancestors_from_root(path: &Path) -> Vec<PathBuf> {
@@ -2211,28 +2245,44 @@ mod tests {
         };
         let set = |file: &Path, value: &str| fs::write(file, value).unwrap();
         let user_settings = temp.path().join(".claude/settings.json");
-        let instruction_files = |value: &str| {
+        let instruction_files = |plugin: &str, value: &str| {
             format!(
-                "{{\"pluginConfigs\":{{\"agents-md@builtin\":{{\"options\":{{\"instructionFiles\":\"{value}\"}}}}}}}}"
+                "{{\"pluginConfigs\":{{\"{plugin}\":{{\"options\":{{\"instructionFiles\":\"{value}\"}}}}}}}}"
             )
         };
 
+        for plugin in ["agents-md@builtin", "cc-plugin-agents-md@builtin"] {
+            set(
+                &user_settings,
+                &instruction_files(plugin, "claude-md-and-agents-md"),
+            );
+            let loaded = loaded(&home);
+            assert!(loaded.contains(&cwd.join("CLAUDE.md")));
+            assert!(loaded.contains(&cwd.join("AGENTS.md")));
+            // The two-hop import already loads child/AGENTS.md; Claude never reads .agents/.
+            assert!(!loaded.contains(&cwd.join("child/AGENTS.md")));
+            assert!(!loaded.contains(&cwd.join(".agents/AGENTS.md")));
+        }
         set(
             &user_settings,
-            &instruction_files("claude-md-and-agents-md"),
+            &serde_json::json!({
+                "pluginConfigs": {
+                    "agents-md@builtin": {"options": {"instructionFiles": "claude-md"}},
+                    "cc-plugin-agents-md@builtin": {
+                        "options": {"instructionFiles": "claude-md-and-agents-md"}
+                    }
+                }
+            })
+            .to_string(),
         );
-        assert!(loaded(&home).contains(&cwd.join("CLAUDE.md")));
         assert!(loaded(&home).contains(&cwd.join("AGENTS.md")));
-        // The two-hop import already loads child/AGENTS.md; Claude never reads .agents/.
-        assert!(!loaded(&home).contains(&cwd.join("child/AGENTS.md")));
-        assert!(!loaded(&home).contains(&cwd.join(".agents/AGENTS.md")));
         // An excluded importer loads nothing, so the imported file loads on its own.
         set(
             &user_settings,
             &format!(
                 "{{\"claudeMdExcludes\":[{}],{}",
                 serde_json::to_string(&cwd.join("CLAUDE.md")).unwrap(),
-                &instruction_files("claude-md-and-agents-md")[1..]
+                &instruction_files("cc-plugin-agents-md@builtin", "claude-md-and-agents-md")[1..]
             ),
         );
         assert!(loaded(&home).contains(&cwd.join("child/AGENTS.md")));
@@ -2241,22 +2291,135 @@ mod tests {
         set(&user_settings, "{}");
         set(
             &cwd.join(".claude/settings.json"),
-            &instruction_files("claude-md-and-agents-md"),
+            &instruction_files("cc-plugin-agents-md@builtin", "claude-md-and-agents-md"),
         );
         assert!(!loaded(&home).contains(&cwd.join("AGENTS.md")));
 
-        set(&user_settings, &instruction_files("managed-only"));
+        set(
+            &user_settings,
+            &instruction_files("cc-plugin-agents-md@builtin", "managed-only"),
+        );
         assert_eq!(loaded(&home), [cwd.join(".claude/rules/tests.md")]);
 
         // Disabling the built-in plugin reads CLAUDE.md files only.
         fs::remove_file(cwd.join("CLAUDE.md")).unwrap();
         set(&user_settings, "{}");
         assert!(loaded(&home).contains(&cwd.join("AGENTS.md")));
+        let local_settings = cwd.join(".claude/settings.local.json");
         set(
-            &cwd.join(".claude/settings.local.json"),
-            "{\"enabledPlugins\":{\"agents-md@builtin\":false}}",
+            &local_settings,
+            r#"{"enabledPlugins":{"agents-md@builtin":false}}"#,
         );
         assert!(!loaded(&home).contains(&cwd.join("AGENTS.md")));
+        for enabled in [false, true] {
+            set(
+                &local_settings,
+                &serde_json::json!({
+                    "enabledPlugins": {
+                        "agents-md@builtin": !enabled,
+                        "cc-plugin-agents-md@builtin": enabled
+                    }
+                })
+                .to_string(),
+            );
+            assert_eq!(loaded(&home).contains(&cwd.join("AGENTS.md")), enabled);
+        }
+    }
+
+    #[test]
+    fn claude_descendant_filenames_follow_filesystem_case_rules() {
+        let temp = TempDir::new().unwrap();
+        let home = paths(temp.path());
+        let cwd = temp.path().join("repo");
+        fs::create_dir_all(temp.path().join(".claude")).unwrap();
+        fs::write(
+            temp.path().join(".claude/settings.json"),
+            r#"{"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"claude-md-and-agents-md"}}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(cwd.join("canonical")).unwrap();
+        fs::write(cwd.join("canonical/CLAUDE.md"), "canonical").unwrap();
+        fs::write(cwd.join("shared.md"), "shared").unwrap();
+        let variants = [
+            "claude/claude.md",
+            "local/ClAuDe.LoCaL.MD",
+            "agents/aGeNtS.Md",
+        ];
+        for relative in variants {
+            let path = cwd.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "@../shared.md").unwrap();
+        }
+        let case_insensitive = regular_file(&cwd.join("claude/CLAUDE.md"));
+        #[cfg(unix)]
+        let alias_names = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            fs::create_dir(cwd.join("aliases")).unwrap();
+            for name in alias_names {
+                if !case_insensitive {
+                    symlink("../shared.md", cwd.join("aliases").join(name)).unwrap();
+                }
+                symlink(
+                    "../shared.md",
+                    cwd.join("aliases").join(name.to_ascii_lowercase()),
+                )
+                .unwrap();
+            }
+        }
+        let scan = scan_claude_descendants(&cwd, &home, HashSet::new());
+        assert!(scan.sources.iter().any(|source| {
+            source.path == cwd.join("canonical/CLAUDE.md")
+                && matches!(source.state, SourceState::Nested(_))
+        }));
+        for relative in variants {
+            let path = cwd.join(relative);
+            let source = scan.sources.iter().find(|source| source.path == path);
+            assert_eq!(source.is_some(), case_insensitive);
+            if let Some(source) = source {
+                assert!(matches!(source.state, SourceState::Nested(_)));
+                assert_eq!(
+                    source.imports,
+                    [path.parent().unwrap().join("../shared.md")]
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            let aliases = cwd.join("aliases");
+            assert_eq!(
+                scan.sources
+                    .iter()
+                    .filter(|source| source.path.parent() == Some(aliases.as_path()))
+                    .count(),
+                alias_names.len()
+            );
+            for name in alias_names {
+                assert_eq!(
+                    scan.sources
+                        .iter()
+                        .any(|source| source.path == aliases.join(name.to_ascii_lowercase())),
+                    case_insensitive
+                );
+            }
+        }
+
+        // A differently cased CLAUDE file still imports a differently cased AGENTS.md once.
+        fs::write(cwd.join("claude/claude.md"), "@../agents/aGeNtS.Md").unwrap();
+        let mut audit = Audit::resolve(ContextRuntime::Claude, &cwd, &home, None);
+        audit.add_claude_scan(
+            scan_claude_descendants(&cwd, &home, HashSet::new()),
+            &home,
+            None,
+        );
+        assert!(
+            audit
+                .sources
+                .iter()
+                .all(|source| source.path != cwd.join("agents/aGeNtS.Md"))
+        );
     }
 
     #[cfg(unix)]
