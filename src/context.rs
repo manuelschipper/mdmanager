@@ -827,18 +827,27 @@ fn has_claude_md(directory: &Path) -> bool {
         .any(|name| regular_file(&directory.join(name)))
 }
 
-/// `AGENTS.md` files Claude loads at startup in `directory` that a new `CLAUDE.local.md`
-/// there would stop it reading under the default **Project instructions** setting.
-pub(crate) fn agents_md_displaced_by_claude_local(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
+/// Startup `AGENTS.md` files a new Claude file would displace under the default
+/// **Project instructions** setting, unless the new content imports them.
+pub(crate) fn agents_md_displaced_by_claude(
+    directory: &Path,
+    content: &str,
+    paths: &Paths,
+) -> Vec<PathBuf> {
     if claude_instruction_files(directory, paths) != ClaudeInstructionFiles::ClaudeMdOrAgentsMd {
         return Vec::new();
     }
+    let imports = claude_imports(content, directory, &paths.home)
+        .into_iter()
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect::<HashSet<_>>();
     resolve_claude(directory, paths)
         .sources
         .into_iter()
         .filter(|source| {
             source.path.file_name() == Some("AGENTS.md".as_ref())
                 && source.state == SourceState::Startup
+                && !fs::canonicalize(&source.path).is_ok_and(|path| imports.contains(&path))
         })
         .map(|source| source.path)
         .collect()
@@ -2174,7 +2183,22 @@ mod tests {
         ));
         assert_eq!(state(&audit, &cwd.join("docs/AGENTS.md")), None);
         assert_eq!(
-            agents_md_displaced_by_claude_local(&cwd, &home),
+            agents_md_displaced_by_claude(&cwd, "claude", &home),
+            [root.join("AGENTS.md"), cwd.join("AGENTS.md")]
+        );
+        for content in ["@AGENTS.md", "@./AGENTS.md", "@../app/AGENTS.md"] {
+            assert_eq!(
+                agents_md_displaced_by_claude(&cwd, content, &home),
+                [root.join("AGENTS.md")]
+            );
+        }
+        assert_eq!(
+            agents_md_displaced_by_claude(&cwd, "@../AGENTS.md", &home),
+            [cwd.join("AGENTS.md")]
+        );
+        assert!(agents_md_displaced_by_claude(&cwd, "@AGENTS.md\n@../AGENTS.md", &home).is_empty());
+        assert_eq!(
+            agents_md_displaced_by_claude(&cwd, "`@AGENTS.md`\n<!-- @../AGENTS.md -->", &home),
             [root.join("AGENTS.md"), cwd.join("AGENTS.md")]
         );
 
@@ -2192,7 +2216,7 @@ mod tests {
             Some(SourceState::Shadowed(root.join("CLAUDE.local.md")))
         );
         assert_eq!(state(&audit, &cwd.join("lib/AGENTS.md")), None);
-        assert!(agents_md_displaced_by_claude_local(&cwd, &home).is_empty());
+        assert!(agents_md_displaced_by_claude(&cwd, "claude", &home).is_empty());
 
         // An AGENTS.md that a CLAUDE.md imports is read once, through the import.
         fs::write(cwd.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();

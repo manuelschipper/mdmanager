@@ -5,14 +5,13 @@ mod claude_settings;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::{GlobalConfig, Paths, atomic_create, atomic_write, sha256_hex};
 use crate::context::PI_INSTRUCTION_CANDIDATES;
 use crate::deploy::unified_diff;
-use crate::git_worktree::git;
+use crate::git_worktree::{command, git};
 
 /// Local-disable runtime: a runtime with a verified local disable mechanism.
 /// Unsupported: Codex local disable; `parse()` rejects `codex` with the reason.
@@ -1558,7 +1557,7 @@ fn owned_pattern(key: &str, path: &str) -> Result<String, String> {
 }
 
 fn git_status(directory: &Path, arguments: &[&str]) -> Result<bool, String> {
-    let output = Command::new("git")
+    let output = command()
         .args(arguments)
         .current_dir(directory)
         .output()
@@ -1583,7 +1582,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
         assert!(
-            Command::new("git")
+            command()
                 .args(["init", "-q"])
                 .current_dir(repository.path())
                 .status()
@@ -1718,7 +1717,7 @@ mod tests {
         fs::create_dir_all(worktree.parent().unwrap()).unwrap();
         fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
         assert!(
-            Command::new("git")
+            command()
                 .args(["init", "-q", "--separate-git-dir"])
                 .arg(&git_dir)
                 .arg(&worktree)
@@ -1785,7 +1784,7 @@ mod tests {
         fs::create_dir(&origin).unwrap();
         fs::create_dir(&superproject).unwrap();
         assert!(
-            Command::new("git")
+            command()
                 .args(["init", "-q"])
                 .current_dir(&origin)
                 .status()
@@ -1794,7 +1793,7 @@ mod tests {
         );
         for (key, value) in [("user.email", "test@example.com"), ("user.name", "Test")] {
             assert!(
-                Command::new("git")
+                command()
                     .args(["config", key, value])
                     .current_dir(&origin)
                     .status()
@@ -1804,7 +1803,7 @@ mod tests {
         }
         fs::write(origin.join("CLAUDE.md"), "claude\n").unwrap();
         assert!(
-            Command::new("git")
+            command()
                 .args(["add", "CLAUDE.md"])
                 .current_dir(&origin)
                 .status()
@@ -1812,7 +1811,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            command()
                 .args(["commit", "-qm", "fixture"])
                 .current_dir(&origin)
                 .status()
@@ -1820,7 +1819,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            command()
                 .args(["init", "-q"])
                 .current_dir(&superproject)
                 .status()
@@ -1828,7 +1827,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            command()
                 .args(["-c", "protocol.file.allow=always", "submodule", "add", "-q"])
                 .arg(&origin)
                 .arg("submodule")
@@ -2664,7 +2663,7 @@ mod tests {
     fn managed_status_distinguishes_stale_and_modified() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2701,7 +2700,7 @@ mod tests {
     fn managed_override_can_start_without_a_project_agents_file() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2729,7 +2728,7 @@ mod tests {
     fn managed_apply_rejects_an_exclusion_change_after_review() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2754,7 +2753,7 @@ mod tests {
     fn managed_apply_repairs_a_missing_exclusion_for_current_content() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2796,7 +2795,7 @@ mod tests {
     fn local_manifest_keeps_both_managed_targets() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2829,7 +2828,7 @@ mod tests {
     fn adopt_reports_content_mismatch_before_missing_exclusion() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2851,7 +2850,7 @@ mod tests {
     fn adopt_directs_the_missing_exclusion_without_writing_it() {
         let home = TempDir::new().unwrap();
         let repository = TempDir::new().unwrap();
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(repository.path())
             .status()
@@ -2879,34 +2878,34 @@ mod tests {
         let main = TempDir::new().unwrap();
         let linked_parent = TempDir::new().unwrap();
         let linked = linked_parent.path().join("linked");
-        Command::new("git")
+        command()
             .args(["init", "-q"])
             .current_dir(main.path())
             .status()
             .unwrap();
-        Command::new("git")
+        command()
             .args(["config", "user.email", "test@example.com"])
             .current_dir(main.path())
             .status()
             .unwrap();
-        Command::new("git")
+        command()
             .args(["config", "user.name", "Test"])
             .current_dir(main.path())
             .status()
             .unwrap();
         fs::write(main.path().join("AGENTS.md"), "shared\n").unwrap();
-        Command::new("git")
+        command()
             .args(["add", "AGENTS.md"])
             .current_dir(main.path())
             .status()
             .unwrap();
-        Command::new("git")
+        command()
             .args(["commit", "-qm", "fixture"])
             .current_dir(main.path())
             .status()
             .unwrap();
         assert!(
-            Command::new("git")
+            command()
                 .args(["worktree", "add", "-qb", "linked", linked.to_str().unwrap()])
                 .current_dir(main.path())
                 .status()

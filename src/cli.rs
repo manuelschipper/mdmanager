@@ -211,7 +211,7 @@ fn execute(cli: Cli) -> Result<ExitCode, String> {
         return context_command(&paths, runtime, *json);
     }
     if let Some(Command::Project { command }) = &cli.command {
-        return project_command(command.clone());
+        return project_command(&paths, command.clone());
     }
     if let Some(Command::Local { command }) = &cli.command {
         return local_command(&paths, command.clone());
@@ -580,12 +580,7 @@ fn local_command(paths: &Paths, command: LocalCommand) -> Result<ExitCode, Strin
             if target == local::ManagedTarget::Claude
                 && let Some(root) = view.path.parent()
             {
-                for agents in crate::context::agents_md_displaced_by_claude_local(root, paths) {
-                    println!(
-                        "Warning: Claude will stop reading {}. By default Claude reads AGENTS.md only when no CLAUDE.md or CLAUDE.local.md is on the launch path; set Project instructions to claude-md-and-agents-md in /config to keep both.",
-                        agents.display()
-                    );
-                }
+                warn_displaced_agents_md(root, &view.rendered, paths);
             }
             if !confirm_or_require_yes("Apply these managed local instructions?", yes)? {
                 println!("Cancelled.");
@@ -598,7 +593,16 @@ fn local_command(paths: &Paths, command: LocalCommand) -> Result<ExitCode, Strin
     }
 }
 
-fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
+fn warn_displaced_agents_md(directory: &std::path::Path, content: &str, paths: &Paths) {
+    for agents in crate::context::agents_md_displaced_by_claude(directory, content, paths) {
+        println!(
+            "Warning: Claude will stop reading {}. By default Claude reads AGENTS.md only when no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md is on the launch path; add an @AGENTS.md import in the Claude file, or set Project instructions to claude-md-and-agents-md in /config to keep both.",
+            agents.display()
+        );
+    }
+}
+
+fn project_command(paths: &Paths, command: ProjectCommand) -> Result<ExitCode, String> {
     let directory = std::env::current_dir()
         .map_err(|error| format!("cannot determine launch directory: {error}"))?;
     match command {
@@ -683,6 +687,9 @@ fn project_command(command: ProjectCommand) -> Result<ExitCode, String> {
                 if view.status != project::ProjectTargetStatus::Current {
                     changed = true;
                     println!("{}", view.diff);
+                    if target == "claude" {
+                        warn_displaced_agents_md(&workspace.root, &view.expected, paths);
+                    }
                 }
             }
             if !changed {

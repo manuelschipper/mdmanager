@@ -9,6 +9,10 @@
   `CLAUDE.local.md`, and `AGENTS.md` when the filesystem resolves their canonical names to the
   same directory entries, without following symlink aliases. Paths retain their on-disk casing,
   imports are listed, and imported files appear once.
+- **Project Claude instructions warn about AGENTS.md** — Project apply now warns before creating
+  `CLAUDE.md` would stop Claude reading a loaded `AGENTS.md`. Project and Local apply suppress the
+  warning for files imported by the rendered content and suggest an import or the
+  `claude-md-and-agents-md` Project instructions setting to keep them loaded.
 
 ## mdmanager 0.4.0 — Oct 19, 2026
 

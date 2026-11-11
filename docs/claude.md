@@ -66,9 +66,10 @@ does not apply, so start in the directory that holds it.
 
 `CLAUDE.local.md` adds to `CLAUDE.md`: Claude reads it after `CLAUDE.md` at that directory level.
 It is also a `CLAUDE` file, so in a repository that relies on `AGENTS.md` it stops Claude reading
-`AGENTS.md` under the default **Project instructions** setting. `mdmanager local apply claude` warns
-before that happens; set **Project instructions** to `claude-md-and-agents-md` in `/config` to keep
-both. Use
+`AGENTS.md` under the default **Project instructions** setting. `mdmanager local apply claude` and
+`mdmanager project apply` warn before writing a Claude file that would displace a loaded `AGENTS.md`,
+unless the rendered content imports it. Add an `@AGENTS.md` import in the Claude file, or set
+**Project instructions** to `claude-md-and-agents-md` in `/config` to keep both. Use
 `mdmanager local create claude SECTION`, `mdmanager local adopt claude SECTION`,
 `mdmanager local render claude`, and `mdmanager local apply claude --yes` to manage it. The Local
 composition references Personal Sections from `~/.mdmanager/sections/`; do not include the same
