@@ -4,10 +4,11 @@
 
 - **Claude plugin ID** — Context reads `cc-plugin-agents-md@builtin` as well as the old
   `agents-md@builtin` ID for Project instructions and plugin enablement, so settings written by
-  newer Claude Code versions select `AGENTS.md` correctly. The new ID wins within one settings file.
+  newer Claude Code versions are read correctly. The new ID wins within one settings file.
 - **Claude subfolder filename casing** — Context discovers differently cased `CLAUDE.md`,
   `CLAUDE.local.md`, and `AGENTS.md` when the filesystem resolves their canonical names to the
-  same files. Paths retain their on-disk casing, imports are listed, and imported files appear once.
+  same directory entries, without following symlink aliases. Paths retain their on-disk casing,
+  imports are listed, and imported files appear once.
 
 ## mdmanager 0.4.0 — Oct 19, 2026
 

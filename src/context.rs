@@ -741,8 +741,7 @@ fn claude_instruction_files(directory: &Path, paths: &Paths) -> ClaudeInstructio
             Some((path, value))
         })
         .collect::<Vec<_>>();
-    // Claude accepts both IDs but does not document their precedence; prefer the new ID
-    // within each settings file.
+    // Claude Code 2.1.311 prefers the new ID within each settings file.
     let enabled = settings.iter().find_map(|(_, value)| {
         value
             .pointer("/enabledPlugins/cc-plugin-agents-md@builtin")
@@ -2007,9 +2006,29 @@ fn is_claude_instruction_path(path: &Path) -> bool {
 
 fn claude_filename_matches(path: &Path, name: &str) -> bool {
     path.file_name().is_some_and(|file_name| {
-        file_name == name
-            || (file_name.eq_ignore_ascii_case(name)
-                && priority_same_file(path, &path.with_file_name(name)))
+        if file_name == name {
+            return true;
+        }
+        if !file_name.eq_ignore_ascii_case(name) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            // Compare directory entries so a separate symlink alias does not count.
+            match (
+                fs::symlink_metadata(path),
+                fs::symlink_metadata(path.with_file_name(name)),
+            ) {
+                (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            priority_same_file(path, &path.with_file_name(name))
+        }
     })
 }
 
@@ -2287,13 +2306,11 @@ mod tests {
         set(&user_settings, "{}");
         assert!(loaded(&home).contains(&cwd.join("AGENTS.md")));
         let local_settings = cwd.join(".claude/settings.local.json");
-        for plugin in ["agents-md@builtin", "cc-plugin-agents-md@builtin"] {
-            set(
-                &local_settings,
-                &serde_json::json!({"enabledPlugins": {plugin: false}}).to_string(),
-            );
-            assert!(!loaded(&home).contains(&cwd.join("AGENTS.md")));
-        }
+        set(
+            &local_settings,
+            r#"{"enabledPlugins":{"agents-md@builtin":false}}"#,
+        );
+        assert!(!loaded(&home).contains(&cwd.join("AGENTS.md")));
         for enabled in [false, true] {
             set(
                 &local_settings,
@@ -2334,6 +2351,24 @@ mod tests {
             fs::write(path, "@../shared.md").unwrap();
         }
         let case_insensitive = regular_file(&cwd.join("claude/CLAUDE.md"));
+        #[cfg(unix)]
+        let alias_names = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            fs::create_dir(cwd.join("aliases")).unwrap();
+            for name in alias_names {
+                if !case_insensitive {
+                    symlink("../shared.md", cwd.join("aliases").join(name)).unwrap();
+                }
+                symlink(
+                    "../shared.md",
+                    cwd.join("aliases").join(name.to_ascii_lowercase()),
+                )
+                .unwrap();
+            }
+        }
         let scan = scan_claude_descendants(&cwd, &home, HashSet::new());
         assert!(scan.sources.iter().any(|source| {
             source.path == cwd.join("canonical/CLAUDE.md")
@@ -2348,6 +2383,25 @@ mod tests {
                 assert_eq!(
                     source.imports,
                     [path.parent().unwrap().join("../shared.md")]
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            let aliases = cwd.join("aliases");
+            assert_eq!(
+                scan.sources
+                    .iter()
+                    .filter(|source| source.path.parent() == Some(aliases.as_path()))
+                    .count(),
+                alias_names.len()
+            );
+            for name in alias_names {
+                assert_eq!(
+                    scan.sources
+                        .iter()
+                        .any(|source| source.path == aliases.join(name.to_ascii_lowercase())),
+                    case_insensitive
                 );
             }
         }
