@@ -1177,6 +1177,67 @@ fn project_create_authors_management_then_applies_the_root_file() {
         fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
         "# New project instructions\n"
     );
+
+    let created = mdmanager_in(
+        home.path(),
+        repository.path(),
+        &[
+            "project",
+            "create",
+            "claude",
+            "--from",
+            draft.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert!(created.status.success());
+    assert!(!repository.path().join("CLAUDE.md").exists());
+    let agents = repository.path().join("AGENTS.md").canonicalize().unwrap();
+    for (content, warns) in [
+        ("# Claude instructions\n", true),
+        ("`@AGENTS.md`\n", true),
+        ("@AGENTS.md\n", false),
+    ] {
+        fs::write(
+            repository.path().join(".mdmanager/sections/claude.md"),
+            content,
+        )
+        .unwrap();
+        for arguments in [
+            &["project", "apply", "claude"][..],
+            &["project", "apply"][..],
+        ] {
+            let before = (files(home.path()), files(repository.path()));
+            let plan = mdmanager_in(home.path(), repository.path(), arguments);
+            assert!(!plan.status.success());
+            assert!(String::from_utf8_lossy(&plan.stderr).contains("requires --yes"));
+            assert_eq!((files(home.path()), files(repository.path())), before);
+            let output = String::from_utf8(plan.stdout).unwrap();
+            let warnings = output
+                .lines()
+                .filter(|line| line.starts_with("Warning:"))
+                .collect::<Vec<_>>();
+            assert_eq!(warnings.len(), usize::from(warns));
+            if warns {
+                assert!(warnings[0].contains(agents.to_str().unwrap()));
+            }
+        }
+    }
+    let applied = mdmanager_in(
+        home.path(),
+        repository.path(),
+        &["project", "apply", "--yes"],
+    );
+    assert!(applied.status.success());
+    assert!(
+        !String::from_utf8_lossy(&applied.stdout)
+            .lines()
+            .any(|line| line.starts_with("Warning:"))
+    );
+    assert_eq!(
+        fs::read_to_string(repository.path().join("CLAUDE.md")).unwrap(),
+        "@AGENTS.md\n"
+    );
 }
 
 #[test]
@@ -1379,7 +1440,7 @@ fn managed_claude_local_instructions_are_additive() {
             .unwrap()
             .success()
     );
-    fs::write(repository.path().join("CLAUDE.md"), "# Shared Claude\n").unwrap();
+    fs::write(repository.path().join("AGENTS.md"), "# Shared Claude\n").unwrap();
     add_personal_section(
         home.path(),
         "claude-local",
@@ -1403,6 +1464,42 @@ fn managed_claude_local_instructions_are_additive() {
             .contains("personal Section claude-local")
     );
     assert!(!repository.path().join("CLAUDE.local.md").exists());
+
+    let agents = repository.path().join("AGENTS.md").canonicalize().unwrap();
+    for (content, warns) in [
+        ("# Local Claude instructions\n", true),
+        ("@AGENTS.md\n", false),
+    ] {
+        fs::write(
+            home.path().join(".mdmanager/sections/claude-local.md"),
+            content,
+        )
+        .unwrap();
+        let before = (files(home.path()), files(repository.path()));
+        let plan = mdmanager_in(
+            home.path(),
+            repository.path(),
+            &["local", "apply", "claude"],
+        );
+        assert!(!plan.status.success());
+        assert!(String::from_utf8_lossy(&plan.stderr).contains("requires --yes"));
+        assert_eq!((files(home.path()), files(repository.path())), before);
+        let output = String::from_utf8(plan.stdout).unwrap();
+        let warnings = output
+            .lines()
+            .filter(|line| line.starts_with("Warning:"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), usize::from(warns));
+        if warns {
+            assert!(warnings[0].contains(agents.to_str().unwrap()));
+        }
+    }
+    fs::write(repository.path().join("CLAUDE.md"), "# Shared Claude\n").unwrap();
+    fs::write(
+        home.path().join(".mdmanager/sections/claude-local.md"),
+        "# Local Claude instructions\n",
+    )
+    .unwrap();
 
     let applied = mdmanager_in(
         home.path(),

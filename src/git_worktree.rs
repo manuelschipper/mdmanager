@@ -2,9 +2,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub(crate) fn command() -> Command {
+    let command = Command::new("git");
+    #[cfg(test)]
+    let command = {
+        let mut command = command;
+        // Unit tests must not inherit personal config or Git's default global ignore file.
+        command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "core.excludesFile=/dev/null"]);
+        command
+    };
+    command
+}
+
 /// Git worktree root reported by Git, including linked worktrees.
 pub(crate) fn worktree_root(start: &Path) -> Result<PathBuf, String> {
-    let output = Command::new("git")
+    let output = command()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(start)
         .output()
@@ -39,7 +54,7 @@ pub(crate) fn main_worktree(root: &Path) -> Result<PathBuf, String> {
 
 /// Git discovery and Local mutation queries retain command failure details.
 pub(crate) fn git(directory: &Path, arguments: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = command()
         .args(arguments)
         .current_dir(directory)
         .output()
