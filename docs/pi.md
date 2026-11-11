@@ -11,8 +11,8 @@ main checkout, its selected root file suppresses the main checkout's file with t
 Context shows that main file as not selected and names the worktree file. Different filenames,
 sibling worktrees, bare repository layouts, and submodules keep normal ancestor inheritance.
 
-Context follows the resource loader in [earendil-works/pi](https://github.com/earendil-works/pi),
-the current Pi repository. Candidate aliases on case-insensitive filesystems appear only once.
+Context follows Pi 1.5.2's [resource loader](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/src/core/resource-loader.ts).
+Candidate aliases on case-insensitive filesystems appear only once.
 
 ## Managed files
 

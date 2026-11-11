@@ -19,11 +19,13 @@ loading at startup. Claude never reads `AGENTS.override.md`,
 
 The **Project instructions** setting changes this: `claude-md-and-agents-md` loads both,
 `claude-md` loads `CLAUDE.md` only, and `managed-only` loads only the managed `CLAUDE.md` at launch.
-mdmanager reads it from `pluginConfigs["agents-md@builtin"].options.instructionFiles` in user or
-managed settings files, and treats `"agents-md@builtin": false` under `enabledPlugins` as
-`claude-md` when it is the highest-precedence entry. It does not see MDM or server-managed policy, `--settings` files, or the Claude
-Code version; on older versions, or in the first session after upgrading, Claude reads `CLAUDE.md`
-files only.
+mdmanager reads it from `pluginConfigs["cc-plugin-agents-md@builtin"].options.instructionFiles` in
+user or managed settings files, and treats `"cc-plugin-agents-md@builtin": false` under
+`enabledPlugins` as `claude-md` when it is the highest-precedence entry. It also reads the old
+`agents-md@builtin` ID in both settings, preferring the new ID when both occur in one file. Claude
+Code 2.1.285 and later accept either ID. mdmanager does not see MDM or server-managed policy,
+`--settings` files, or the Claude Code version; on older versions, or in the first session after
+upgrading, Claude reads `CLAUDE.md` files only.
 
 Project and user `.claude/rules/**/*.md` files are also instructions. Rules without `paths` YAML
 frontmatter load generally. Rules with `paths` load when Claude works with matching files. Symlinked

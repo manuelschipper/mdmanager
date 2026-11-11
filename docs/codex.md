@@ -21,7 +21,7 @@ project instructions; global instructions remain eligible. Trust lookup checks t
 before the Git repository's main checkout, trying canonical paths before path aliases. A matching
 launch-directory entry takes precedence even when it has no trust level.
 
-These rules follow Codex CLI 0.156.1. Context does not merge Codex's system, project `.codex`, profile,
+These rules follow Codex CLI 0.167.1. Context does not merge Codex's system, project `.codex`, profile,
 or command-line configuration layers, so overrides in those layers can change the actual load chain.
 It does not manage Codex TOML or system/model instruction settings.
 
