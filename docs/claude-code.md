@@ -8,11 +8,11 @@ Claude works in their subtree.
 ## AGENTS.md
 
 Claude Code 2.1.277 and later read `AGENTS.md` and `.claude/AGENTS.md` directly. By default Claude
-reads them only when no `CLAUDE.md`, `.claude/CLAUDE.md`, or `CLAUDE.local.md` exists in the launch
-directory or above it; the user and managed `CLAUDE.md` and `.claude/rules/` do not count. Any one of
+reads them only when no unexcluded `CLAUDE.md`, `.claude/CLAUDE.md`, or `CLAUDE.local.md` exists in
+the launch directory or above it; the user and managed `CLAUDE.md` and `.claude/rules/` do not count. Any one of
 those files turns off every `AGENTS.md`: `mdmanager context` shows the launch-path files as
 `not selected` and omits subfolder files. Otherwise a subfolder `AGENTS.md` loads on demand unless
-that subfolder has its own `CLAUDE` file. An `AGENTS.md` that a startup `CLAUDE.md` imports or
+that subfolder has its own unexcluded `CLAUDE` file. An `AGENTS.md` that a startup `CLAUDE.md` imports or
 symlinks to loads once, through that file; a subfolder `CLAUDE.md` that imports it does not stop it
 loading at startup. Claude never reads `AGENTS.override.md`,
 `AGENTS.local.md`, or anything under `.agents/`.
@@ -56,8 +56,8 @@ To disable a shared Claude rule only on this machine, the user's coding agent sh
 
 The same steps disable a shared `AGENTS.md` that Claude reads directly. Claude matches
 `claudeMdExcludes` patterns against absolute file paths. A bare relative name such
-as `CLAUDE.md` does not match a project file. For a symlinked file, a pattern can name either the
-link path or its resolved target.
+as `CLAUDE.md` does not match a project file. Patterns for symlinked `CLAUDE.md`, `CLAUDE.local.md`,
+and `AGENTS.md` match the link path; only rules also match their resolved target.
 
 The same setting can exclude an inherited `CLAUDE.md`. Remove only an exclusion the user asked the
 agent to remove; broader globs may come from another settings layer. mdmanager merges exclusions

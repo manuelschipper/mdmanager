@@ -604,7 +604,7 @@ fn warn_displaced_agents_md(
         managed_agents_covered,
     ) {
         println!(
-            "Warning: Claude will not read {} after this apply. By default Claude reads AGENTS.md only when no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md is on the launch path; add an @AGENTS.md import in the Claude file, or set Project instructions to claude-md-and-agents-md in /config to keep both.",
+            "Warning: Claude will not read {} after this apply. By default Claude reads AGENTS.md only when no unexcluded CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md is on the launch path; add an @AGENTS.md import in the Claude file, or set Project instructions to claude-md-and-agents-md in /config to keep both.",
             agents.display()
         );
     }
