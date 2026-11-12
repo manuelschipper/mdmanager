@@ -367,6 +367,24 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
     skip_agents_md_loaded_through_claude_md(&mut sources, paths);
     sort_sources(&mut sources);
 
+    let warnings = claude_settings_files(directory, paths)
+        .into_iter()
+        .filter(|path| path.starts_with(claude_managed_dir()))
+        .filter_map(|path| {
+            let value =
+                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&path).ok()?).ok()?;
+            value
+                .get("claudeMd")?
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .map(|_| {
+                    format!(
+                        "{} injects managed claudeMd instructions that Context does not show",
+                        display_path(&path, paths, directory)
+                    )
+                })
+        })
+        .collect();
     let startup = sources
         .iter()
         .filter(|source| matches!(source.state, SourceState::Startup))
@@ -375,7 +393,7 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Claude,
         directory: directory.to_owned(),
         sources,
-        warnings: Vec::new(),
+        warnings,
         summary: format!("{startup} load at startup"),
     }
 }
@@ -2013,7 +2031,7 @@ fn is_claude_instruction_path(path: &Path) -> bool {
         || is_rule_path(path)
 }
 
-fn claude_filename_matches(path: &Path, name: &str) -> bool {
+pub(crate) fn claude_filename_matches(path: &Path, name: &str) -> bool {
     path.file_name().is_some_and(|file_name| {
         if file_name == name {
             return true;

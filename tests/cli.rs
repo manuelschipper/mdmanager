@@ -398,7 +398,7 @@ fn bundled_docs_work_without_configuration() {
 
     for (topic, source) in [
         ("context", include_str!("../docs/context.md")),
-        ("claude", include_str!("../docs/claude.md")),
+        ("claude", include_str!("../docs/claude-code.md")),
         ("codex", include_str!("../docs/codex.md")),
         ("pi", include_str!("../docs/pi.md")),
         ("concepts", include_str!("../docs/concepts.md")),

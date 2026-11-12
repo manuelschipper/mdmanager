@@ -13,6 +13,13 @@
   `CLAUDE.md` would stop Claude reading a loaded `AGENTS.md`. Project and Local apply suppress the
   warning for files imported by the rendered content and suggest an import or the
   `claude-md-and-agents-md` Project instructions setting to keep them loaded.
+- **Claude Section examples** — Configuration and demo examples use `sections/claude-code.md`
+  so Claude does not load Section source files as nested instructions on case-insensitive filesystems.
+- **Local Claude filename casing** — Local disable accepts differently cased `CLAUDE.md`,
+  `CLAUDE.local.md`, and `AGENTS.md` when the filesystem resolves the canonical name to the same
+  file, matching Context discovery and retaining the source path for restore.
+- **Managed Claude instructions** — Context warns when a managed settings file or drop-in injects
+  non-empty `claudeMd` instructions, naming the file without displaying the instruction text.
 
 ## mdmanager 0.4.0 — Oct 19, 2026
 

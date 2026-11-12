@@ -26,6 +26,9 @@ user or managed settings files, and treats `"cc-plugin-agents-md@builtin": false
 Code 2.1.285 and later accept either ID. mdmanager does not see MDM or server-managed policy,
 `--settings` files, or the Claude Code version; on older versions, or in the first session after
 upgrading, Claude reads `CLAUDE.md` files only.
+mdmanager reports a managed `claudeMd` without showing its text and does not model Claude keeping
+`.claude/settings.local.json` in the launch directory when the repository root, its `.git`, or its
+`.claude` is not owned by the user.
 
 Project and user `.claude/rules/**/*.md` files are also instructions. Rules without `paths` YAML
 frontmatter load generally. Rules with `paths` load when Claude works with matching files. Symlinked

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{GlobalConfig, Paths, atomic_create, atomic_write, sha256_hex};
-use crate::context::PI_INSTRUCTION_CANDIDATES;
+use crate::context::{PI_INSTRUCTION_CANDIDATES, claude_filename_matches};
 use crate::deploy::unified_diff;
 use crate::git_worktree::{command, git};
 
@@ -542,7 +542,9 @@ impl LocalRepository {
                 (self.root.clone(), parent.join("AGENTS.override.md"))
             }
             DisableOwned::Claude { recovery, .. } => {
-                if !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md")
+                if !["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
+                    .iter()
+                    .any(|name| claude_filename_matches(source, name))
                     || source
                         .ancestors()
                         .any(|ancestor| ancestor.ends_with(".claude/rules"))
@@ -675,7 +677,11 @@ impl LocalRepository {
                 let is_rule = source
                     .ancestors()
                     .any(|ancestor| ancestor.ends_with(".claude/rules"));
-                if is_rule || !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md") {
+                if is_rule
+                    || !["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
+                        .iter()
+                        .any(|name| claude_filename_matches(&source, name))
+                {
                     return Err(format!(
                         "{} is not a Claude instruction file mdmanager.ai can disable",
                         source.display()
@@ -1921,40 +1927,62 @@ mod tests {
 
     #[test]
     fn claude_disable_preserves_settings_text_and_restore_is_exact() {
-        let (_home, repository, local_repository) = repository();
-        let source = repository.path().join("CLAUDE.md");
-        let settings = repository.path().join(".claude/settings.local.json");
-        let original = "{\n    \"z-last\": true,\n    \"nested\": { \"keep\": 1 }\n}\n";
-        fs::write(&source, "claude\n").unwrap();
-        fs::create_dir(repository.path().join(".claude")).unwrap();
-        fs::write(&settings, original).unwrap();
-        fs::write(
-            repository.path().join(".git/info/exclude"),
-            "/.claude/settings.local.json\n",
-        )
-        .unwrap();
-
-        let plan = local_repository
-            .disable_plan(DisableRuntime::Claude, &source)
-            .unwrap();
-        local_repository.apply_disable(&plan).unwrap();
-        let disabled = fs::read_to_string(&settings).unwrap();
-        assert_eq!(
-            disabled,
-            format!(
-                "{{\n    \"z-last\": true,\n    \"nested\": {{ \"keep\": 1 }},\n    \"claudeMdExcludes\": [{}]\n}}\n",
-                serde_json::to_string(&source.display().to_string()).unwrap()
+        for (filename, canonical) in [
+            ("CLAUDE.md", "CLAUDE.md"),
+            ("claude.md", "CLAUDE.md"),
+            ("ClAuDe.LoCaL.MD", "CLAUDE.local.md"),
+            ("aGeNtS.Md", "AGENTS.md"),
+        ] {
+            let (_home, repository, local_repository) = repository();
+            let source = repository.path().join(filename);
+            let settings = repository.path().join(".claude/settings.local.json");
+            let original = "{\n    \"z-last\": true,\n    \"nested\": { \"keep\": 1 }\n}\n";
+            fs::write(&source, "claude\n").unwrap();
+            let case_matches = repository.path().join(canonical).is_file();
+            if filename != canonical {
+                assert!(
+                    local_repository
+                        .disable_plan(DisableRuntime::Pi, &source)
+                        .unwrap_err()
+                        .contains("not a Pi instruction candidate")
+                );
+            }
+            fs::create_dir(repository.path().join(".claude")).unwrap();
+            fs::write(&settings, original).unwrap();
+            fs::write(
+                repository.path().join(".git/info/exclude"),
+                "/.claude/settings.local.json\n",
             )
-        );
-
-        local_repository
-            .restore_disable(DisableRuntime::Claude)
             .unwrap();
-        assert_eq!(fs::read_to_string(settings).unwrap(), original);
-        assert_eq!(
-            fs::read_to_string(repository.path().join(".git/info/exclude")).unwrap(),
-            "/.claude/settings.local.json\n"
-        );
+
+            let plan = local_repository.disable_plan(DisableRuntime::Claude, &source);
+            if !case_matches {
+                assert!(plan.unwrap_err().contains("not a Claude instruction file"));
+                assert_eq!(fs::read_to_string(settings).unwrap(), original);
+                assert!(!local_repository.state_path.exists());
+                continue;
+            }
+            let plan = plan.unwrap();
+            assert_eq!(plan.source, source);
+            local_repository.apply_disable(&plan).unwrap();
+            let disabled = fs::read_to_string(&settings).unwrap();
+            assert_eq!(
+                disabled,
+                format!(
+                    "{{\n    \"z-last\": true,\n    \"nested\": {{ \"keep\": 1 }},\n    \"claudeMdExcludes\": [{}]\n}}\n",
+                    serde_json::to_string(&source.display().to_string()).unwrap()
+                )
+            );
+
+            local_repository
+                .restore_disable(DisableRuntime::Claude)
+                .unwrap();
+            assert_eq!(fs::read_to_string(settings).unwrap(), original);
+            assert_eq!(
+                fs::read_to_string(repository.path().join(".git/info/exclude")).unwrap(),
+                "/.claude/settings.local.json\n"
+            );
+        }
     }
 
     #[test]
