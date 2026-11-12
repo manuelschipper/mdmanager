@@ -16,7 +16,7 @@ ROOT = HERE.parent
 OUT = HERE / "dist"
 SITE = "https://mdmanager.ai"
 DESCRIPTION = (
-    "Manage your CLAUDE.md and AGENTS.md across machines and runtimes. "
+    "Manage your AGENTS.md across machines and runtimes. "
     "Reuse Markdown sections and choose a profile for each setup."
 )
 
@@ -35,10 +35,16 @@ mark = (
     f'role="img" aria-label="MD">{mark_paths}</svg>'
 )
 
+def topic(stem):
+    # docs/claude-code.md is the `claude` topic: a file named claude.md would load as CLAUDE.md
+    # on case-insensitive filesystems.
+    return "claude" if stem == "claude-code" else stem
+
+
 # Labels come from the documentation index, as they do in nah's site build.
 docs_index = (ROOT / "docs/README.md").read_text()
 topics = dict(
-    (slug, label)
+    (topic(slug), label)
     for label, slug in re.findall(r"^- \[([^]]+)\]\(([a-z-]+)\.md\)", docs_index, re.M)
 )
 groups = [
@@ -137,7 +143,7 @@ def render_markdown(source):
         elif filename == "README.md":
             path = "/docs/"
         else:
-            path = f"/docs/{filename[:-3]}/"
+            path = f"/docs/{topic(filename[:-3])}/"
         return f'href="{path}{anchor or ""}"'
 
     return re.sub(r'href="(\.\./CHANGELOG\.md|README\.md|[a-z-]+\.md)(#[^"]*)?"', rewrite, html)
@@ -166,7 +172,7 @@ write_page("/", page(home_title, DESCRIPTION, "/", "/"))
 paths = ["/"]
 for source_path in sorted((ROOT / "docs").glob("*.md")):
     source = source_path.read_text()
-    slug = source_path.stem
+    slug = topic(source_path.stem)
     path = "/docs/" if slug == "README" else f"/docs/{slug}/"
     title, description = metadata(source)
     side = sidebar(path)
