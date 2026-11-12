@@ -1,8 +1,9 @@
 # Cursor context
 
-The Cursor CLI (`cursor-agent`) and the Cursor editor's agent share one rule loader. mdmanager
-models it from behavior observed in `cursor-agent` 2026.10.16 and the Cursor 3.25.9 editor.
-Cursor documents little of it, so a later release can change it.
+The Cursor CLI (`cursor-agent`) and the Cursor editor's agent share one rule loader. mdmanager's
+CLI model was checked against the `cursor-agent` 2026.11.05 bundled loader and live runs. Editor
+claims remain based on the Cursor 3.25.9 editor. Cursor documents little of it, so a later release
+can change it.
 
 ```sh
 mdmanager context --runtime cursor
@@ -27,7 +28,9 @@ directory outside a repository.
   byte-order mark is decoded, and CRLF line endings become LF when at least 5% of line endings are
   CRLF (for UTF-16, within its first 8 KiB). Files detected as binary are skipped and reported as
   excluded. Other encoding detection is not modeled.
-- Each decoded Markdown file is cut at 100 KiB; Context reports a longer file as partial.
+- Each decoded Markdown instruction file is cut at 100 KiB on a UTF-8 boundary, then a truncation
+  notice is appended. Context reports a longer file as partial; its included and total byte counts
+  refer to the decoded file contents.
 - A rule that does not start with a `---` header followed by more text is skipped and reported as
   excluded. Only an unquoted `alwaysApply: true` makes a rule always apply.
 - `AGENTS.md`, `CLAUDE.md`, and rules in subfolders below the launch directory were observed to
