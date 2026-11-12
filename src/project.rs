@@ -361,7 +361,8 @@ pub(crate) fn create_plan(root: &Path, id: &str, content: &str) -> Result<Create
         ));
     }
     let base = reviewed_manifest.as_deref().unwrap_or("format = 1\n");
-    let section_relative = format!("sections/{id}.md");
+    let filename = if id == "claude" { "claude-code" } else { id };
+    let section_relative = format!("sections/{filename}.md");
     let manifest_source = format!(
         "{}\n\n[[sections]]\nid = \"{id}\"\nname = \"{}\"\npath = \"{section_relative}\"\n\n[targets.{id}]\nsections = [\"{id}\"]\n",
         base.trim_end(),
@@ -404,7 +405,8 @@ pub(crate) fn adopt(root: &Path, id: &str) -> Result<Workspace, String> {
     {
         return Err(format!("project already defines section {id}"));
     }
-    let section_relative = format!("sections/{id}.md");
+    let filename = if id == "claude" { "claude-code" } else { id };
+    let section_relative = format!("sections/{filename}.md");
     let section_path = root.join(".mdmanager").join(&section_relative);
     if section_path.exists() {
         return Err(format!("refusing to overwrite {}", section_path.display()));

@@ -13,8 +13,9 @@
   `CLAUDE.md` would stop Claude reading a loaded `AGENTS.md`. Project and Local apply suppress the
   warning for files imported by the rendered content and suggest an import or the
   `claude-md-and-agents-md` Project instructions setting to keep them loaded.
-- **Claude Section examples** — Configuration and demo examples use `sections/claude-code.md`
-  so Claude does not load Section source files as nested instructions on case-insensitive filesystems.
+- **Claude Section filenames** — Project create and adopt, configuration examples, and demo examples
+  use `sections/claude-code.md` with Section ID `claude`, so Claude does not load Section source files
+  as nested instructions on case-insensitive filesystems. Existing manifests keep their stored paths.
 - **Local Claude filename casing** — Local disable accepts differently cased `CLAUDE.md`,
   `CLAUDE.local.md`, and `AGENTS.md` when the filesystem resolves the canonical name to the same
   file, matching Context discovery and retaining the source path for restore.
