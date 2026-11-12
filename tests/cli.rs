@@ -1162,17 +1162,6 @@ fn project_create_authors_management_then_applies_the_root_file() {
     );
     assert!(!repository.path().join(".gitignore").exists());
 
-    let applied = mdmanager_in(
-        home.path(),
-        repository.path(),
-        &["project", "apply", "agents", "--yes"],
-    );
-    assert!(applied.status.success());
-    assert_eq!(
-        fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
-        "# New project instructions\n"
-    );
-
     let created = mdmanager_in(
         home.path(),
         repository.path(),
@@ -1191,19 +1180,76 @@ fn project_create_authors_management_then_applies_the_root_file() {
         fs::read_to_string(repository.path().join(".mdmanager/sections/claude-code.md")).unwrap(),
         "# New project instructions\n"
     );
-    let agents = repository.path().join("AGENTS.md").canonicalize().unwrap();
-    for (content, warns) in [("# Claude instructions\n", true), ("@AGENTS.md\n", false)] {
+    let agents = repository.path().canonicalize().unwrap().join("AGENTS.md");
+    let manifest_path = repository.path().join(".mdmanager/project.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    fs::create_dir(repository.path().join("docs")).unwrap();
+    fs::write(repository.path().join("docs/shared.md"), "@../AGENTS.md\n").unwrap();
+    for (exists, agents_sections, claude_sections, content, warns) in [
+        (false, "[\"agents\"]", "[\"claude\"]", "# Claude\n", true),
+        (false, "[\"agents\"]", "[\"claude\"]", "@AGENTS.md\n", false),
+        (
+            false,
+            "[\"agents\"]",
+            "[\"claude\"]",
+            "@docs/shared.md\n",
+            false,
+        ),
+        (
+            false,
+            "[\"agents\"]",
+            "[\"claude\", \"agents\"]",
+            "# Claude\n",
+            false,
+        ),
+        (
+            false,
+            "[\"agents\", \"claude\"]",
+            "[\"claude\"]",
+            "# Claude\n",
+            true,
+        ),
+        (
+            true,
+            "[\"agents\"]",
+            "[\"claude\", \"agents\"]",
+            "# Claude\n",
+            false,
+        ),
+        (true, "[\"agents\"]", "[\"claude\"]", "# Claude\n", true),
+        (true, "[\"agents\"]", "[\"claude\"]", "@AGENTS.md\n", false),
+    ] {
+        fs::write(
+            &manifest_path,
+            manifest
+                .replace(
+                    "sections = [\"agents\"]",
+                    &format!("sections = {agents_sections}"),
+                )
+                .replace(
+                    "sections = [\"claude\"]",
+                    &format!("sections = {claude_sections}"),
+                ),
+        )
+        .unwrap();
+        if exists && !agents.exists() {
+            assert!(
+                mdmanager_in(
+                    home.path(),
+                    repository.path(),
+                    &["project", "apply", "agents", "--yes"]
+                )
+                .status
+                .success()
+            );
+        }
         fs::write(
             repository.path().join(".mdmanager/sections/claude-code.md"),
             content,
         )
         .unwrap();
         let before = (files(home.path()), files(repository.path()));
-        let plan = mdmanager_in(
-            home.path(),
-            repository.path(),
-            &["project", "apply", "claude"],
-        );
+        let plan = mdmanager_in(home.path(), repository.path(), &["project", "apply"]);
         assert!(!plan.status.success());
         assert!(String::from_utf8_lossy(&plan.stderr).contains("requires --yes"));
         assert_eq!((files(home.path()), files(repository.path())), before);
@@ -1212,7 +1258,11 @@ fn project_create_authors_management_then_applies_the_root_file() {
             .lines()
             .filter(|line| line.starts_with("Warning:"))
             .collect::<Vec<_>>();
-        assert_eq!(warnings.len(), usize::from(warns));
+        assert_eq!(
+            warnings.len(),
+            usize::from(warns),
+            "{exists}, {agents_sections}, {claude_sections}, {content}"
+        );
         if warns {
             assert!(warnings[0].contains(agents.to_str().unwrap()));
         }
@@ -1231,6 +1281,91 @@ fn project_create_authors_management_then_applies_the_root_file() {
     assert_eq!(
         fs::read_to_string(repository.path().join("CLAUDE.md")).unwrap(),
         "@AGENTS.md\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&agents).unwrap(),
+        "# New project instructions\n"
+    );
+
+    let lowercase_agents = repository.path().join("agents.md");
+    fs::rename(&agents, &lowercase_agents).unwrap();
+    if agents.exists() {
+        for (covered, deployed, content, warns) in [
+            (true, "@AGENTS.md\n", "# Claude\n", false),
+            (false, "# Previous Claude\n", "@AGENTS.md\n", false),
+            (false, "@AGENTS.md\n", "# Claude\n", true),
+        ] {
+            fs::write(
+                &manifest_path,
+                manifest.replace(
+                    "[targets.claude]\nsections = [\"claude\"]",
+                    if covered {
+                        "[targets.claude]\nsections = [\"claude\", \"agents\"]"
+                    } else {
+                        "[targets.claude]\nsections = [\"claude\"]"
+                    },
+                ),
+            )
+            .unwrap();
+            fs::write(repository.path().join("CLAUDE.md"), deployed).unwrap();
+            fs::write(
+                repository.path().join(".mdmanager/sections/claude-code.md"),
+                content,
+            )
+            .unwrap();
+            let before = (files(home.path()), files(repository.path()));
+            let plan = mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["project", "apply", "claude"],
+            );
+            assert!(!plan.status.success());
+            assert!(String::from_utf8_lossy(&plan.stderr).contains("requires --yes"));
+            assert_eq!((files(home.path()), files(repository.path())), before);
+            let output = String::from_utf8(plan.stdout).unwrap();
+            let warnings = output
+                .lines()
+                .filter(|line| line.starts_with("Warning:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                warnings.len(),
+                usize::from(warns),
+                "{covered}, {deployed}, {content}"
+            );
+            if warns {
+                assert!(warnings[0].contains(agents.to_str().unwrap()));
+            }
+        }
+    }
+    fs::rename(&lowercase_agents, &agents).unwrap();
+
+    // Removing an import also loses an unmanaged AGENTS.md that loaded through it.
+    fs::write(
+        &manifest_path,
+        manifest.replace("[targets.agents]\nsections = [\"agents\"]", ""),
+    )
+    .unwrap();
+    fs::write(
+        repository.path().join(".mdmanager/sections/claude-code.md"),
+        "# Claude\n",
+    )
+    .unwrap();
+    let applied = mdmanager_in(
+        home.path(),
+        repository.path(),
+        &["project", "apply", "claude", "--yes"],
+    );
+    assert!(applied.status.success());
+    let output = String::from_utf8(applied.stdout).unwrap();
+    let warnings = output
+        .lines()
+        .filter(|line| line.starts_with("Warning:"))
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(agents.to_str().unwrap()));
+    assert_eq!(
+        fs::read_to_string(repository.path().join("CLAUDE.md")).unwrap(),
+        "# Claude\n"
     );
 }
 
@@ -1520,6 +1655,36 @@ fn managed_claude_local_instructions_are_additive() {
     let context = String::from_utf8(context.stdout).unwrap();
     assert!(context.contains("CLAUDE.md"));
     assert!(context.contains("CLAUDE.local.md"));
+
+    for (content, warns) in [
+        ("@AGENTS.md\n", false),
+        ("# Local Claude instructions\n", true),
+    ] {
+        fs::write(
+            home.path().join(".mdmanager/sections/claude-local.md"),
+            content,
+        )
+        .unwrap();
+        let applied = mdmanager_in(
+            home.path(),
+            repository.path(),
+            &["local", "apply", "claude", "--yes"],
+        );
+        assert!(applied.status.success());
+        let output = String::from_utf8(applied.stdout).unwrap();
+        let warnings = output
+            .lines()
+            .filter(|line| line.starts_with("Warning:"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), usize::from(warns));
+        if warns {
+            assert!(warnings[0].contains(agents.to_str().unwrap()));
+        }
+        assert_eq!(
+            fs::read_to_string(repository.path().join("CLAUDE.local.md")).unwrap(),
+            content
+        );
+    }
 }
 
 #[test]

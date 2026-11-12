@@ -577,10 +577,8 @@ fn local_command(paths: &Paths, command: LocalCommand) -> Result<ExitCode, Strin
                     }
                 }
             );
-            if target == local::ManagedTarget::Claude
-                && let Some(root) = view.path.parent()
-            {
-                warn_displaced_agents_md(root, &view.rendered, paths);
+            if target == local::ManagedTarget::Claude {
+                warn_displaced_agents_md(&view.path, &view.rendered, paths, None);
             }
             if !confirm_or_require_yes("Apply these managed local instructions?", yes)? {
                 println!("Cancelled.");
@@ -593,10 +591,20 @@ fn local_command(paths: &Paths, command: LocalCommand) -> Result<ExitCode, Strin
     }
 }
 
-fn warn_displaced_agents_md(directory: &std::path::Path, content: &str, paths: &Paths) {
-    for agents in crate::context::agents_md_displaced_by_claude(directory, content, paths) {
+fn warn_displaced_agents_md(
+    claude_path: &std::path::Path,
+    content: &str,
+    paths: &Paths,
+    managed_agents_covered: Option<bool>,
+) {
+    for agents in crate::context::agents_md_displaced_by_claude(
+        claude_path,
+        content,
+        paths,
+        managed_agents_covered,
+    ) {
         println!(
-            "Warning: Claude will stop reading {}. By default Claude reads AGENTS.md only when no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md is on the launch path; add an @AGENTS.md import in the Claude file, or set Project instructions to claude-md-and-agents-md in /config to keep both.",
+            "Warning: Claude will not read {} after this apply. By default Claude reads AGENTS.md only when no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md is on the launch path; add an @AGENTS.md import in the Claude file, or set Project instructions to claude-md-and-agents-md in /config to keep both.",
             agents.display()
         );
     }
@@ -688,7 +696,18 @@ fn project_command(paths: &Paths, command: ProjectCommand) -> Result<ExitCode, S
                     changed = true;
                     println!("{}", view.diff);
                     if target == "claude" {
-                        warn_displaced_agents_md(&workspace.root, &view.expected, paths);
+                        let claude = workspace.composition("claude")?;
+                        let managed_agents_covered = workspace
+                            .manifest
+                            .targets
+                            .get("agents")
+                            .map(|agents| agents.sections.iter().all(|id| claude.contains(id)));
+                        warn_displaced_agents_md(
+                            &view.path,
+                            &view.expected,
+                            paths,
+                            managed_agents_covered,
+                        );
                     }
                 }
             }

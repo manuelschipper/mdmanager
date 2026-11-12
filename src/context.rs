@@ -629,22 +629,9 @@ fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>, pat
                     SourceState::Excluded(_) | SourceState::Shadowed(_)
                 )
         }) {
-            loaded.extend(fs::canonicalize(&source.path).ok());
-            // Claude expands imports up to four hops deep.
-            let mut hop = source.imports.clone();
-            for _ in 0..4 {
-                let mut next = Vec::new();
-                for import in hop {
-                    if let Ok(canonical) = fs::canonicalize(&import)
-                        && loaded.insert(canonical)
-                    {
-                        let content = fs::read_to_string(&import).unwrap_or_default();
-                        let parent = import.parent().unwrap_or(Path::new("."));
-                        next.extend(claude_imports(&content, parent, &paths.home));
-                    }
-                }
-                hop = next;
-            }
+            loaded.extend(
+                claude_loaded_paths(&source.path, &source.content, &paths.home).into_keys(),
+            );
         }
         loaded
     };
@@ -657,6 +644,40 @@ fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>, pat
                     || source.group == SourceGroup::Nested && nested.contains(&path))
             })
     });
+}
+
+fn claude_loaded_paths(path: &Path, content: &str, home: &Path) -> HashMap<PathBuf, PathBuf> {
+    let mut loaded = HashMap::new();
+    if let Ok(canonical) = fs::canonicalize(path) {
+        loaded.insert(canonical, path.to_owned());
+    }
+    let mut hop = claude_imports(content, path.parent().unwrap_or(Path::new(".")), home);
+    // Claude expands imports up to four hops deep.
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for import in hop {
+            let parent = import.parent().unwrap_or(Path::new("."));
+            // A first Project apply can import an AGENTS.md that does not exist yet.
+            let canonical = if import.exists() {
+                fs::canonicalize(&import)
+            } else {
+                fs::canonicalize(parent).map(|parent| parent.join(import.file_name().unwrap()))
+            };
+            if let Ok(canonical) = canonical {
+                let first = !loaded.contains_key(&canonical);
+                // Preserve an AGENTS.md alias even if another import reached its target first.
+                if first || claude_filename_matches(&import, "AGENTS.md") {
+                    loaded.insert(canonical, import.clone());
+                }
+                if first {
+                    let content = fs::read_to_string(&import).unwrap_or_default();
+                    next.extend(claude_imports(&content, parent, home));
+                }
+            }
+        }
+        hop = next;
+    }
+    loaded
 }
 
 fn claude_imports(content: &str, parent: &Path, home: &Path) -> Vec<PathBuf> {
@@ -860,30 +881,63 @@ fn has_claude_md(directory: &Path) -> bool {
         .any(|name| regular_file(&directory.join(name)))
 }
 
-/// Startup `AGENTS.md` files a new Claude file would displace under the default
-/// **Project instructions** setting, unless the new content imports them.
+/// Loaded `AGENTS.md` files a Claude write would displace under the default
+/// **Project instructions** setting. Project supplies whether its Claude Sections
+/// cover its managed root AGENTS.md, including before that file exists.
 pub(crate) fn agents_md_displaced_by_claude(
-    directory: &Path,
+    claude_path: &Path,
     content: &str,
     paths: &Paths,
+    managed_agents_covered: Option<bool>,
 ) -> Vec<PathBuf> {
+    let directory = claude_path.parent().unwrap();
     if claude_instruction_files(directory, paths) != ClaudeInstructionFiles::ClaudeMdOrAgentsMd {
         return Vec::new();
     }
-    let imports = claude_imports(content, directory, &paths.home)
-        .into_iter()
-        .filter_map(|path| fs::canonicalize(path).ok())
-        .collect::<HashSet<_>>();
-    resolve_claude(directory, paths)
-        .sources
-        .into_iter()
-        .filter(|source| {
-            source.path.file_name() == Some("AGENTS.md".as_ref())
-                && source.state == SourceState::Startup
-                && !fs::canonicalize(&source.path).is_ok_and(|path| imports.contains(&path))
-        })
-        .map(|source| source.path)
-        .collect()
+    let rendered = claude_loaded_paths(claude_path, content, &paths.home);
+    let mut retained = rendered.keys().cloned().collect::<HashSet<_>>();
+    let mut loaded = HashMap::new();
+    for source in resolve_claude(directory, paths).sources {
+        if is_claude_instruction_path(&source.path)
+            && !is_rule_path(&source.path)
+            && !matches!(
+                source.state,
+                SourceState::Excluded(_) | SourceState::Shadowed(_)
+            )
+        {
+            let imports = claude_loaded_paths(&source.path, &source.content, &paths.home);
+            loaded.extend(
+                imports
+                    .iter()
+                    .filter(|(_, path)| claude_filename_matches(path, "AGENTS.md"))
+                    .map(|(canonical, path)| (canonical.clone(), path.clone())),
+            );
+            if source.path != claude_path {
+                retained.extend(imports.into_keys());
+            }
+        } else if source.state == SourceState::Startup
+            && claude_filename_matches(&source.path, "AGENTS.md")
+            && let Ok(canonical) = fs::canonicalize(&source.path)
+        {
+            loaded.insert(canonical, source.path);
+        }
+    }
+    loaded.retain(|canonical, _| regular_file(canonical) && !retained.contains(canonical));
+    if let Some(covered) = managed_agents_covered {
+        let agents = directory.join("AGENTS.md");
+        let canonical = if agents.exists() {
+            fs::canonicalize(&agents).unwrap()
+        } else {
+            fs::canonicalize(directory).unwrap().join("AGENTS.md")
+        };
+        loaded.remove(&canonical);
+        if !covered && !rendered.contains_key(&canonical) {
+            loaded.insert(canonical, agents);
+        }
+    }
+    let mut displaced = loaded.into_values().collect::<Vec<_>>();
+    displaced.sort();
+    displaced
 }
 
 /// Claude's system directory for organization-managed instructions and settings.
@@ -2216,22 +2270,45 @@ mod tests {
         ));
         assert_eq!(state(&audit, &cwd.join("docs/AGENTS.md")), None);
         assert_eq!(
-            agents_md_displaced_by_claude(&cwd, "claude", &home),
+            agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None),
             [root.join("AGENTS.md"), cwd.join("AGENTS.md")]
         );
-        for content in ["@AGENTS.md", "@./AGENTS.md", "@../app/AGENTS.md"] {
+        fs::write(cwd.join("docs/shared.md"), "@../AGENTS.md").unwrap();
+        fs::write(cwd.join("docs/second.md"), "@shared.md").unwrap();
+        fs::write(cwd.join("docs/third.md"), "@second.md").unwrap();
+        fs::write(cwd.join("docs/fourth.md"), "@third.md").unwrap();
+        for content in [
+            "@AGENTS.md",
+            "@./AGENTS.md",
+            "@../app/AGENTS.md",
+            "@docs/shared.md",
+            "@docs/third.md",
+        ] {
             assert_eq!(
-                agents_md_displaced_by_claude(&cwd, content, &home),
+                agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), content, &home, None),
                 [root.join("AGENTS.md")]
             );
         }
         assert_eq!(
-            agents_md_displaced_by_claude(&cwd, "@../AGENTS.md", &home),
+            agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "@../AGENTS.md", &home, None),
             [cwd.join("AGENTS.md")]
         );
-        assert!(agents_md_displaced_by_claude(&cwd, "@AGENTS.md\n@../AGENTS.md", &home).is_empty());
+        assert!(
+            agents_md_displaced_by_claude(
+                &cwd.join("CLAUDE.md"),
+                "@AGENTS.md\n@../AGENTS.md",
+                &home,
+                None
+            )
+            .is_empty()
+        );
         assert_eq!(
-            agents_md_displaced_by_claude(&cwd, "`@AGENTS.md`\n<!-- @../AGENTS.md -->", &home),
+            agents_md_displaced_by_claude(
+                &cwd.join("CLAUDE.md"),
+                "`@AGENTS.md`\n<!-- @../AGENTS.md -->\n@docs/fourth.md",
+                &home,
+                None
+            ),
             [root.join("AGENTS.md"), cwd.join("AGENTS.md")]
         );
 
@@ -2249,7 +2326,9 @@ mod tests {
             Some(SourceState::Shadowed(root.join("CLAUDE.local.md")))
         );
         assert_eq!(state(&audit, &cwd.join("lib/AGENTS.md")), None);
-        assert!(agents_md_displaced_by_claude(&cwd, "claude", &home).is_empty());
+        assert!(
+            agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None).is_empty()
+        );
 
         // An AGENTS.md that a CLAUDE.md imports is read once, through the import.
         fs::write(cwd.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();
@@ -2258,6 +2337,28 @@ mod tests {
         assert!(audit.sources.iter().any(|source| {
             source.path == cwd.join("CLAUDE.md") && source.imports == [cwd.join("AGENTS.md")]
         }));
+        assert_eq!(
+            agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None),
+            [cwd.join("AGENTS.md")]
+        );
+        assert!(
+            agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "@docs/shared.md", &home, None)
+                .is_empty()
+        );
+        #[cfg(unix)]
+        {
+            fs::rename(cwd.join("AGENTS.md"), cwd.join("docs/agents-src.md")).unwrap();
+            std::os::unix::fs::symlink("docs/agents-src.md", cwd.join("AGENTS.md")).unwrap();
+            assert_eq!(
+                agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None),
+                [cwd.join("AGENTS.md")]
+            );
+        }
+        // Another startup Claude file keeps the imported instructions loaded.
+        fs::write(root.join("CLAUDE.local.md"), "@app/AGENTS.md").unwrap();
+        assert!(
+            agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None).is_empty()
+        );
     }
 
     #[test]

@@ -23,6 +23,11 @@
   while retaining symlink path and target matching.
 - **Managed Claude instructions** — Context warns when a managed settings file or drop-in injects
   non-empty `claudeMd` instructions, naming the file without displaying the instruction text.
+- **Claude instruction warning coverage** — Project and Local apply warn when replacing a Claude
+  file removes an AGENTS.md import, including a symlink, and follow indirect imports up to four
+  hops to avoid false warnings. Project apply also checks a managed AGENTS.md, even before that
+  file exists, suppressing its warning when the Claude target includes every Section of the agents
+  target. Canonical paths prevent false or duplicate warnings for differently cased filenames.
 
 ## mdmanager 0.4.0 — Oct 19, 2026
 

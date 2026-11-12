@@ -71,7 +71,10 @@ does not apply, so start in the directory that holds it.
 It is also a `CLAUDE` file, so in a repository that relies on `AGENTS.md` it stops Claude reading
 `AGENTS.md` under the default **Project instructions** setting. `mdmanager local apply claude` and
 `mdmanager project apply` warn before writing a Claude file that would displace a loaded `AGENTS.md`,
-unless the rendered content imports it. Add an `@AGENTS.md` import in the Claude file, or set
+including when replacing a Claude file removes its import. Imports are followed up to four hops.
+Project apply also checks its managed root `AGENTS.md`, even before that file exists, but does not
+warn about that file when the Claude target includes every Section of the agents target or imports it.
+Add an `@AGENTS.md` import in the Claude file, or set
 **Project instructions** to `claude-md-and-agents-md` in `/config` to keep both. Use
 `mdmanager local create claude SECTION`, `mdmanager local adopt claude SECTION`,
 `mdmanager local render claude`, and `mdmanager local apply claude --yes` to manage it. The Local
