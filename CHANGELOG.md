@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## mdmanager 0.5.0 — Nov 12, 2026
 
 - **Claude exclusions and AGENTS.md** — Context ignores excluded `CLAUDE.md`,
   `.claude/CLAUDE.md`, and `CLAUDE.local.md` when deciding whether `AGENTS.md` loads, including
