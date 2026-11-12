@@ -13,6 +13,10 @@
   `CLAUDE.md` would stop Claude reading a loaded `AGENTS.md`. Project and Local apply suppress the
   warning for files imported by the rendered content and suggest an import or the
   `claude-md-and-agents-md` Project instructions setting to keep them loaded.
+- **Claude instruction warning coverage** — Project and Local apply warn when replacing a Claude
+  file removes an AGENTS.md import, and follow indirect imports up to four hops to avoid false
+  warnings. Project apply also checks a managed AGENTS.md before its first write, suppressing its
+  warning when the Claude target includes every Section of the agents target.
 
 ## mdmanager 0.4.0 — Oct 19, 2026
 
