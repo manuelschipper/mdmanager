@@ -1219,13 +1219,6 @@ fn project_create_authors_management_then_applies_the_root_file() {
         ),
         (true, "[\"agents\"]", "[\"claude\"]", "# Claude\n", true),
         (true, "[\"agents\"]", "[\"claude\"]", "@AGENTS.md\n", false),
-        (
-            true,
-            "[\"agents\"]",
-            "[\"claude\"]",
-            "@docs/shared.md\n",
-            false,
-        ),
     ] {
         fs::write(
             &manifest_path,
@@ -1288,12 +1281,64 @@ fn project_create_authors_management_then_applies_the_root_file() {
     );
     assert_eq!(
         fs::read_to_string(repository.path().join("CLAUDE.md")).unwrap(),
-        "@docs/shared.md\n"
+        "@AGENTS.md\n"
     );
     assert_eq!(
         fs::read_to_string(&agents).unwrap(),
         "# New project instructions\n"
     );
+
+    let lowercase_agents = repository.path().join("agents.md");
+    fs::rename(&agents, &lowercase_agents).unwrap();
+    if agents.exists() {
+        for (covered, deployed, content, warns) in [
+            (true, "@AGENTS.md\n", "# Claude\n", false),
+            (false, "# Previous Claude\n", "@AGENTS.md\n", false),
+            (false, "@AGENTS.md\n", "# Claude\n", true),
+        ] {
+            fs::write(
+                &manifest_path,
+                manifest.replace(
+                    "[targets.claude]\nsections = [\"claude\"]",
+                    if covered {
+                        "[targets.claude]\nsections = [\"claude\", \"agents\"]"
+                    } else {
+                        "[targets.claude]\nsections = [\"claude\"]"
+                    },
+                ),
+            )
+            .unwrap();
+            fs::write(repository.path().join("CLAUDE.md"), deployed).unwrap();
+            fs::write(
+                repository.path().join(".mdmanager/sections/claude.md"),
+                content,
+            )
+            .unwrap();
+            let before = (files(home.path()), files(repository.path()));
+            let plan = mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["project", "apply", "claude"],
+            );
+            assert!(!plan.status.success());
+            assert!(String::from_utf8_lossy(&plan.stderr).contains("requires --yes"));
+            assert_eq!((files(home.path()), files(repository.path())), before);
+            let output = String::from_utf8(plan.stdout).unwrap();
+            let warnings = output
+                .lines()
+                .filter(|line| line.starts_with("Warning:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                warnings.len(),
+                usize::from(warns),
+                "{covered}, {deployed}, {content}"
+            );
+            if warns {
+                assert!(warnings[0].contains(agents.to_str().unwrap()));
+            }
+        }
+    }
+    fs::rename(&lowercase_agents, &agents).unwrap();
 
     // Removing an import also loses an unmanaged AGENTS.md that loaded through it.
     fs::write(

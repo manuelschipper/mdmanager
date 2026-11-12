@@ -596,11 +596,9 @@ fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>, pat
                     SourceState::Excluded(_) | SourceState::Shadowed(_)
                 )
         }) {
-            loaded.extend(claude_loaded_paths(
-                &source.path,
-                &source.content,
-                &paths.home,
-            ));
+            loaded.extend(
+                claude_loaded_paths(&source.path, &source.content, &paths.home).into_keys(),
+            );
         }
         loaded
     };
@@ -615,9 +613,11 @@ fn skip_agents_md_loaded_through_claude_md(sources: &mut Vec<ContextSource>, pat
     });
 }
 
-fn claude_loaded_paths(path: &Path, content: &str, home: &Path) -> HashSet<PathBuf> {
-    let mut loaded = HashSet::new();
-    loaded.extend(fs::canonicalize(path).ok());
+fn claude_loaded_paths(path: &Path, content: &str, home: &Path) -> HashMap<PathBuf, PathBuf> {
+    let mut loaded = HashMap::new();
+    if let Ok(canonical) = fs::canonicalize(path) {
+        loaded.insert(canonical, path.to_owned());
+    }
     let mut hop = claude_imports(content, path.parent().unwrap_or(Path::new(".")), home);
     // Claude expands imports up to four hops deep.
     for _ in 0..4 {
@@ -630,11 +630,16 @@ fn claude_loaded_paths(path: &Path, content: &str, home: &Path) -> HashSet<PathB
             } else {
                 fs::canonicalize(parent).map(|parent| parent.join(import.file_name().unwrap()))
             };
-            if let Ok(canonical) = canonical
-                && loaded.insert(canonical)
-            {
-                let content = fs::read_to_string(&import).unwrap_or_default();
-                next.extend(claude_imports(&content, parent, home));
+            if let Ok(canonical) = canonical {
+                let first = !loaded.contains_key(&canonical);
+                // Preserve an AGENTS.md alias even if another import reached its target first.
+                if first || claude_filename_matches(&import, "AGENTS.md") {
+                    loaded.insert(canonical, import.clone());
+                }
+                if first {
+                    let content = fs::read_to_string(&import).unwrap_or_default();
+                    next.extend(claude_imports(&content, parent, home));
+                }
             }
         }
         hop = next;
@@ -857,8 +862,8 @@ pub(crate) fn agents_md_displaced_by_claude(
         return Vec::new();
     }
     let rendered = claude_loaded_paths(claude_path, content, &paths.home);
-    let mut retained = rendered.clone();
-    let mut loaded = HashSet::new();
+    let mut retained = rendered.keys().cloned().collect::<HashSet<_>>();
+    let mut loaded = HashMap::new();
     for source in resolve_claude(directory, paths).sources {
         if is_claude_instruction_path(&source.path)
             && !is_rule_path(&source.path)
@@ -868,26 +873,36 @@ pub(crate) fn agents_md_displaced_by_claude(
             )
         {
             let imports = claude_loaded_paths(&source.path, &source.content, &paths.home);
-            loaded.extend(imports.iter().cloned());
+            loaded.extend(
+                imports
+                    .iter()
+                    .filter(|(_, path)| claude_filename_matches(path, "AGENTS.md"))
+                    .map(|(canonical, path)| (canonical.clone(), path.clone())),
+            );
             if source.path != claude_path {
-                retained.extend(imports);
+                retained.extend(imports.into_keys());
             }
-        } else if source.state == SourceState::Startup {
-            loaded.insert(source.path);
+        } else if source.state == SourceState::Startup
+            && claude_filename_matches(&source.path, "AGENTS.md")
+            && let Ok(canonical) = fs::canonicalize(&source.path)
+        {
+            loaded.insert(canonical, source.path);
         }
     }
-    loaded.retain(|path| {
-        claude_filename_matches(path, "AGENTS.md")
-            && fs::canonicalize(path).is_ok_and(|path| !retained.contains(&path))
-    });
+    loaded.retain(|canonical, _| regular_file(canonical) && !retained.contains(canonical));
     if let Some(covered) = managed_agents_covered {
         let agents = directory.join("AGENTS.md");
-        loaded.remove(&agents);
-        if !covered && !rendered.contains(&agents) {
-            loaded.insert(agents);
+        let canonical = if agents.exists() {
+            fs::canonicalize(&agents).unwrap()
+        } else {
+            fs::canonicalize(directory).unwrap().join("AGENTS.md")
+        };
+        loaded.remove(&canonical);
+        if !covered && !rendered.contains_key(&canonical) {
+            loaded.insert(canonical, agents);
         }
     }
-    let mut displaced = loaded.into_iter().collect::<Vec<_>>();
+    let mut displaced = loaded.into_values().collect::<Vec<_>>();
     displaced.sort();
     displaced
 }
@@ -2291,12 +2306,21 @@ mod tests {
         }));
         assert_eq!(
             agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None),
-            [cwd.join("AGENTS.md").canonicalize().unwrap()]
+            [cwd.join("AGENTS.md")]
         );
         assert!(
             agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "@docs/shared.md", &home, None)
                 .is_empty()
         );
+        #[cfg(unix)]
+        {
+            fs::rename(cwd.join("AGENTS.md"), cwd.join("docs/agents-src.md")).unwrap();
+            std::os::unix::fs::symlink("docs/agents-src.md", cwd.join("AGENTS.md")).unwrap();
+            assert_eq!(
+                agents_md_displaced_by_claude(&cwd.join("CLAUDE.md"), "claude", &home, None),
+                [cwd.join("AGENTS.md")]
+            );
+        }
         // Another startup Claude file keeps the imported instructions loaded.
         fs::write(root.join("CLAUDE.local.md"), "@app/AGENTS.md").unwrap();
         assert!(
