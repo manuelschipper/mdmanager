@@ -58,8 +58,6 @@ The same steps disable a shared `AGENTS.md` that Claude reads directly. Claude m
 `claudeMdExcludes` patterns against absolute file paths. A bare relative name such
 as `CLAUDE.md` does not match a project file. Patterns for symlinked `CLAUDE.md`, `CLAUDE.local.md`,
 and `AGENTS.md` match the link path; only rules also match their resolved target.
-An excluded CLAUDE file no longer stops `AGENTS.md` loading, unless another unexcluded CLAUDE file
-takes priority.
 
 The same setting can exclude an inherited `CLAUDE.md`. Remove only an exclusion the user asked the
 agent to remove; broader globs may come from another settings layer. mdmanager merges exclusions

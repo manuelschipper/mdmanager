@@ -4,8 +4,7 @@
 
 - **Claude exclusions and AGENTS.md** — Context ignores excluded `CLAUDE.md`,
   `.claude/CLAUDE.md`, and `CLAUDE.local.md` when deciding whether `AGENTS.md` loads, including
-  subfolder instructions. Apply warnings use the same resolution, and Local disable explains
-  when excluding Claude files lets `AGENTS.md` start loading.
+  subfolder instructions. Apply warnings use the same resolution.
 - **Claude plugin ID** — Context reads `cc-plugin-agents-md@builtin` as well as the old
   `agents-md@builtin` ID for Project instructions and plugin enablement, so settings written by
   newer Claude Code versions are read correctly. The new ID wins within one settings file.
