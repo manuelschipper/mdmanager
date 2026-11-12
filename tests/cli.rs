@@ -398,7 +398,7 @@ fn bundled_docs_work_without_configuration() {
 
     for (topic, source) in [
         ("context", include_str!("../docs/context.md")),
-        ("claude", include_str!("../docs/claude.md")),
+        ("claude", include_str!("../docs/claude-code.md")),
         ("codex", include_str!("../docs/codex.md")),
         ("pi", include_str!("../docs/pi.md")),
         ("concepts", include_str!("../docs/concepts.md")),
@@ -969,109 +969,104 @@ fn doctor_gives_a_safe_action_for_a_directory_target() {
 
 #[test]
 fn project_adopt_render_check_and_apply() {
-    let home = TempDir::new().unwrap();
-    let repository = TempDir::new().unwrap();
-    assert!(
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(repository.path())
-            .status()
-            .unwrap()
-            .success()
-    );
-    let original = "# Existing\n\nKeep these bytes.\n";
-    fs::write(repository.path().join("AGENTS.md"), original).unwrap();
-    fs::write(
-        repository.path().join("CLAUDE.local.md"),
-        "tracked local file\n",
-    )
-    .unwrap();
-    assert!(
-        Command::new("git")
-            .args(["add", "CLAUDE.local.md"])
-            .current_dir(repository.path())
-            .status()
-            .unwrap()
-            .success()
-    );
+    for (id, filename, section_filename) in [
+        ("agents", "AGENTS.md", "agents.md"),
+        ("claude", "CLAUDE.md", "claude-code.md"),
+    ] {
+        let home = TempDir::new().unwrap();
+        let repository = TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repository.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let section_path = repository
+            .path()
+            .join(".mdmanager/sections")
+            .join(section_filename);
+        let original = "# Existing\n\nKeep these bytes.\n";
+        fs::write(repository.path().join(filename), original).unwrap();
+        fs::write(
+            repository.path().join("CLAUDE.local.md"),
+            "tracked local file\n",
+        )
+        .unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "CLAUDE.local.md"])
+                .current_dir(repository.path())
+                .status()
+                .unwrap()
+                .success()
+        );
 
-    assert_pipe_refuses(
-        home.path(),
-        repository.path(),
-        &["project", "adopt", "agents"],
-    );
+        assert_pipe_refuses(home.path(), repository.path(), &["project", "adopt", id]);
 
-    let adopted = mdmanager_in(
-        home.path(),
-        repository.path(),
-        &["project", "adopt", "agents", "--yes"],
-    );
-    assert!(
-        adopted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&adopted.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
-        original
-    );
-    assert_eq!(
-        fs::read_to_string(repository.path().join(".mdmanager/sections/agents.md")).unwrap(),
-        original
-    );
-    assert!(!repository.path().join(".gitignore").exists());
-
-    let rendered = mdmanager_in(
-        home.path(),
-        repository.path(),
-        &["project", "render", "agents"],
-    );
-    assert!(rendered.status.success());
-    assert_eq!(String::from_utf8(rendered.stdout).unwrap(), original);
-    assert!(
-        mdmanager_in(home.path(), repository.path(), &["project", "check"])
-            .status
-            .success()
-    );
-
-    fs::write(
-        repository.path().join(".mdmanager/sections/agents.md"),
-        "# Changed\n",
-    )
-    .unwrap();
-    let difference = mdmanager_in(
-        home.path(),
-        repository.path(),
-        &["project", "diff", "agents"],
-    );
-    assert!(difference.status.success());
-    let difference = String::from_utf8(difference.stdout).unwrap();
-    assert!(difference.contains("---"));
-    assert!(difference.contains("+++"));
-    assert!(
-        !mdmanager_in(home.path(), repository.path(), &["project", "check"])
-            .status
-            .success()
-    );
-    assert_pipe_refuses(
-        home.path(),
-        repository.path(),
-        &["project", "apply", "agents"],
-    );
-
-    assert!(
-        mdmanager_in(
+        let adopted = mdmanager_in(
             home.path(),
             repository.path(),
-            &["project", "apply", "agents", "--yes"],
-        )
-        .status
-        .success()
-    );
-    assert_eq!(
-        fs::read_to_string(repository.path().join("AGENTS.md")).unwrap(),
-        "# Changed\n"
-    );
+            &["project", "adopt", id, "--yes"],
+        );
+        assert!(
+            adopted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&adopted.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(repository.path().join(filename)).unwrap(),
+            original
+        );
+        assert_eq!(fs::read_to_string(&section_path).unwrap(), original);
+        assert!(!repository.path().join(".gitignore").exists());
+
+        let manifest_path = repository.path().join(".mdmanager/project.toml");
+        let manifest_source = fs::read_to_string(&manifest_path).unwrap();
+        let manifest: toml::Value = toml::from_str(&manifest_source).unwrap();
+        assert_eq!(manifest["sections"][0]["id"].as_str(), Some(id));
+        assert_eq!(
+            manifest["sections"][0]["path"].as_str(),
+            Some(format!("sections/{section_filename}").as_str())
+        );
+
+        let rendered = mdmanager_in(home.path(), repository.path(), &["project", "render", id]);
+        assert!(rendered.status.success());
+        assert_eq!(String::from_utf8(rendered.stdout).unwrap(), original);
+        assert!(
+            mdmanager_in(home.path(), repository.path(), &["project", "check"])
+                .status
+                .success()
+        );
+
+        fs::write(&section_path, "# Changed\n").unwrap();
+        let difference = mdmanager_in(home.path(), repository.path(), &["project", "diff", id]);
+        assert!(difference.status.success());
+        let difference = String::from_utf8(difference.stdout).unwrap();
+        assert!(difference.contains("---"));
+        assert!(difference.contains("+++"));
+        assert!(
+            !mdmanager_in(home.path(), repository.path(), &["project", "check"])
+                .status
+                .success()
+        );
+        assert_pipe_refuses(home.path(), repository.path(), &["project", "apply", id]);
+
+        assert!(
+            mdmanager_in(
+                home.path(),
+                repository.path(),
+                &["project", "apply", id, "--yes"],
+            )
+            .status
+            .success()
+        );
+        assert_eq!(
+            fs::read_to_string(repository.path().join(filename)).unwrap(),
+            "# Changed\n"
+        );
+    }
 }
 
 #[test]
@@ -1192,10 +1187,14 @@ fn project_create_authors_management_then_applies_the_root_file() {
     );
     assert!(created.status.success());
     assert!(!repository.path().join("CLAUDE.md").exists());
+    assert_eq!(
+        fs::read_to_string(repository.path().join(".mdmanager/sections/claude-code.md")).unwrap(),
+        "# New project instructions\n"
+    );
     let agents = repository.path().join("AGENTS.md").canonicalize().unwrap();
     for (content, warns) in [("# Claude instructions\n", true), ("@AGENTS.md\n", false)] {
         fs::write(
-            repository.path().join(".mdmanager/sections/claude.md"),
+            repository.path().join(".mdmanager/sections/claude-code.md"),
             content,
         )
         .unwrap();

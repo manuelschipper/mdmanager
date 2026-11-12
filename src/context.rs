@@ -367,6 +367,24 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
     skip_agents_md_loaded_through_claude_md(&mut sources, paths);
     sort_sources(&mut sources);
 
+    let warnings = claude_settings_files(directory, paths)
+        .into_iter()
+        .filter(|path| path.starts_with(claude_managed_dir()))
+        .filter_map(|path| {
+            let value =
+                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&path).ok()?).ok()?;
+            value
+                .get("claudeMd")?
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .map(|_| {
+                    format!(
+                        "{} injects managed claudeMd instructions that Context does not show",
+                        display_path(&path, paths, directory)
+                    )
+                })
+        })
+        .collect();
     let startup = sources
         .iter()
         .filter(|source| matches!(source.state, SourceState::Startup))
@@ -375,7 +393,7 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
         runtime: ContextRuntime::Claude,
         directory: directory.to_owned(),
         sources,
-        warnings: Vec::new(),
+        warnings,
         summary: format!("{startup} load at startup"),
     }
 }
@@ -549,14 +567,29 @@ fn apply_claude_exclusions(sources: &mut [ContextSource], directory: &Path, path
         if source.scope == "managed policy" {
             continue;
         }
-        // A pattern can name a symlinked file by its link path or its resolved target.
-        let target = fs::canonicalize(&source.path).ok();
+        // Claude builds canonical instruction filenames; rules retain their on-disk names.
+        let path = if !is_rule_path(&source.path)
+            && let Some(name) = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
+                .into_iter()
+                .find(|name| claude_filename_matches(&source.path, name))
+        {
+            source.path.with_file_name(name)
+        } else {
+            source.path.clone()
+        };
+        // Real symlink paths and targets can match, but case-only aliases cannot.
+        let target = fs::canonicalize(&path).ok().filter(|target| {
+            *target == path || !target.as_os_str().eq_ignore_ascii_case(path.as_os_str())
+        });
         if let Some((_, _, settings_path)) = patterns.iter().find(|(raw, pattern, _)| {
-            pattern.matches_path(&source.path)
+            pattern.matches_path(&path)
                 || target
                     .as_ref()
                     .is_some_and(|target| pattern.matches_path(target))
                 || (Path::new(raw).is_absolute()
+                    && !Path::new(raw)
+                        .as_os_str()
+                        .eq_ignore_ascii_case(path.as_os_str())
                     && target.is_some()
                     && fs::canonicalize(raw).ok() == target)
         }) {
@@ -2013,7 +2046,7 @@ fn is_claude_instruction_path(path: &Path) -> bool {
         || is_rule_path(path)
 }
 
-fn claude_filename_matches(path: &Path, name: &str) -> bool {
+pub(crate) fn claude_filename_matches(path: &Path, name: &str) -> bool {
     path.file_name().is_some_and(|file_name| {
         if file_name == name {
             return true;
@@ -2590,23 +2623,99 @@ mod tests {
     #[test]
     fn claude_exclusion_patterns_match_absolute_paths() {
         let temp = TempDir::new().unwrap();
+        let home = paths(temp.path());
         let cwd = temp.path().join("repo");
         fs::create_dir_all(cwd.join(".claude")).unwrap();
+        let cwd = fs::canonicalize(cwd).unwrap();
         let instruction = cwd.join("CLAUDE.md");
         fs::write(&instruction, "project").unwrap();
-        fs::write(
-            cwd.join(".claude/settings.local.json"),
-            "{\"claudeMdExcludes\":[\"CLAUDE.md\"]}",
-        )
-        .unwrap();
-
-        let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &paths(temp.path()), None);
-        let source = audit
-            .sources
-            .iter()
-            .find(|source| source.path == instruction)
+        for pattern in [
+            "CLAUDE.md".to_owned(),
+            instruction
+                .with_file_name("claude.md")
+                .display()
+                .to_string(),
+        ] {
+            fs::write(
+                cwd.join(".claude/settings.local.json"),
+                serde_json::json!({"claudeMdExcludes": [pattern]}).to_string(),
+            )
             .unwrap();
-        assert!(matches!(source.state, SourceState::Startup));
+
+            let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &home, None);
+            let source = audit
+                .sources
+                .iter()
+                .find(|source| source.path == instruction)
+                .unwrap();
+            assert!(matches!(source.state, SourceState::Startup));
+        }
+        fs::remove_file(instruction).unwrap();
+        let settings = temp.path().join(".claude/settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        for (relative, name) in [
+            ("claude/claude.md", "CLAUDE.md"),
+            ("local/ClAuDe.LoCaL.MD", "CLAUDE.local.md"),
+            ("agents/aGeNtS.Md", "AGENTS.md"),
+        ] {
+            let instruction = cwd.join(relative);
+            let parent = instruction.parent().unwrap();
+            fs::create_dir_all(parent).unwrap();
+            fs::write(&instruction, "nested").unwrap();
+            let canonical = instruction.with_file_name(name);
+            let case_insensitive = regular_file(&canonical);
+            for (pattern, excluded) in [
+                (instruction.display().to_string(), false),
+                (
+                    format!("**/{}", instruction.file_name().unwrap().to_string_lossy()),
+                    false,
+                ),
+                (canonical.display().to_string(), true),
+                (format!("**/{name}"), true),
+            ] {
+                fs::write(
+                    &settings,
+                    serde_json::json!({"claudeMdExcludes": [pattern]}).to_string(),
+                )
+                .unwrap();
+                let startup = Audit::resolve(ContextRuntime::Claude, parent, &home, None);
+                let scan = scan_claude_descendants(&cwd, &home, HashSet::new());
+                for (sources, path) in [(startup.sources, &canonical), (scan.sources, &instruction)]
+                {
+                    let source = sources.iter().find(|source| source.path == *path);
+                    assert_eq!(source.is_some(), case_insensitive);
+                    if let Some(source) = source {
+                        assert_eq!(
+                            matches!(source.state, SourceState::Excluded(_)),
+                            excluded,
+                            "{pattern} against {}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+
+        let rule = cwd.join(".claude/rules/claude.md");
+        fs::create_dir_all(rule.parent().unwrap()).unwrap();
+        fs::write(&rule, "rule").unwrap();
+        for (pattern, excluded) in [
+            (rule.display().to_string(), true),
+            ("**/CLAUDE.md".into(), false),
+        ] {
+            fs::write(
+                &settings,
+                serde_json::json!({"claudeMdExcludes": [pattern]}).to_string(),
+            )
+            .unwrap();
+            let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &home, None);
+            let source = audit
+                .sources
+                .iter()
+                .find(|source| source.path == rule)
+                .unwrap();
+            assert_eq!(matches!(source.state, SourceState::Excluded(_)), excluded);
+        }
     }
 
     #[cfg(unix)]
@@ -2639,13 +2748,20 @@ mod tests {
         )
         .unwrap();
 
-        let audit = Audit::resolve(ContextRuntime::Claude, &cwd, &paths(temp.path()), None);
-        let source = audit
-            .sources
-            .iter()
-            .find(|source| source.path == instruction)
-            .unwrap();
-        assert!(matches!(source.state, SourceState::Excluded(_)));
+        for directory in [cwd.clone(), fs::canonicalize(&cwd).unwrap()] {
+            let audit = Audit::resolve(
+                ContextRuntime::Claude,
+                &directory,
+                &paths(temp.path()),
+                None,
+            );
+            let source = audit
+                .sources
+                .iter()
+                .find(|source| source.path == directory.join("CLAUDE.md"))
+                .unwrap();
+            assert!(matches!(source.state, SourceState::Excluded(_)));
+        }
     }
 
     #[test]

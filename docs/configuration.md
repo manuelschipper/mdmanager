@@ -40,7 +40,7 @@ path = "sections/common.md"
 [[sections]]
 id = "claude"
 name = "Claude"
-path = "sections/claude.md"
+path = "sections/claude-code.md"
 
 [targets.codex]
 path = "~/.codex/AGENTS.md"
@@ -144,7 +144,7 @@ An opted-in Git repository keeps this source beside its generated root files:
   project.toml
   sections/
     common.md
-    claude.md
+    claude-code.md
 AGENTS.md
 CLAUDE.md
 ```
@@ -160,7 +160,7 @@ path = "sections/common.md"
 [[sections]]
 id = "claude"
 name = "Claude"
-path = "sections/claude.md"
+path = "sections/claude-code.md"
 
 [targets.agents]
 sections = ["common"]

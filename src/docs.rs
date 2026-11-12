@@ -30,7 +30,7 @@ const TOPICS: &[Topic] = &[
     topic!(
         "claude",
         "Understand Claude files, rules, imports, and exclusions.",
-        "../docs/claude.md"
+        "../docs/claude-code.md"
     ),
     topic!(
         "codex",

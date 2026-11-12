@@ -31,7 +31,7 @@ Use these canonical domain terms when naming and searching. Start at the owner b
 | Browsing / document navigation | [library_view.rs](src/tui/library_view.rs) browses both Personal and Project Sections and Global Profiles; [managed_view.rs](src/tui/managed_view.rs), [context_view.rs](src/tui/context_view.rs) and [overview.rs](src/tui/overview.rs) own their pages. [document.rs](src/tui/document.rs) owns wrapping, search, line jumps and scroll state; App owns view history. |
 | Atomic writes / ownership hashes | [config.rs](src/config.rs): `atomic_write` replaces, `atomic_create` refuses clobbering, and `sha256_hex` defines persisted ownership hashes. Scope owners validate authority and reviewed inputs before calling these primitives. |
 
-For runtime discovery limitations, read the relevant [Claude](docs/claude.md),
+For runtime discovery limitations, read the relevant [Claude](docs/claude-code.md),
 [Codex](docs/codex.md), [Cursor](docs/cursor.md), or [Pi](docs/pi.md) guide.
 For disable/restore support read [command recipes](docs/start.md#command-recipes); for reload boundaries and
 theme behavior read [TUI](docs/tui.md). [DESIGN.md](DESIGN.md) describes module composition.

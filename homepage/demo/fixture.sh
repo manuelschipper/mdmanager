@@ -118,7 +118,7 @@ path = "sections/common.md"
 [[sections]]
 id = "claude"
 name = "Claude workflow"
-path = "sections/claude.md"
+path = "sections/claude-code.md"
 
 [[sections]]
 id = "codex"
@@ -142,7 +142,7 @@ Harbor is a Rust service for background jobs.
 - Put job processing in src/worker/.
 - Run cargo test before handing off a change.
 MD
-cat > .mdmanager/sections/claude.md <<'MD'
+cat > .mdmanager/sections/claude-code.md <<'MD'
 ## Claude workflow
 
 - Check .claude/rules/ for path-specific guidance.

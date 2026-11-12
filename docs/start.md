@@ -68,7 +68,7 @@ are outside its scope.
   writing either one. This is independent of Project management and works across linked worktrees.
   `AGENTS.override.md` replaces—and therefore shadows—the regular `AGENTS.md` candidate for Pi and
   Codex. `CLAUDE.local.md` adds instructions after `CLAUDE.md` for Claude, but by default it also
-  stops Claude reading `AGENTS.md`; see [Claude](claude.md#agentsmd).
+  stops Claude reading `AGENTS.md`; see [Claude](claude-code.md#agentsmd).
 - **Global Instructions** are personal machine configuration. `[targets.*]` is the shared catalog.
   Profiles compose Personal Sections into the catalog Targets they name. Cursor's Global target is
   the rule `~/.cursor/rules/mdmanager.mdc`; see [Cursor](cursor.md#managed-files).

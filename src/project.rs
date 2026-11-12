@@ -361,7 +361,7 @@ pub(crate) fn create_plan(root: &Path, id: &str, content: &str) -> Result<Create
         ));
     }
     let base = reviewed_manifest.as_deref().unwrap_or("format = 1\n");
-    let section_relative = format!("sections/{id}.md");
+    let section_relative = default_section_path(id);
     let manifest_source = format!(
         "{}\n\n[[sections]]\nid = \"{id}\"\nname = \"{}\"\npath = \"{section_relative}\"\n\n[targets.{id}]\nsections = [\"{id}\"]\n",
         base.trim_end(),
@@ -404,7 +404,7 @@ pub(crate) fn adopt(root: &Path, id: &str) -> Result<Workspace, String> {
     {
         return Err(format!("project already defines section {id}"));
     }
-    let section_relative = format!("sections/{id}.md");
+    let section_relative = default_section_path(id);
     let section_path = root.join(".mdmanager").join(&section_relative);
     if section_path.exists() {
         return Err(format!("refusing to overwrite {}", section_path.display()));
@@ -542,6 +542,12 @@ pub(crate) fn target_filename(id: &str) -> Result<&'static str, String> {
         .find(|(target, _)| *target == id)
         .map(|(_, filename)| *filename)
         .ok_or_else(|| format!("unknown project target {id}; expected agents or claude"))
+}
+
+fn default_section_path(id: &str) -> String {
+    // sections/claude.md would load as a nested CLAUDE.md on case-insensitive filesystems.
+    let filename = if id == "claude" { "claude-code" } else { id };
+    format!("sections/{filename}.md")
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf, String> {
