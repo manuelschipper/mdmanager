@@ -542,9 +542,7 @@ impl LocalRepository {
                 (self.root.clone(), parent.join("AGENTS.override.md"))
             }
             DisableOwned::Claude { recovery, .. } => {
-                if !["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
-                    .iter()
-                    .any(|name| claude_filename_matches(source, name))
+                if !matches!(filename, "CLAUDE.md" | "CLAUDE.local.md" | "AGENTS.md")
                     || source
                         .ancestors()
                         .any(|ancestor| ancestor.ends_with(".claude/rules"))
@@ -672,16 +670,15 @@ impl LocalRepository {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| "disable source filename is not UTF-8".to_owned())?;
+        let claude_name = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
+            .into_iter()
+            .find(|name| claude_filename_matches(&source, name));
         match runtime {
             DisableRuntime::Claude => {
                 let is_rule = source
                     .ancestors()
                     .any(|ancestor| ancestor.ends_with(".claude/rules"));
-                if is_rule
-                    || !["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
-                        .iter()
-                        .any(|name| claude_filename_matches(&source, name))
-                {
+                if is_rule || claude_name.is_none() {
                     return Err(format!(
                         "{} is not a Claude instruction file mdmanager.ai can disable",
                         source.display()
@@ -714,10 +711,10 @@ impl LocalRepository {
             }
         }
         // Pi writes beside the source, using the same physical path as Git's root.
-        // Claude exclusions retain the logical spelling used by the runtime.
+        // Claude uses the logical directory and canonical filename when matching exclusions.
         Ok(match runtime {
             DisableRuntime::Pi => resolved_parent.join(filename),
-            DisableRuntime::Claude => source,
+            DisableRuntime::Claude => source.with_file_name(claude_name.unwrap()),
         })
     }
 
@@ -1963,17 +1960,31 @@ mod tests {
                 continue;
             }
             let plan = plan.unwrap();
-            assert_eq!(plan.source, source);
+            let canonical_source = repository.path().join(canonical);
+            assert_eq!(plan.source, canonical_source);
             local_repository.apply_disable(&plan).unwrap();
             let disabled = fs::read_to_string(&settings).unwrap();
             assert_eq!(
                 disabled,
                 format!(
                     "{{\n    \"z-last\": true,\n    \"nested\": {{ \"keep\": 1 }},\n    \"claudeMdExcludes\": [{}]\n}}\n",
-                    serde_json::to_string(&source.display().to_string()).unwrap()
+                    serde_json::to_string(&canonical_source.display().to_string()).unwrap()
                 )
             );
 
+            fs::remove_file(&source).unwrap();
+            assert_eq!(
+                local_repository
+                    .disable_status(DisableRuntime::Claude)
+                    .unwrap(),
+                DisableStatus::Owned
+            );
+            assert_eq!(
+                local_repository
+                    .disabled_source(DisableRuntime::Claude)
+                    .unwrap(),
+                Some(canonical_source)
+            );
             local_repository
                 .restore_disable(DisableRuntime::Claude)
                 .unwrap();

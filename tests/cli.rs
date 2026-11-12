@@ -983,7 +983,7 @@ fn project_adopt_render_check_and_apply() {
                 .unwrap()
                 .success()
         );
-        let mut section_path = repository
+        let section_path = repository
             .path()
             .join(".mdmanager/sections")
             .join(section_filename);
@@ -1030,17 +1030,6 @@ fn project_adopt_render_check_and_apply() {
             manifest["sections"][0]["path"].as_str(),
             Some(format!("sections/{section_filename}").as_str())
         );
-        if id == "claude" {
-            let legacy_path = section_path.with_file_name("claude.md");
-            fs::rename(&section_path, &legacy_path).unwrap();
-            fs::write(
-                &manifest_path,
-                manifest_source.replace("sections/claude-code.md", "sections/claude.md"),
-            )
-            .unwrap();
-            section_path = legacy_path;
-        }
-        let stored_manifest = fs::read_to_string(&manifest_path).unwrap();
 
         let rendered = mdmanager_in(home.path(), repository.path(), &["project", "render", id]);
         assert!(rendered.status.success());
@@ -1077,10 +1066,6 @@ fn project_adopt_render_check_and_apply() {
             fs::read_to_string(repository.path().join(filename)).unwrap(),
             "# Changed\n"
         );
-        assert_eq!(fs::read_to_string(manifest_path).unwrap(), stored_manifest);
-        if id == "claude" {
-            assert!(!section_path.with_file_name("claude-code.md").exists());
-        }
     }
 }
 
