@@ -16,7 +16,7 @@ ROOT = HERE.parent
 OUT = HERE / "dist"
 SITE = "https://mdmanager.ai"
 DESCRIPTION = (
-    "Manage your CLAUDE.md and AGENTS.md across machines and runtimes. "
+    "Manage your AGENTS.md across machines and runtimes. "
     "Reuse Markdown sections and choose a profile for each setup."
 )
 

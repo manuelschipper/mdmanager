@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Manage your CLAUDE.md and AGENTS.md across machines and runtimes.</strong>
+  <strong>Manage your AGENTS.md across machines and runtimes.</strong>
 </p>
 
 <p align="center">
