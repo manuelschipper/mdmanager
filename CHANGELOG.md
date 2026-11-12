@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Claude exclusions and AGENTS.md** — Context ignores excluded `CLAUDE.md`,
+  `.claude/CLAUDE.md`, and `CLAUDE.local.md` when deciding whether `AGENTS.md` loads, including
+  subfolder instructions. Apply warnings use the same resolution, and Local disable explains
+  when excluding Claude files lets `AGENTS.md` start loading.
 - **Claude plugin ID** — Context reads `cc-plugin-agents-md@builtin` as well as the old
   `agents-md@builtin` ID for Project instructions and plugin enablement, so settings written by
   newer Claude Code versions are read correctly. The new ID wins within one settings file.
@@ -20,7 +24,8 @@
   `CLAUDE.local.md`, and `AGENTS.md` when the filesystem resolves the canonical name to the same
   file and writes the canonical filename Claude matches. Status and restore work after deleting
   the source. Context matches exclusions case-sensitively against canonical instruction names,
-  while retaining symlink path and target matching.
+  resolving absolute pattern directories while preserving filename case. Symlinked instructions
+  match their link path; rules also match their resolved target.
 - **Managed Claude instructions** — Context warns when a managed settings file or drop-in injects
   non-empty `claudeMd` instructions, naming the file without displaying the instruction text.
 - **Claude instruction warning coverage** — Project and Local apply warn when replacing a Claude

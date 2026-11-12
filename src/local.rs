@@ -1252,7 +1252,7 @@ impl LocalRepository {
             source: source.clone(),
             output: output.clone(),
             text: format!(
-                "Shared file\n  {} will not be modified.\n\nEdit\n  {}\n  add {} to claudeMdExcludes{}\n\nThe setting is machine-local and shared by this repository's worktrees.\nA new Claude session is required.",
+                "Shared file\n  {} will not be modified.\n\nEdit\n  {}\n  add {} to claudeMdExcludes{}\n\nThe setting is machine-local and shared by this repository's worktrees.\nExcluding all CLAUDE files on the launch path lets AGENTS.md start loading under the default Project instructions setting.\nA new Claude session is required.",
                 source.display(),
                 output.display(),
                 source.display(),
