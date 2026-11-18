@@ -860,7 +860,7 @@ fn claude_instruction_files(directory: &Path, paths: &Paths) -> ClaudeInstructio
 /// launch directory only. In a Git repository the local file lives at the main checkout's root
 /// and wins over one an older Claude left in the launch directory; outside Git, or when the
 /// repository root is the home directory, it stays beside the project settings.
-fn claude_settings_files(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
+pub(crate) fn claude_settings_files(directory: &Path, paths: &Paths) -> Vec<PathBuf> {
     let managed = claude_managed_dir();
     let mut files = fs::read_dir(managed.join("managed-settings.d"))
         .into_iter()
@@ -2129,7 +2129,7 @@ fn regular_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
-fn is_rule_path(path: &Path) -> bool {
+pub(crate) fn is_rule_path(path: &Path) -> bool {
     let components = path.components().collect::<Vec<_>>();
     components
         .windows(2)

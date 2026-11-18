@@ -124,7 +124,6 @@ struct App {
     project: Option<Workspace>,
     project_error: Option<String>,
     project_root: PathBuf,
-    watch_root: Option<PathBuf>,
     local_repository: Option<LocalRepository>,
     global_sources: Vec<(ContextRuntime, ContextSource)>,
     context: ContextUi,
@@ -151,12 +150,7 @@ struct App {
 
 impl App {
     fn watch_input(&self) -> WatchInput {
-        WatchInput::new(
-            &self.inspection.context,
-            &self.paths,
-            self.global.as_ref(),
-            &self.watch_root,
-        )
+        WatchInput::new(&self.inspection, &self.paths)
     }
 
     fn refresh_request(&self) -> RefreshRequest {
@@ -252,7 +246,6 @@ impl App {
         let Observations {
             project,
             project_error,
-            watch_root,
             project_root,
             global,
             global_error,
@@ -262,7 +255,7 @@ impl App {
             inspection,
             signature,
         } = topology.scope(|| {
-            let baseline = Baseline::startup(&paths, &directory, global.as_ref());
+            let baseline = Baseline::startup(&paths, &directory);
             Observations::discover(
                 &paths,
                 &directory,
@@ -295,7 +288,6 @@ impl App {
             project,
             project_error,
             project_root,
-            watch_root,
             local_repository,
             global_sources,
             context,
@@ -476,7 +468,6 @@ impl App {
         let Observations {
             project,
             project_error,
-            watch_root,
             project_root,
             global,
             global_error,
@@ -488,7 +479,6 @@ impl App {
         } = observations;
         self.project = project;
         self.project_error = project_error;
-        self.watch_root = watch_root;
         self.project_root = project_root;
         let mut theme_error = None;
         let mut render_error = None;
@@ -686,7 +676,7 @@ impl App {
         if self.context.poll_scan(self.global.as_ref()) {
             let selection = self.context_selection();
             self.inspection.observe_context(self.context.audit.clone());
-            self.watcher.signature.observe_context(&self.context.audit);
+            self.watcher.signature.observe_known(&self.inspection);
             self.restore_context_selection(selection);
         }
     }
@@ -723,11 +713,11 @@ impl App {
             .topology()
             .scope(|| context.select_runtime(index, global));
         self.inspection.observe_context(self.context.audit.clone());
-        // Only the Context sources half of the signature depends on the runtime. A running
-        // check of the previous runtime can no longer be accepted; a change it found is found
-        // again by the next one.
+        // Only the known-files half of the signature depends on the runtime. A running check
+        // of the previous runtime can no longer be accepted; a change it found is found again
+        // by the next one.
         self.watcher.invalidate();
-        self.watcher.signature.observe_context(&self.context.audit);
+        self.watcher.signature.observe_known(&self.inspection);
         self.context_entry_index = 0;
         self.context_nested_expanded = false;
         self.document.scroll = 0;

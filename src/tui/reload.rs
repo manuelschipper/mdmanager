@@ -7,14 +7,14 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 use super::inspection::{InspectionInput, InstructionInspection};
 use crate::config::{GlobalConfig, Paths};
 use crate::context::{
-    Audit, CodexSettings, ContextRuntime, ContextSource, SourceGroup, SourceState,
-    claude_config_dir, claude_filename_matches, claude_managed_dir, codex_home, codex_settings,
-    pi_agent_dir,
+    Audit, ContextRuntime, ContextSource, SourceGroup, SourceState, claude_config_dir,
+    claude_filename_matches, claude_managed_dir, claude_settings_files, codex_home, codex_settings,
+    is_rule_path, pi_agent_dir,
 };
 use crate::deploy;
 use crate::git_worktree::Topology;
@@ -28,125 +28,136 @@ const AUTO_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) struct WatchInput {
     paths: Paths,
     directory: PathBuf,
-    // Context sources and their imports.
-    sources: Vec<PathBuf>,
-    global_targets: Vec<PathBuf>,
-    watch_root: Option<PathBuf>,
+    known: Vec<PathBuf>,
 }
 
 impl WatchInput {
-    pub(super) fn new(
-        audit: &Audit,
-        paths: &Paths,
-        global: Option<&GlobalConfig>,
-        watch_root: &Option<PathBuf>,
-    ) -> Self {
+    pub(super) fn new(inspection: &InstructionInspection, paths: &Paths) -> Self {
         Self {
-            sources: source_paths(audit),
-            ..Self::before_discovery(paths, &audit.directory, global, watch_root)
+            known: known_paths(inspection),
+            ..Self::before_discovery(paths, &inspection.context.directory)
         }
     }
 
-    // Before the first discovery no Context sources are known yet.
-    fn before_discovery(
-        paths: &Paths,
-        directory: &Path,
-        global: Option<&GlobalConfig>,
-        watch_root: &Option<PathBuf>,
-    ) -> Self {
+    // Before the first discovery no file has been observed yet.
+    fn before_discovery(paths: &Paths, directory: &Path) -> Self {
         Self {
             paths: paths.clone(),
             directory: directory.to_owned(),
-            sources: Vec::new(),
-            global_targets: global.map_or_else(Vec::new, |global| {
-                global
-                    .target_names()
-                    .filter_map(|target| global.target_path(target).ok())
-                    .collect()
-            }),
-            watch_root: watch_root.clone(),
+            known: Vec::new(),
         }
     }
 }
 
-/// How a watched tree is walked; each mode mirrors the discovery that reads the tree.
-#[derive(Clone, Copy)]
-enum Walk {
-    /// Every file, such as mdmanager state or a runtime settings directory.
-    All,
-    /// A Git worktree, holding the instruction files Claude's subfolder scan finds. Like the
-    /// scan, it skips only `.git` directories and does not enter linked directories.
-    Project,
-    /// A Claude or Cursor rule directory: files with this extension, following links and
-    /// skipping no directory, as the rule resolvers do.
-    Rules(&'static str),
-}
-
-// Only files discovery would read are hashed, so a missing tree, an empty one, and one holding
-// only other files all hash alike.
-fn hash_tree(path: &Path, hasher: &mut DefaultHasher, walk: Walk) {
-    let rules = matches!(walk, Walk::Rules(_));
-    let walker = WalkDir::new(path)
-        .follow_links(rules)
-        .into_iter()
-        .filter_entry(|entry| rules || !ignored_watch_entry(entry));
-    for entry in walker.flatten() {
-        // Claude's subfolder scan follows links inside nested rule directories.
-        if matches!(walk, Walk::Project)
-            && entry.path().ends_with(".claude/rules")
-            && entry.path().is_dir()
-        {
-            hash_tree(entry.path(), hasher, Walk::Rules("md"));
-        }
-        // A directory's own metadata changes whenever anything inside it is added or removed.
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        let relevant = match walk {
-            Walk::All => true,
-            Walk::Project => relevant_project_file(entry.path()),
-            Walk::Rules(rule_extension) => extension(entry.path()) == Some(rule_extension),
-        };
-        if !relevant {
-            continue;
-        }
-        entry.path().hash(hasher);
-        // The resolved path changes when a linked directory anywhere above the file, even
-        // above the walked tree, is retargeted, whatever the new file's metadata.
-        fs::canonicalize(entry.path()).ok().hash(hasher);
-        if entry.path_is_symlink() {
-            fs::read_link(entry.path()).ok().hash(hasher);
-        }
-        let metadata = if entry.file_type().is_symlink() && entry.path().is_dir() {
-            fs::symlink_metadata(entry.path())
-        } else {
-            fs::metadata(entry.path())
-        };
-        if let Ok(metadata) = metadata {
-            metadata.len().hash(hasher);
-            metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos())
-                .hash(hasher);
-        }
-    }
-}
-
-fn source_paths(audit: &Audit) -> Vec<PathBuf> {
-    audit
+/// Every path the accepted generation read or looked for: Context sources and their imports,
+/// and each file its inspection observed, such as Project, Local and Global targets, Sections,
+/// and open documents.
+fn known_paths(inspection: &InstructionInspection) -> Vec<PathBuf> {
+    let mut known = inspection
+        .context
         .sources
         .iter()
         .flat_map(|source| std::iter::once(&source.path).chain(&source.imports))
+        .chain(inspection.files.keys())
         .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+    known.sort();
+    known.dedup();
+    known
 }
 
-fn hash_source(path: &Path) -> u64 {
+// A path counts only as a file discovery could read, so a missing path, a directory, and a
+// directory's own metadata all hash alike.
+fn hash_file(path: &Path, hasher: &mut DefaultHasher) {
+    let Ok(metadata) = fs::metadata(path) else {
+        // A dangling link still records where it points.
+        if fs::symlink_metadata(path).is_ok() {
+            path.hash(hasher);
+            fs::read_link(path).ok().hash(hasher);
+        }
+        return;
+    };
+    if metadata.is_dir() {
+        return;
+    }
+    path.hash(hasher);
+    // The resolved path changes when a linked directory anywhere above the file is
+    // retargeted, whatever the new file's metadata.
+    fs::canonicalize(path).ok().hash(hasher);
+    fs::read_link(path).ok().hash(hasher);
+    metadata.len().hash(hasher);
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .hash(hasher);
+}
+
+fn hash_known(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
-    hash_tree(path, &mut hasher, Walk::All);
+    hash_file(path, &mut hasher);
     hasher.finish()
+}
+
+// Every file below `root`, such as mdmanager's own configuration, Library and state.
+fn hash_all(root: &Path, hasher: &mut DefaultHasher) {
+    for entry in WalkDir::new(root).into_iter().flatten() {
+        hash_file(entry.path(), hasher);
+    }
+}
+
+// A Claude or Cursor rule directory: files with the runtime's extension, following links and
+// skipping no directory, as `push_rules` and `cursor_rule_files` do.
+fn hash_rules(root: &Path, rule_extension: &str, hasher: &mut DefaultHasher) {
+    for entry in WalkDir::new(root).follow_links(true).into_iter().flatten() {
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some(rule_extension)
+        {
+            hash_file(entry.path(), hasher);
+        }
+    }
+}
+
+// The files Claude's subfolder scan (`scan_claude_descendants`) can report, walked the same
+// way: below the launch directory, skipping `.git` and the launch directory's own `.claude`,
+// and entering linked directories only inside rule directories.
+fn hash_descendants(directory: &Path, hasher: &mut DefaultHasher) {
+    let launch_claude = directory.join(".claude");
+    let walker = WalkDir::new(directory)
+        .follow_links(true)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.file_name() != ".git"
+                && entry.path() != launch_claude
+                && (!entry.path().is_symlink()
+                    || !entry.path().is_dir()
+                    || is_rule_path(entry.path()))
+        });
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let nested_instruction = path.parent() != Some(directory)
+            && !is_rule_path(path)
+            && (claude_filename_matches(path, "CLAUDE.md")
+                || claude_filename_matches(path, "CLAUDE.local.md")
+                || (claude_filename_matches(path, "AGENTS.md")
+                    && !path
+                        .components()
+                        .any(|component| component.as_os_str() == ".agents")));
+        let nested_rule =
+            path.extension().is_some_and(|extension| extension == "md") && is_rule_path(path);
+        if nested_instruction || nested_rule {
+            hash_file(path, hasher);
+        }
+    }
 }
 
 fn combine(hashes: impl Iterator<Item = u64>) -> u64 {
@@ -157,17 +168,17 @@ fn combine(hashes: impl Iterator<Item = u64>) -> u64 {
     hasher.finish()
 }
 
-/// The watch signature keeps the accepted audit's own sources apart so a finished Claude
-/// descendant scan can rehash just those without walking every watched tree.
+/// The watch signature keeps the accepted generation's known files apart so a finished Claude
+/// descendant scan or a runtime switch can rehash just those without walking every tree.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct WatchSignature {
-    files: u64,
-    sources: u64,
+    candidates: u64,
+    known: u64,
 }
 
 impl WatchSignature {
-    pub(super) fn observe_context(&mut self, audit: &Audit) {
-        self.sources = combine(source_paths(audit).iter().map(|path| hash_source(path)));
+    pub(super) fn observe_known(&mut self, inspection: &InstructionInspection) {
+        self.known = combine(known_paths(inspection).iter().map(|path| hash_known(path)));
     }
 }
 
@@ -175,162 +186,83 @@ impl WatchSignature {
 /// rather than one taken after discovery, keeps an edit that lands while discovery runs a
 /// difference for the next check.
 pub(super) struct Baseline {
-    files: u64,
-    sources: HashMap<PathBuf, u64>,
+    candidates: u64,
+    known: HashMap<PathBuf, u64>,
     order: Vec<PathBuf>,
 }
 
 impl Baseline {
     pub(super) fn observe(input: &WatchInput) -> Self {
         Self {
-            files: hash_watched_files(input),
-            sources: input
-                .sources
+            candidates: hash_candidates(&input.paths, &input.directory),
+            known: input
+                .known
                 .iter()
-                .map(|path| (path.clone(), hash_source(path)))
+                .map(|path| (path.clone(), hash_known(path)))
                 .collect(),
-            order: input.sources.clone(),
+            order: input.known.clone(),
         }
     }
 
-    /// The baseline for the session's first discovery, before any Context source is known.
-    pub(super) fn startup(paths: &Paths, directory: &Path, global: Option<&GlobalConfig>) -> Self {
-        Self::observe(&WatchInput::before_discovery(
-            paths,
-            directory,
-            global,
-            &crate::git_worktree::worktree_root(directory).ok(),
-        ))
+    /// The baseline for the session's first discovery, before any file is known.
+    pub(super) fn startup(paths: &Paths, directory: &Path) -> Self {
+        Self::observe(&WatchInput::before_discovery(paths, directory))
     }
 
     fn signature(&self) -> WatchSignature {
         WatchSignature {
-            files: self.files,
-            sources: combine(self.order.iter().map(|path| self.sources[path])),
+            candidates: self.candidates,
+            known: combine(self.order.iter().map(|path| self.known[path])),
         }
     }
 
-    /// The signature of a refresh whose audit lists `sources`. Sources the baseline hashed
-    /// keep that hash; only sources the refresh newly found are hashed now. When the refresh
-    /// changed which trees are watched, such as the Git worktree or the Global targets, the
-    /// next check hashes the new trees, differs, and refreshes once more.
-    fn signature_for(&self, sources: &[PathBuf]) -> WatchSignature {
+    /// The signature of a refresh whose inspection knows `known`. Paths the baseline hashed
+    /// keep that hash; only paths the refresh newly observed are hashed now.
+    fn signature_for(&self, known: &[PathBuf]) -> WatchSignature {
         WatchSignature {
-            files: self.files,
-            sources: combine(sources.iter().map(|path| {
-                self.sources
+            candidates: self.candidates,
+            known: combine(known.iter().map(|path| {
+                self.known
                     .get(path)
                     .copied()
-                    .unwrap_or_else(|| hash_source(path))
+                    .unwrap_or_else(|| hash_known(path))
             })),
         }
     }
 }
 
-const ANCESTOR_CANDIDATES: [&str; 11] = [
+/// Names Claude, Codex, Cursor or Pi look for in the launch directory and every ancestor.
+const ANCESTOR_CANDIDATES: [&str; 8] = [
     "AGENTS.override.md",
     "AGENTS.md",
     "AGENTS.MD",
     "CLAUDE.md",
     "CLAUDE.MD",
     "CLAUDE.local.md",
-    ".cursorrules",
     ".claude/CLAUDE.md",
     ".claude/AGENTS.md",
-    ".claude/settings.json",
-    ".claude/settings.local.json",
 ];
 
-// Every runtime resolves the launch directory and its ancestors by name, through any linked
-// `.claude` or rule directory, including ancestors inside the Git worktree.
-fn hash_ancestor_candidates(directory: &Path, codex: &CodexSettings, hasher: &mut DefaultHasher) {
-    for ancestor in directory.ancestors() {
-        for name in ANCESTOR_CANDIDATES {
-            hash_tree(&ancestor.join(name), hasher, Walk::All);
-        }
-        hash_tree(&ancestor.join(".claude/rules"), hasher, Walk::Rules("md"));
-        hash_tree(&ancestor.join(".cursor/rules"), hasher, Walk::Rules("mdc"));
-    }
-    // Codex reads its fallback filenames only from its project root, the nearest ancestor with
-    // a root marker, down to the launch directory; a marker appearing or disappearing on that
-    // chain moves the root.
-    for ancestor in directory.ancestors() {
-        for name in &codex.fallback_names {
-            hash_tree(&ancestor.join(name), hasher, Walk::All);
-        }
-        let markers = codex
-            .root_markers
-            .iter()
-            .map(|marker| ancestor.join(marker).exists())
-            .collect::<Vec<_>>();
-        markers.hash(hasher);
-        if markers.contains(&true) {
-            break;
-        }
-    }
-}
-
-fn ignored_watch_entry(entry: &DirEntry) -> bool {
-    entry.depth() > 0
-        && entry.file_type().is_dir()
-        && matches!(entry.file_name().to_str(), Some(".git"))
-}
-
-fn extension(path: &Path) -> Option<&str> {
-    path.extension().and_then(|extension| extension.to_str())
-}
-
-fn relevant_project_file(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    // The subfolder scan also accepts another spelling the filesystem resolves to these names.
-    ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
-        .into_iter()
-        .any(|candidate| claude_filename_matches(path, candidate))
-        || matches!(
-            name,
-            "AGENTS.MD" | "AGENTS.override.md" | "CLAUDE.MD" | ".cursorrules"
-        )
-        || (matches!(name, "settings.json" | "settings.local.json")
-            && path
-                .parent()
-                .is_some_and(|parent| parent.ends_with(".claude")))
-        || path
-            .components()
-            .any(|component| component.as_os_str() == ".mdmanager")
-        || (extension(path) == Some("md")
-            && path
-                .components()
-                .zip(path.components().skip(1))
-                .any(|(left, right)| left.as_os_str() == ".claude" && right.as_os_str() == "rules"))
-}
-
-fn hash_watched_files(input: &WatchInput) -> u64 {
+/// Files and trees discovery looks for where it looks for them, whether or not they exist yet,
+/// so creating one is noticed. Files the accepted generation already knows are hashed
+/// separately.
+fn hash_candidates(paths: &Paths, directory: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for path in [
-        input.paths.config.clone(),
-        input.paths.data_dir.clone(),
-        input.paths.state_dir.clone(),
-    ] {
-        hash_tree(&path, &mut hasher, Walk::All);
+    hash_all(&paths.data_dir, &mut hasher);
+    if !paths.config.starts_with(&paths.data_dir) {
+        hash_file(&paths.config, &mut hasher);
     }
-    // Global targets can live anywhere; `mdmanager status` compares each configured path.
-    for path in &input.global_targets {
-        hash_tree(path, &mut hasher, Walk::All);
+    if !paths.state_dir.starts_with(&paths.data_dir) {
+        hash_all(&paths.state_dir, &mut hasher);
     }
-    let codex_home = codex_home(&input.paths);
+
+    let claude_config = claude_config_dir(paths);
+    let codex_home = codex_home(paths);
     let codex = codex_settings(&codex_home);
-    let claude_config = claude_config_dir(&input.paths);
-    let pi_agent = pi_agent_dir(&input.paths);
+    let pi_agent = pi_agent_dir(paths);
     for path in [
-        claude_config.join("CLAUDE.md"),
-        claude_config.join("settings.json"),
-        claude_config.join("settings.local.json"),
         claude_managed_dir().join("CLAUDE.md"),
-        claude_managed_dir().join("managed-settings.json"),
-        claude_managed_dir().join("managed-settings.d"),
+        claude_config.join("CLAUDE.md"),
         codex_home.join("AGENTS.override.md"),
         codex_home.join("AGENTS.md"),
         codex_home.join("config.toml"),
@@ -340,22 +272,68 @@ fn hash_watched_files(input: &WatchInput) -> u64 {
         pi_agent.join("CLAUDE.md"),
         pi_agent.join("CLAUDE.MD"),
     ] {
-        hash_tree(&path, &mut hasher, Walk::All);
+        hash_file(&path, &mut hasher);
     }
-    hash_tree(&claude_config.join("rules"), &mut hasher, Walk::Rules("md"));
-    if let Ok(main_checkout) = crate::git_worktree::worktree_root(&input.directory)
-        .and_then(|root| crate::git_worktree::main_worktree(&root))
-    {
-        hash_tree(
-            &main_checkout.join(".claude/settings.local.json"),
-            &mut hasher,
-            Walk::All,
-        );
+    hash_rules(&claude_config.join("rules"), "md", &mut hasher);
+    // Claude's settings chain includes the main checkout's local settings from a linked
+    // worktree; new managed drop-ins join it.
+    for path in claude_settings_files(directory, paths) {
+        hash_file(&path, &mut hasher);
     }
-    if let Some(root) = &input.watch_root {
-        hash_tree(root, &mut hasher, Walk::Project);
+    hash_all(
+        &claude_managed_dir().join("managed-settings.d"),
+        &mut hasher,
+    );
+
+    for ancestor in directory.ancestors() {
+        for name in ANCESTOR_CANDIDATES {
+            hash_file(&ancestor.join(name), &mut hasher);
+        }
+        hash_rules(&ancestor.join(".claude/rules"), "md", &mut hasher);
+        hash_rules(&ancestor.join(".cursor/rules"), "mdc", &mut hasher);
     }
-    hash_ancestor_candidates(&input.directory, &codex, &mut hasher);
+
+    // Codex reads its fallback filenames only from its project root, the nearest ancestor with
+    // a root marker, down to the launch directory; a marker appearing or disappearing on that
+    // chain moves the root.
+    for ancestor in directory.ancestors() {
+        for name in &codex.fallback_names {
+            hash_file(&ancestor.join(name), &mut hasher);
+        }
+        let markers = codex
+            .root_markers
+            .iter()
+            .map(|marker| ancestor.join(marker).exists())
+            .collect::<Vec<_>>();
+        markers.hash(&mut hasher);
+        if markers.contains(&true) {
+            break;
+        }
+    }
+
+    // The Git worktree root is asked for on every check, so a repository created or removed
+    // during the session changes Cursor's root, Project discovery and the subfolder scope.
+    let worktree = crate::git_worktree::worktree_root(directory).ok();
+    worktree.hash(&mut hasher);
+    hash_file(
+        &worktree
+            .as_deref()
+            .unwrap_or(directory)
+            .join(".cursorrules"),
+        &mut hasher,
+    );
+    // Project discovery looks for a manifest from the launch directory up to the worktree root.
+    let canonical = fs::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
+    for ancestor in canonical.ancestors() {
+        hash_file(&ancestor.join(".mdmanager/project.toml"), &mut hasher);
+        if worktree.as_deref() == Some(ancestor) {
+            break;
+        }
+    }
+    // Subfolder discovery reloads only inside Git worktrees.
+    if worktree.is_some() {
+        hash_descendants(directory, &mut hasher);
+    }
     hasher.finish()
 }
 
@@ -369,7 +347,6 @@ pub(super) fn current_watch_signature(input: &WatchInput) -> WatchSignature {
 pub(super) struct Observations {
     pub(super) project: Option<Workspace>,
     pub(super) project_error: Option<String>,
-    pub(super) watch_root: Option<PathBuf>,
     pub(super) project_root: PathBuf,
     pub(super) global: Option<GlobalConfig>,
     pub(super) global_error: Option<String>,
@@ -396,9 +373,9 @@ impl Observations {
             Ok(project) => (project, None),
             Err(error) => (None, Some(error)),
         };
-        let watch_root = crate::git_worktree::worktree_root(directory).ok();
+        let worktree_root = crate::git_worktree::worktree_root(directory).ok();
         let project_root = project.as_ref().map_or_else(
-            || watch_root.clone().unwrap_or_else(|| directory.to_owned()),
+            || worktree_root.unwrap_or_else(|| directory.to_owned()),
             |project| project.root.clone(),
         );
         let local_repository = LocalRepository::discover(directory, paths).ok();
@@ -426,11 +403,10 @@ impl Observations {
             project_root: &project_root,
             document_paths: document_paths.iter().map(PathBuf::as_path).collect(),
         });
-        let signature = baseline.signature_for(&source_paths(&context));
+        let signature = baseline.signature_for(&known_paths(&inspection));
         Self {
             project,
             project_error,
-            watch_root,
             project_root,
             global,
             global_error,
@@ -691,6 +667,10 @@ mod tests {
             // Each rule directory loads only its own runtime's rule format.
             ".claude/rules/cursor-format.mdc",
             ".cursor/rules/claude-format.md",
+            // Runtime-like names count only where a resolver looks for them.
+            ".swarmr/reviews/.cursorrules",
+            ".swarmr/reviews/.mdmanager/build.log",
+            ".swarmr/reviews/.claude/settings.json",
         ] {
             let path = repository.path().join(churn);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -886,13 +866,57 @@ mod tests {
             &baseline,
         );
         assert_eq!(observations.signature, baseline.signature());
-        let refreshed = WatchInput::new(
-            &observations.inspection.context,
-            &paths,
-            None,
-            &observations.watch_root,
-        );
+        let refreshed = WatchInput::new(&observations.inspection, &paths);
         assert_ne!(current_watch_signature(&refreshed), observations.signature);
+    }
+
+    #[test]
+    fn non_git_watcher_tracks_known_project_sections() {
+        let home = TempDir::new().unwrap();
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join("AGENTS.md"), "# Agents\n").unwrap();
+        crate::project::adopt(directory.path(), "agents").unwrap();
+        let mut app = App::new_at(
+            Paths::for_home(home.path()),
+            None,
+            directory.path().to_owned(),
+        )
+        .unwrap();
+        let section = app
+            .project
+            .as_ref()
+            .unwrap()
+            .section_path("agents")
+            .unwrap();
+        assert!(crate::git_worktree::worktree_root(directory.path()).is_err());
+        let before = current_watch_signature(&app.watch_input());
+        fs::write(&section, "# Edited Section\n").unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
+        app.reload_from_disk();
+        assert_eq!(
+            app.inspection.document(&section).unwrap(),
+            "# Edited Section\n"
+        );
+    }
+
+    #[test]
+    fn watcher_widens_to_subfolders_when_a_repository_is_created() {
+        let home = TempDir::new().unwrap();
+        let directory = TempDir::new().unwrap();
+        let mut app = App::new_at(
+            Paths::for_home(home.path()),
+            None,
+            directory.path().to_owned(),
+        )
+        .unwrap();
+        let before = current_watch_signature(&app.watch_input());
+        crate::git_worktree::git(directory.path(), &["init", "-q"]).unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
+        app.reload_from_disk();
+        let before = current_watch_signature(&app.watch_input());
+        fs::create_dir(directory.path().join("sub")).unwrap();
+        fs::write(directory.path().join("sub/CLAUDE.md"), "# Sub\n").unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
     }
 
     #[test]
@@ -1158,7 +1182,7 @@ custom = ["common"]
         let directory = home.path().join("workspace");
         fs::create_dir_all(directory.join("cache/nested")).unwrap();
         let app = App::new_at(Paths::for_home(home.path()), None, directory.clone()).unwrap();
-        assert!(app.watch_root.is_none());
+        assert!(crate::git_worktree::worktree_root(&directory).is_err());
         let initial = current_watch_signature(&app.watch_input());
 
         fs::write(directory.join("cache/nested/unrelated.txt"), "changed\n").unwrap();
