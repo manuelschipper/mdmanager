@@ -170,18 +170,9 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn discover(start: &Path) -> Result<Option<Self>, String> {
-        let start = canonical_directory(start)?;
-        let worktree = worktree_root(&start).ok();
-        for ancestor in start.ancestors() {
-            let manifest = ancestor.join(".mdmanager/project.toml");
-            if manifest.is_file() {
-                return Self::load(&manifest).map(Some);
-            }
-            if worktree.as_deref() == Some(ancestor) {
-                break;
-            }
-        }
-        Ok(None)
+        find_manifest(start)?
+            .map(|manifest| Self::load(&manifest))
+            .transpose()
     }
 
     pub(crate) fn load(manifest_path: &Path) -> Result<Self, String> {
@@ -314,6 +305,42 @@ impl Workspace {
         }
         Ok(current.status)
     }
+}
+
+// The nearest manifest from the launch directory up to the Git worktree root.
+fn find_manifest(start: &Path) -> Result<Option<PathBuf>, String> {
+    let start = canonical_directory(start)?;
+    let worktree = worktree_root(&start).ok();
+    for ancestor in start.ancestors() {
+        let manifest = ancestor.join(".mdmanager/project.toml");
+        if manifest.is_file() {
+            return Ok(Some(manifest));
+        }
+        if worktree.as_deref() == Some(ancestor) {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// The Section files the discovered manifest declares, readable even when the Project fails to
+/// load, such as while a Section is missing. A manifest that does not parse declares none.
+pub(crate) fn declared_section_paths(start: &Path) -> Vec<PathBuf> {
+    let Ok(Some(manifest_path)) = find_manifest(start) else {
+        return Vec::new();
+    };
+    let Some(manifest) = fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|source| toml::from_str::<Manifest>(&source).ok())
+    else {
+        return Vec::new();
+    };
+    let mdmanager = manifest_path.parent().unwrap_or(&manifest_path);
+    manifest
+        .sections
+        .iter()
+        .map(|section| mdmanager.join(&section.path))
+        .collect()
 }
 
 pub(crate) fn init(root: &Path) -> Result<Workspace, String> {

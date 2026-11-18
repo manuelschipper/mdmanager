@@ -401,6 +401,48 @@ fn resolve_claude(directory: &Path, paths: &Paths) -> Audit {
     }
 }
 
+/// Which subfolder `AGENTS.md` files Claude's descendant scan reports, decided by the Project
+/// instructions setting, CLAUDE files on the launch path, and exclusions.
+pub(crate) struct NestedAgentsMd {
+    instruction_files: ClaudeInstructionFiles,
+    exclusions: Vec<(String, glob::Pattern, PathBuf)>,
+    loads: bool,
+}
+
+impl NestedAgentsMd {
+    pub(crate) fn new(directory: &Path, paths: &Paths) -> Self {
+        let instruction_files = claude_instruction_files(directory, paths);
+        let exclusions = claude_exclusion_patterns(directory, paths);
+        let loads = match instruction_files {
+            ClaudeInstructionFiles::ClaudeMdOrAgentsMd => {
+                claude_md_on_path(directory, paths, &exclusions).is_none()
+            }
+            ClaudeInstructionFiles::ClaudeMdAndAgentsMd => true,
+            ClaudeInstructionFiles::ClaudeMd | ClaudeInstructionFiles::ManagedOnly => false,
+        };
+        Self {
+            instruction_files,
+            exclusions,
+            loads,
+        }
+    }
+
+    /// Whether the scan reports `path`, a file below the launch `directory`.
+    pub(crate) fn reports(&self, directory: &Path, path: &Path) -> bool {
+        self.loads
+            && claude_filename_matches(path, "AGENTS.md")
+            && path.parent().is_some_and(|parent| {
+                parent != directory
+                    && !(self.instruction_files == ClaudeInstructionFiles::ClaudeMdOrAgentsMd
+                        && has_claude_md(parent, &self.exclusions))
+            })
+            && !is_rule_path(path)
+            && !path
+                .components()
+                .any(|component| component.as_os_str() == ".agents")
+    }
+}
+
 pub(crate) fn scan_claude_descendants(
     directory: &Path,
     paths: &Paths,
@@ -408,15 +450,7 @@ pub(crate) fn scan_claude_descendants(
 ) -> ClaudeScan {
     let mut sources = Vec::new();
     let mut unreadable = Vec::new();
-    let instruction_files = claude_instruction_files(directory, paths);
-    let exclusions = claude_exclusion_patterns(directory, paths);
-    let agents_md_loads = match instruction_files {
-        ClaudeInstructionFiles::ClaudeMdOrAgentsMd => {
-            claude_md_on_path(directory, paths, &exclusions).is_none()
-        }
-        ClaudeInstructionFiles::ClaudeMdAndAgentsMd => true,
-        ClaudeInstructionFiles::ClaudeMd | ClaudeInstructionFiles::ManagedOnly => false,
-    };
+    let agents_md = NestedAgentsMd::new(directory, paths);
     let entries = WalkDir::new(directory)
         .follow_links(true)
         .min_depth(1)
@@ -463,15 +497,8 @@ pub(crate) fn scan_claude_descendants(
                 paths,
                 directory,
             );
-        } else if agents_md_loads
-            && claude_filename_matches(path, "AGENTS.md")
-            && let Some(parent) = path.parent().filter(|parent| *parent != directory)
-            && !is_rule_path(path)
-            && !path
-                .components()
-                .any(|component| component.as_os_str() == ".agents")
-            && !(instruction_files == ClaudeInstructionFiles::ClaudeMdOrAgentsMd
-                && has_claude_md(parent, &exclusions))
+        } else if agents_md.reports(directory, path)
+            && let Some(parent) = path.parent()
         {
             push_with_state(
                 &mut sources,
@@ -511,7 +538,7 @@ pub(crate) fn scan_claude_descendants(
 
     annotate_claude_imports(&mut sources, paths);
     skip_oversized_claude_files(&mut sources);
-    apply_claude_exclusions(&mut sources, directory, paths, &exclusions);
+    apply_claude_exclusions(&mut sources, directory, paths, &agents_md.exclusions);
     sort_sources(&mut sources);
     ClaudeScan {
         sources,
