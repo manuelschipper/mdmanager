@@ -1,6 +1,102 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+thread_local! {
+    // Installed only inside `Topology::scope`; elsewhere every query runs Git.
+    static TOPOLOGY: RefCell<Option<Topology>> = const { RefCell::new(None) };
+}
+
+/// Worktree root and main worktree answers shared by every consumer in one TUI refresh or watch
+/// check, so each consumer does not spawn its own Git processes.
+#[derive(Clone, Default)]
+pub(crate) struct Topology {
+    marker: Option<u64>,
+    answers: HashMap<(&'static str, PathBuf), Result<PathBuf, String>>,
+}
+
+impl Topology {
+    /// Keeps remembered answers only while the `.git` entries at and above `directory` are
+    /// unchanged; adding, removing or repointing one asks Git again.
+    pub(crate) fn revalidate(&mut self, directory: &Path) {
+        let marker = topology_marker(directory);
+        if self.marker != Some(marker) {
+            self.answers.clear();
+            self.marker = Some(marker);
+        }
+    }
+
+    pub(crate) fn forget(&mut self) {
+        self.answers.clear();
+    }
+
+    /// Answers this thread's worktree discovery from `self`, recording new answers, while
+    /// `body` runs.
+    pub(crate) fn scope<T>(&mut self, body: impl FnOnce() -> T) -> T {
+        TOPOLOGY.set(Some(std::mem::take(self)));
+        let result = body();
+        *self = TOPOLOGY.take().expect("scope installed the topology");
+        result
+    }
+}
+
+fn topology_marker(directory: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let directory = fs::canonicalize(directory).unwrap_or_else(|_| directory.to_owned());
+    for ancestor in directory.ancestors() {
+        let dot_git = ancestor.join(".git");
+        let Ok(metadata) = fs::symlink_metadata(&dot_git) else {
+            continue;
+        };
+        ancestor.hash(&mut hasher);
+        metadata.is_dir().hash(&mut hasher);
+        if metadata.is_dir() {
+            continue;
+        }
+        // Linked worktrees and submodules point at their Git directory, whose `commondir`
+        // locates the main worktree.
+        let pointer = fs::read_to_string(&dot_git).ok();
+        pointer.hash(&mut hasher);
+        if let Some(git_dir) = pointer
+            .as_deref()
+            .and_then(|pointer| pointer.strip_prefix("gitdir:"))
+        {
+            fs::read_to_string(ancestor.join(git_dir.trim()).join("commondir"))
+                .ok()
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn remembered(
+    query: &'static str,
+    path: &Path,
+    discover: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    let key = (
+        query,
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
+    );
+    if let Some(answer) = TOPOLOGY.with_borrow(|topology| {
+        topology
+            .as_ref()
+            .and_then(|topology| topology.answers.get(&key).cloned())
+    }) {
+        return answer;
+    }
+    let answer = discover();
+    TOPOLOGY.with_borrow_mut(|topology| {
+        if let Some(topology) = topology {
+            topology.answers.insert(key, answer.clone());
+        }
+    });
+    answer
+}
 
 pub(crate) fn command() -> Command {
     let command = Command::new("git");
@@ -19,6 +115,10 @@ pub(crate) fn command() -> Command {
 
 /// Git worktree root reported by Git, including linked worktrees.
 pub(crate) fn worktree_root(start: &Path) -> Result<PathBuf, String> {
+    remembered("worktree root", start, || discover_worktree_root(start))
+}
+
+fn discover_worktree_root(start: &Path) -> Result<PathBuf, String> {
     let output = command()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(start)
@@ -34,6 +134,10 @@ pub(crate) fn worktree_root(start: &Path) -> Result<PathBuf, String> {
 
 /// Main worktree discovery uses Git reports; separate Git directories and submodules retain their own root.
 pub(crate) fn main_worktree(root: &Path) -> Result<PathBuf, String> {
+    remembered("main worktree", root, || discover_main_worktree(root))
+}
+
+fn discover_main_worktree(root: &Path) -> Result<PathBuf, String> {
     let output = git(root, &["worktree", "list", "--porcelain", "-z"])?;
     let path = output
         .strip_prefix("worktree ")
@@ -67,4 +171,26 @@ pub(crate) fn git(directory: &Path, arguments: &[&str]) -> Result<String, String
         ));
     }
     String::from_utf8(output.stdout).map_err(|_| "git returned non-UTF-8 output".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topology_asks_git_again_after_a_repository_appears() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let mut topology = Topology::default();
+        topology.revalidate(directory.path());
+        assert!(topology.scope(|| worktree_root(directory.path())).is_err());
+
+        git(directory.path(), &["init", "-q"]).unwrap();
+        // Without revalidation the remembered answer stands.
+        assert!(topology.scope(|| worktree_root(directory.path())).is_err());
+        topology.revalidate(directory.path());
+        assert_eq!(
+            topology.scope(|| worktree_root(directory.path())).unwrap(),
+            fs::canonicalize(directory.path()).unwrap()
+        );
+    }
 }

@@ -627,7 +627,7 @@ mod tests {
         let (_home, repository, _paths, mut app) = fixture();
         fs::create_dir(repository.path().join("child")).unwrap();
         fs::write(repository.path().join("child/CLAUDE.md"), "# Child\n").unwrap();
-        app.context.reload_and_scan(app.global.as_ref());
+        app.reload_from_disk();
         app.open(View::Context);
         assert!(
             !context_entries(&app.inspection.context, app.context_nested_expanded)
@@ -635,6 +635,11 @@ mod tests {
         );
         assert!(draw(&mut app).contains("checking subfolders…"));
         finish_context_scan(&mut app);
+        // Scan sources join the accepted signature, so they do not look like a disk change.
+        assert_eq!(
+            app.watcher.signature,
+            super::super::reload::current_watch_signature(&app.watch_input())
+        );
         let screen = draw(&mut app);
         assert!(screen.contains("SUBFOLDER INSTRUCTIONS · 1 file"));
         app.context_entry_index =

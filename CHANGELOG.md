@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Responsive TUI during file churn** — Watch checks and refreshes run off the input thread, so
+  keys and drawing no longer stall while files change. Creating, editing or deleting files no
+  instruction discovery reads, such as build logs, caches or editor swap files, no longer
+  reloads or shows **Updated from disk**. A refresh starts about 4 Git processes instead of
+  about 27, quiet checks start none, and finished subfolder scans and document opens no longer
+  rerun discovery.
+
 ## mdmanager 0.5.0 — Nov 12, 2026
 
 - **Claude exclusions and AGENTS.md** — Context ignores excluded `CLAUDE.md`,

@@ -617,6 +617,7 @@ mod tests {
             "**ordinary** line\n".repeat(40),
         );
         fs::write(repository.path().join("AGENTS.md"), content).unwrap();
+        app.reload_from_disk();
         app.open(View::File {
             title: "AGENTS.md".into(),
             path: repository.path().join("AGENTS.md"),
@@ -664,6 +665,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(repository.path().join("AGENTS.md"), content).unwrap();
+        app.reload_from_disk();
         app.open(View::File {
             title: "AGENTS.md".into(),
             path: repository.path().join("AGENTS.md"),

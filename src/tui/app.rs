@@ -24,8 +24,8 @@ use self::document::{
     render_document, render_info, render_line_prompt, render_search, truncate_start,
 };
 use self::inspection::{
-    HomeItem, InspectionInput, InstructionInspection, ManagedRef, external_file_about,
-    global_diagnostic_text, managed_workspace,
+    HomeItem, InstructionInspection, ManagedRef, external_file_about, global_diagnostic_text,
+    managed_workspace,
 };
 use self::library_view::{
     LibraryEntry, LibraryViewInput, library_entries, library_panel_area, personal_section_usage,
@@ -38,12 +38,11 @@ use self::overview::{
     OverviewInput, home_canvas_height, home_canvas_width, home_header_line, home_item_key,
     home_target_reference, render_home,
 };
-use self::reload::{ReloadInput, ReloadWatcher, current_watch_signature};
+use self::reload::{Observations, RefreshRequest, ReloadWatcher, WatchInput};
 use super::context_ui;
 use super::{ACTIVE_THEME, activate_theme, active_theme, reset_theme};
-use std::collections::HashSet;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -55,8 +54,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use super::context_ui::ContextUi;
 use crate::config::{self, GlobalConfig, Paths, target_display_name};
-use crate::context::{Audit, ContextRuntime, ContextSource, SourceGroup, SourceState};
-use crate::deploy;
+use crate::context::{ContextRuntime, ContextSource};
+use crate::git_worktree::Topology;
 use crate::local::{self, LocalRepository};
 use crate::project::{self, Workspace};
 use crate::theme::{self, Theme};
@@ -151,12 +150,20 @@ struct App {
 }
 
 impl App {
-    fn reload_input(&self) -> ReloadInput<'_> {
-        ReloadInput {
-            audit: &self.inspection.context,
-            paths: &self.paths,
-            global: self.global.as_ref(),
-            watch_root: &self.watch_root,
+    fn watch_input(&self) -> WatchInput {
+        WatchInput::new(
+            &self.inspection.context,
+            &self.paths,
+            self.global.as_ref(),
+            &self.watch_root,
+        )
+    }
+
+    fn refresh_request(&self) -> RefreshRequest {
+        RefreshRequest {
+            watch: self.watch_input(),
+            runtime: self.context.audit.runtime,
+            document_paths: self.document_paths(),
         }
     }
 
@@ -240,27 +247,31 @@ impl App {
         let ui_error = theme_error
             .map(|error| format!("{error}; keeping current theme"))
             .or_else(|| render_error.map(|error| format!("{error}; keeping current render mode")));
-        let (project, project_error) = match Workspace::discover(&directory) {
-            Ok(project) => (project, None),
-            Err(error) => (None, Some(error)),
-        };
-        let watch_root = crate::git_worktree::worktree_root(&directory).ok();
-        let project_root = project.as_ref().map_or_else(
-            || watch_root.clone().unwrap_or_else(|| directory.clone()),
-            |project| project.root.clone(),
-        );
-        let local_repository = LocalRepository::discover(&directory, &paths).ok();
-        let (global_active_profile, global_error) = match active_global_profile(global.as_ref()) {
-            Ok(profile) => (profile, global_error),
-            Err(error) => (None, Some(error)),
-        };
-        let global_sources = discovered_global_sources(
-            &paths,
-            &directory,
-            global.as_ref(),
-            global_active_profile.as_deref(),
-        );
-        let mut context = ContextUi::new_at(paths.clone(), global.as_ref(), directory)?;
+        let mut topology = Topology::default();
+        topology.revalidate(&directory);
+        let Observations {
+            project,
+            project_error,
+            watch_root,
+            project_root,
+            global,
+            global_error,
+            global_active_profile,
+            local_repository,
+            global_sources,
+            inspection,
+            signature,
+        } = topology.scope(|| {
+            Observations::discover(
+                &paths,
+                &directory,
+                ContextRuntime::ALL[0],
+                global,
+                global_error,
+                &[],
+            )
+        });
+        let mut context = ContextUi::new(paths.clone(), inspection.context.clone());
         context.start_scan();
         let view = global_error
             .as_ref()
@@ -273,8 +284,8 @@ impl App {
                 },
                 text: global_diagnostic_text(error),
             });
-        let mut app = Self {
-            inspection: InstructionInspection::new(context.audit.clone()),
+        Ok(Self {
+            inspection,
             paths,
             global,
             global_error,
@@ -299,36 +310,28 @@ impl App {
             theme_picker: None,
             message: ui_error.map(|error| (false, error)),
             message_expires_at: None,
-            watcher: ReloadWatcher::new(),
+            watcher: ReloadWatcher::new(signature, topology),
             intro_started: None,
-        };
-        app.refresh_inspection();
-        app.watcher.signature = current_watch_signature(&app.reload_input());
-        Ok(app)
+        })
     }
 
-    // Event handling owns refresh; render, search and sizing only read this snapshot.
-    fn refresh_inspection(&mut self) {
-        self.inspection = InstructionInspection::observe(&InspectionInput {
-            context: &self.context.audit,
-            global: &self.global,
-            global_active_profile: &self.global_active_profile,
-            global_error: &self.global_error,
-            global_sources: &self.global_sources,
-            local_repository: &self.local_repository,
-            project: &self.project,
-            project_error: &self.project_error,
-            project_root: &self.project_root,
-            document_paths: std::iter::once(&self.view)
-                .chain(self.history.iter().map(|(view, _)| view))
-                .filter_map(|view| match view {
-                    View::File { path, .. } | View::SectionDocument { path, .. } => {
-                        Some(path.as_path())
-                    }
-                    _ => None,
-                })
-                .collect(),
-        });
+    fn document_paths(&self) -> Vec<PathBuf> {
+        std::iter::once(&self.view)
+            .chain(self.history.iter().map(|(view, _)| view))
+            .filter_map(|view| match view {
+                View::File { path, .. } | View::SectionDocument { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Event handling owns refresh; render, search and sizing only read this snapshot. A document
+    // the accepted generation did not observe, such as one opened after its refresh started, is
+    // observed alone instead of refreshing everything.
+    fn observe_open_documents(&mut self) {
+        for path in self.document_paths() {
+            self.inspection.observe_document_and_parent(&path);
+        }
     }
 
     fn home_items(&self) -> Vec<HomeItem> {
@@ -362,7 +365,7 @@ impl App {
         self.history.push((self.view.clone(), self.section_index));
         self.view = view;
         if matches!(self.view, View::File { .. } | View::SectionDocument { .. }) {
-            self.reload_observations(true);
+            self.observe_open_documents();
         }
         self.document.scroll = 0;
         self.document.max_scroll = 0;
@@ -383,35 +386,65 @@ impl App {
         SessionAction::Continue
     }
 
+    // Tests refresh through the same worker the session uses and wait for its result.
+    #[cfg(test)]
     fn reload_from_disk(&mut self) {
-        self.reload_observations(false);
+        self.watcher.request_refresh(true);
+        self.poll_reload();
+        while self.watcher.is_pending() {
+            std::thread::yield_now();
+            self.poll_reload();
+        }
     }
 
-    // Accepted scans and document opens retain the scan only while watched inputs
-    // are unchanged. A disk change invalidates both the audit and its receiver.
-    fn reload_observations(&mut self, preserve_context_scan: bool) {
-        let notify_reload = !preserve_context_scan;
-        let preserve_context_scan = preserve_context_scan
-            && current_watch_signature(&self.reload_input()) == self.watcher.signature;
+    // The selected Context source path, or whether the nested-files row is selected.
+    fn context_selection(&self) -> (Option<PathBuf>, bool) {
+        let entries = context_entries(&self.inspection.context, self.context_nested_expanded);
+        match entries.get(self.context_entry_index) {
+            Some(ContextEntry::Source(index)) => (
+                self.inspection
+                    .context
+                    .sources
+                    .get(*index)
+                    .map(|source| source.path.clone()),
+                false,
+            ),
+            Some(ContextEntry::Nested) => (None, true),
+            None => (None, false),
+        }
+    }
+
+    fn restore_context_selection(&mut self, (selected, was_nested): (Option<PathBuf>, bool)) {
+        self.context_entry_index = selected
+            .and_then(|path| {
+                context_entries(&self.inspection.context, self.context_nested_expanded)
+                    .iter()
+                    .position(|entry| {
+                        matches!(
+                            entry,
+                            ContextEntry::Source(index)
+                                if self.inspection.context.sources[*index].path == path
+                        )
+                    })
+            })
+            .or_else(|| {
+                was_nested
+                    .then(|| {
+                        context_entries(&self.inspection.context, self.context_nested_expanded)
+                            .iter()
+                            .position(|entry| *entry == ContextEntry::Nested)
+                    })
+                    .flatten()
+            })
+            .unwrap_or(0);
+    }
+
+    // Accepting a refresh replaces the Context audit and drops any running Claude
+    // descendant scan's receiver, so a scan of older inputs cannot publish.
+    fn accept_observations(&mut self, observations: Observations, notify_reload: bool) {
         let previous_global_error = self.global_error.clone();
         let selected_home = self.home_items().get(self.home_index).map(home_item_key);
-        let selected_context =
-            context_entries(&self.inspection.context, self.context_nested_expanded)
-                .get(self.context_entry_index)
-                .and_then(|entry| match entry {
-                    ContextEntry::Source(index) => self
-                        .inspection
-                        .context
-                        .sources
-                        .get(*index)
-                        .map(|source| source.path.clone()),
-                    ContextEntry::Nested => None,
-                });
-        let was_nested = matches!(
-            context_entries(&self.inspection.context, self.context_nested_expanded)
-                .get(self.context_entry_index),
-            Some(ContextEntry::Nested)
-        );
+        let selected_context = self.context_selection();
         let selected_managed_section = match &self.view {
             View::Managed(reference) => managed_workspace(&self.inspection.managed, reference)
                 .ok()
@@ -438,94 +471,50 @@ impl App {
             }),
             _ => None,
         };
-        match Workspace::discover(&self.inspection.context.directory) {
-            Ok(project) => {
-                self.project = project;
-                self.project_error = None;
-            }
-            Err(error) => {
-                self.project = None;
-                self.project_error = Some(error);
-            }
-        }
-        self.watch_root =
-            crate::git_worktree::worktree_root(&self.inspection.context.directory).ok();
-        self.project_root = self.project.as_ref().map_or_else(
-            || {
-                self.watch_root
-                    .clone()
-                    .unwrap_or_else(|| self.inspection.context.directory.clone())
-            },
-            |project| project.root.clone(),
-        );
+        let Observations {
+            project,
+            project_error,
+            watch_root,
+            project_root,
+            global,
+            global_error,
+            global_active_profile,
+            local_repository,
+            global_sources,
+            inspection,
+            signature: _,
+        } = observations;
+        self.project = project;
+        self.project_error = project_error;
+        self.watch_root = watch_root;
+        self.project_root = project_root;
         let mut theme_error = None;
         let mut render_error = None;
-        if self.paths.config.exists() {
-            match GlobalConfig::load(&self.paths) {
-                Ok(global) => {
-                    theme_error = activate_theme(&global).err();
-                    match RenderMode::parse(&global.manifest.ui.render) {
-                        Ok(mode) => self.document.render_mode = mode,
-                        Err(error) => render_error = Some(error),
-                    }
-                    self.global = Some(global);
-                    self.global_error = None;
-                }
-                Err(error) => {
-                    self.global = None;
-                    self.global_error = Some(error);
+        match &global {
+            Some(global) => {
+                theme_error = activate_theme(global).err();
+                match RenderMode::parse(&global.manifest.ui.render) {
+                    Ok(mode) => self.document.render_mode = mode,
+                    Err(error) => render_error = Some(error),
                 }
             }
+            // A configuration that failed to load keeps the current theme.
+            None if global_error.is_none() => reset_theme(),
+            None => {}
+        }
+        self.global = global;
+        self.global_error = global_error;
+        self.global_active_profile = global_active_profile;
+        self.local_repository = local_repository;
+        self.global_sources = global_sources;
+        if matches!(self.view, View::Context | View::Source) {
+            self.context.reload_and_scan(inspection.context.clone());
         } else {
-            reset_theme();
-            self.global = None;
-            self.global_error = None;
+            self.context.reload(inspection.context.clone());
         }
-        match active_global_profile(self.global.as_ref()) {
-            Ok(profile) => self.global_active_profile = profile,
-            Err(error) => {
-                self.global_active_profile = None;
-                self.global_error = Some(error);
-            }
-        }
-        self.local_repository =
-            LocalRepository::discover(&self.inspection.context.directory, &self.paths).ok();
-        self.global_sources = discovered_global_sources(
-            &self.paths,
-            &self.inspection.context.directory,
-            self.global.as_ref(),
-            self.global_active_profile.as_deref(),
-        );
-        if !preserve_context_scan {
-            if matches!(self.view, View::Context | View::Source) {
-                self.context.reload_and_scan(self.global.as_ref());
-            } else {
-                self.context.reload(self.global.as_ref());
-            }
-        }
-        self.refresh_inspection();
-        self.context_entry_index = selected_context
-            .and_then(|path| {
-                context_entries(&self.inspection.context, self.context_nested_expanded)
-                    .iter()
-                    .position(|entry| {
-                        matches!(
-                            entry,
-                            ContextEntry::Source(index)
-                                if self.inspection.context.sources[*index].path == path
-                        )
-                    })
-            })
-            .or_else(|| {
-                was_nested
-                    .then(|| {
-                        context_entries(&self.inspection.context, self.context_nested_expanded)
-                            .iter()
-                            .position(|entry| *entry == ContextEntry::Nested)
-                    })
-                    .flatten()
-            })
-            .unwrap_or(0);
+        self.inspection = inspection;
+        self.observe_open_documents();
+        self.restore_context_selection(selected_context);
         if let Some(key) = selected_home {
             self.home_index = self
                 .home_items()
@@ -622,8 +611,6 @@ impl App {
             self.message = Some((true, "Updated from disk".into()));
             self.message_expires_at = Some(Instant::now() + RELOAD_MESSAGE_DURATION);
         }
-        self.watcher
-            .accept_reload(current_watch_signature(&self.reload_input()));
     }
 
     fn clear_message(&mut self) {
@@ -655,14 +642,12 @@ impl App {
     }
 
     fn poll_reload(&mut self) {
-        let input = ReloadInput {
-            audit: &self.inspection.context,
-            paths: &self.paths,
-            global: self.global.as_ref(),
-            watch_root: &self.watch_root,
-        };
-        if self.watcher.poll_reload(&input) {
-            self.reload_from_disk();
+        if let Some(refreshed) = self.watcher.poll(self.context.audit.runtime) {
+            self.accept_observations(refreshed.observations, refreshed.notify);
+        }
+        if self.watcher.due() {
+            let request = self.refresh_request();
+            self.watcher.start(request);
         }
     }
 
@@ -692,9 +677,15 @@ impl App {
         }
     }
 
+    // A finished scan only adds Context sources, which the watch signature then covers too;
+    // disk changes since its audit reach the session through the watcher, whose refresh
+    // replaces the audit.
     fn poll_context_scan(&mut self) {
         if self.context.poll_scan(self.global.as_ref()) {
-            self.reload_observations(true);
+            let selection = self.context_selection();
+            self.inspection.observe_context(self.context.audit.clone());
+            self.watcher.signature.observe_context(&self.context.audit);
+            self.restore_context_selection(selection);
         }
     }
 
@@ -725,9 +716,16 @@ impl App {
     }
 
     fn select_runtime(&mut self, index: usize) {
-        self.reload_observations(true);
-        self.context.select_runtime(index, self.global.as_ref());
-        self.refresh_inspection();
+        let (context, global) = (&mut self.context, self.global.as_ref());
+        self.watcher
+            .topology()
+            .scope(|| context.select_runtime(index, global));
+        self.inspection.observe_context(self.context.audit.clone());
+        // Only the Context sources half of the signature depends on the runtime. A running
+        // check of the previous runtime can no longer be accepted; a change it found is found
+        // again by the next one.
+        self.watcher.invalidate();
+        self.watcher.signature.observe_context(&self.context.audit);
         self.context_entry_index = 0;
         self.context_nested_expanded = false;
         self.document.scroll = 0;
@@ -828,60 +826,6 @@ fn global_setup_text() -> String {
         "The TUI does not edit instructions. Ask your coding agent to run 'mdmanager docs start', inspect the current instructions, and configure the intended Global Profile.",
     ]
     .join("\n\n")
-}
-
-fn discovered_global_sources(
-    paths: &Paths,
-    directory: &Path,
-    global: Option<&GlobalConfig>,
-    active_profile: Option<&str>,
-) -> Vec<(ContextRuntime, ContextSource)> {
-    let configured = global.map_or_else(Vec::new, |global| {
-        let ids: Vec<&str> = match active_profile {
-            Some(profile) => global
-                .profile_target_names(profile)
-                .map(|ids| ids.collect())
-                .unwrap_or_default(),
-            None => global.target_names().collect(),
-        };
-        ids.into_iter()
-            .filter_map(|id| global.target_path(id).ok())
-            .collect()
-    });
-    let mut seen = HashSet::new();
-    ContextRuntime::ALL
-        .into_iter()
-        .flat_map(|runtime| {
-            // Cursor has no user instruction file; its always-applied home rules play that role,
-            // and both Cursor runtimes report the same files.
-            let cursor = matches!(
-                runtime,
-                ContextRuntime::Cursor | ContextRuntime::CursorAgent
-            );
-            Audit::resolve(runtime, directory, paths, None)
-                .sources
-                .into_iter()
-                .filter(move |source| {
-                    (source.scope == "user" || cursor && source.scope == "user rule")
-                        && source.group == SourceGroup::Startup
-                        && matches!(
-                            source.state,
-                            SourceState::Startup
-                                | SourceState::SelectedEmpty
-                                | SourceState::Truncated { .. }
-                        )
-                })
-                .take(if cursor { usize::MAX } else { 1 })
-                .map(move |source| (runtime, source))
-        })
-        .filter(|(_, source)| {
-            !configured.contains(&source.path) && seen.insert(source.path.clone())
-        })
-        .collect()
-}
-
-fn active_global_profile(global: Option<&GlobalConfig>) -> Result<Option<String>, String> {
-    global.map_or(Ok(None), deploy::active_profile)
 }
 
 pub(crate) fn run(
@@ -991,7 +935,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> SessionAction {
             app.document.render_mode = mode;
             match config::set_render(&app.paths, mode.name()) {
                 Ok(()) => {
-                    app.reload_from_disk();
+                    app.watcher.request_refresh(false);
                     app.set_message(true, format!("Render mode saved · {}", mode.name()));
                 }
                 Err(error) => {
@@ -2307,6 +2251,8 @@ fn help_anchor_area(app: &App, screen: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use crate::deploy;
 
     use super::overview::home_group;
 

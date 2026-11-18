@@ -666,6 +666,7 @@ mod tests {
     use super::super::tests::{draw, fixture, global_fixture};
     use super::super::*;
     use super::*;
+    use crate::deploy;
     use std::fs;
 
     use super::super::inspection::symlink_info;

@@ -32,27 +32,19 @@ pub(crate) struct ContextUi {
 }
 
 impl ContextUi {
-    pub(crate) fn new_at(
-        paths: crate::config::Paths,
-        global: Option<&GlobalConfig>,
-        directory: PathBuf,
-    ) -> Result<Self, String> {
-        let runtime_index = 0;
-        let audit = Audit::resolve(
-            ContextRuntime::ALL[runtime_index],
-            &directory,
-            &paths,
-            global,
-        );
-        Ok(Self {
+    pub(crate) fn new(paths: crate::config::Paths, audit: Audit) -> Self {
+        Self {
             paths,
+            runtime_index: ContextRuntime::ALL
+                .iter()
+                .position(|runtime| *runtime == audit.runtime)
+                .unwrap_or(0),
             audit,
-            runtime_index,
             source_index: 0,
             scan_status: ContextScanStatus::NotStarted,
             scan_receiver: None,
             scan_started_at: None,
-        })
+        }
     }
 
     pub(crate) fn selected(&self) -> Option<&ContextSource> {
@@ -62,21 +54,21 @@ impl ContextUi {
     pub(crate) fn select_runtime(&mut self, index: usize, global: Option<&GlobalConfig>) {
         self.runtime_index = index.min(ContextRuntime::ALL.len().saturating_sub(1));
         self.source_index = 0;
-        self.reload(global);
-        self.start_scan();
-    }
-
-    pub(crate) fn reload(&mut self, global: Option<&GlobalConfig>) {
-        let selected = self.selected().map(|source| source.path.clone());
-        // Dropping the receiver prevents a previous runtime or reload from publishing a scan.
-        self.scan_receiver = None;
-        self.scan_started_at = None;
-        self.audit = Audit::resolve(
+        self.reload_and_scan(Audit::resolve(
             ContextRuntime::ALL[self.runtime_index],
             &self.audit.directory,
             &self.paths,
             global,
-        );
+        ));
+    }
+
+    /// Accepts the selected runtime's freshly resolved audit.
+    pub(crate) fn reload(&mut self, audit: Audit) {
+        let selected = self.selected().map(|source| source.path.clone());
+        // Dropping the receiver prevents a previous runtime or reload from publishing a scan.
+        self.scan_receiver = None;
+        self.scan_started_at = None;
+        self.audit = audit;
         self.source_index = selected
             .and_then(|path| {
                 self.audit
@@ -95,8 +87,8 @@ impl ContextUi {
         };
     }
 
-    pub(crate) fn reload_and_scan(&mut self, global: Option<&GlobalConfig>) {
-        self.reload(global);
+    pub(crate) fn reload_and_scan(&mut self, audit: Audit) {
+        self.reload(audit);
         self.start_scan();
     }
 
@@ -179,7 +171,10 @@ mod tests {
     fn context_scan_discards_results_after_runtime_switch_or_reload() {
         let directory = tempfile::TempDir::new().unwrap();
         let paths = crate::config::Paths::for_home(directory.path());
-        let mut context = ContextUi::new_at(paths, None, directory.path().to_owned()).unwrap();
+        let mut context = ContextUi::new(
+            paths.clone(),
+            Audit::resolve(ContextRuntime::ALL[0], directory.path(), &paths, None),
+        );
         for switch_runtime in [false, true] {
             let (sender, receiver) = mpsc::channel();
             context.scan_receiver = Some(receiver);
@@ -198,7 +193,7 @@ mod tests {
                     None,
                 );
             } else {
-                context.reload(None);
+                context.reload(context.audit.clone());
             }
             assert!(!context.poll_scan(None));
             assert!(!matches!(

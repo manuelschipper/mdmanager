@@ -490,6 +490,7 @@ mod tests {
     use super::super::tests::{draw, draw_at, global_fixture, open_library};
     use super::super::*;
     use super::*;
+    use crate::deploy;
     use std::fs;
 
     #[test]

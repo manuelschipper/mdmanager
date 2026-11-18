@@ -250,8 +250,12 @@ and owns view history and dispatch. Its child modules live beside it:
   filesystem access; removed delimiters retain blank source-line slots.
 - `document.rs` owns viewport dimensions, wrapping, search and line-jump prompts, temporary
   highlights, and document rendering shared by the pages.
-- `reload.rs` owns watch signatures and the polling clock. It requests refresh; App accepts
-  the new signature after rebuilding observations.
+- `reload.rs` owns watch signatures, the polling clock, and the reload worker. Each second, or
+  when App asks, one worker thread checks the signature and, after a change, discovers a whole
+  refresh generation (`Observations`) while the session keeps drawing and handling keys. App
+  accepts a result only for the runtime it still shows and when no newer generation was
+  requested. Within a check, worktree root and main worktree answers come from one
+  `git_worktree::Topology`, reused until a `.git` entry above the launch directory changes.
 - `context_view.rs` owns the source chain and detail browser, including wide, stacked, and
   chain-only layouts. `context_ui.rs` separately owns the asynchronous Context scan receiver
   and runtime selection.

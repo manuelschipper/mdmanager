@@ -162,12 +162,26 @@ impl InstructionInspection {
         );
         paths.extend(input.document_paths.iter().map(|path| path.to_path_buf()));
         for path in paths {
-            if let Some(parent) = path.parent() {
-                snapshot.observe_document(parent);
-            }
-            snapshot.observe_document(&path);
+            snapshot.observe_document_and_parent(&path);
         }
         snapshot
+    }
+
+    /// Replaces the Context observation, such as after a Claude descendant scan or a runtime
+    /// switch, and observes its sources without rediscovering Project, Local or Global state.
+    pub(super) fn observe_context(&mut self, context: Audit) {
+        for source in &context.sources {
+            self.observe_document_and_parent(&source.path);
+        }
+        self.context = context;
+    }
+
+    // Paths this generation already observed keep their observation.
+    pub(super) fn observe_document_and_parent(&mut self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            self.observe_document(parent);
+        }
+        self.observe_document(path);
     }
 
     fn observe_document(&mut self, path: &Path) {
@@ -738,7 +752,7 @@ mod tests {
             .unwrap()
             .join("CLAUDE.md");
         symlink("missing.md", &link).unwrap();
-        app.refresh_inspection();
+        app.reload_from_disk();
 
         let info = symlink_info(&app.inspection, &link).unwrap();
         assert_eq!(info.target, Path::new("missing.md"));

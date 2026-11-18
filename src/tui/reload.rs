@@ -1,23 +1,59 @@
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use walkdir::{DirEntry, WalkDir};
 
+use super::inspection::{InspectionInput, InstructionInspection};
 use crate::config::{GlobalConfig, Paths};
-use crate::context::{Audit, claude_config_dir, claude_managed_dir, pi_agent_dir};
+use crate::context::{
+    Audit, ContextRuntime, ContextSource, SourceGroup, SourceState, claude_config_dir,
+    claude_managed_dir, pi_agent_dir,
+};
+use crate::deploy;
+use crate::git_worktree::Topology;
+use crate::local::LocalRepository;
+use crate::project::Workspace;
 
 const AUTO_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Borrowed reload inputs from the session's accepted observations.
-pub(super) struct ReloadInput<'a> {
-    pub(super) audit: &'a Audit,
-    pub(super) paths: &'a Paths,
-    pub(super) global: Option<&'a GlobalConfig>,
-    pub(super) watch_root: &'a Option<PathBuf>,
+/// Paths the watch signature covers, copied from the session's accepted observations so the
+/// reload worker can hash them.
+pub(super) struct WatchInput {
+    paths: Paths,
+    directory: PathBuf,
+    // Context sources and their imports.
+    sources: Vec<PathBuf>,
+    global_targets: Vec<PathBuf>,
+    watch_root: Option<PathBuf>,
+}
+
+impl WatchInput {
+    pub(super) fn new(
+        audit: &Audit,
+        paths: &Paths,
+        global: Option<&GlobalConfig>,
+        watch_root: &Option<PathBuf>,
+    ) -> Self {
+        Self {
+            paths: paths.clone(),
+            directory: audit.directory.clone(),
+            sources: source_paths(audit),
+            global_targets: global.map_or_else(Vec::new, |global| {
+                global
+                    .target_names()
+                    .filter_map(|target| global.target_path(target).ok())
+                    .collect()
+            }),
+            watch_root: watch_root.clone(),
+        }
+    }
 }
 
 fn hash_tree(path: &Path, hasher: &mut DefaultHasher, project_tree: bool) {
@@ -47,11 +83,22 @@ fn hash_dependency_tree(
         {
             hash_dependency_tree(entry.path(), hasher, false, true);
         }
-        if entry.file_type().is_file() && project_tree && !relevant_project_file(entry.path()) {
+        // A directory's own metadata changes whenever anything inside it is added or removed;
+        // only the files discovery reads, and where linked directories point, count.
+        if entry.file_type().is_dir() {
+            if entry.path_is_symlink() {
+                entry.path().hash(hasher);
+                fs::read_link(entry.path()).ok().hash(hasher);
+            }
+            continue;
+        }
+        if (project_tree && !relevant_project_file(entry.path()))
+            || (rule_directory && !rule_file(entry.path()))
+        {
             continue;
         }
         entry.path().hash(hasher);
-        if entry.file_type().is_symlink() {
+        if entry.path_is_symlink() {
             fs::read_link(entry.path()).ok().hash(hasher);
         }
         let metadata = if entry.file_type().is_symlink() && entry.path().is_dir() {
@@ -71,12 +118,34 @@ fn hash_dependency_tree(
     }
 }
 
-fn hash_context_sources(audit: &Audit, hasher: &mut DefaultHasher) {
-    for source in &audit.sources {
-        hash_tree(&source.path, hasher, false);
-        for import in &source.imports {
-            hash_tree(import, hasher, false);
-        }
+fn source_paths(audit: &Audit) -> Vec<PathBuf> {
+    audit
+        .sources
+        .iter()
+        .flat_map(|source| std::iter::once(&source.path).chain(&source.imports))
+        .cloned()
+        .collect()
+}
+
+fn hash_context_sources(sources: &[PathBuf]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for source in sources {
+        hash_tree(source, &mut hasher, false);
+    }
+    hasher.finish()
+}
+
+/// The watch signature keeps the accepted audit's own sources apart so a finished Claude
+/// descendant scan can rehash just those without walking every watched tree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct WatchSignature {
+    files: u64,
+    sources: u64,
+}
+
+impl WatchSignature {
+    pub(super) fn observe_context(&mut self, audit: &Audit) {
+        self.sources = hash_context_sources(&source_paths(audit));
     }
 }
 
@@ -118,6 +187,21 @@ fn ignored_watch_entry(entry: &DirEntry) -> bool {
         )
 }
 
+fn inside(path: &Path, parent: &str, child: &str) -> bool {
+    path.components()
+        .zip(path.components().skip(1))
+        .any(|(left, right)| left.as_os_str() == parent && right.as_os_str() == child)
+}
+
+fn extension(path: &Path) -> Option<&str> {
+    path.extension().and_then(|extension| extension.to_str())
+}
+
+/// Claude reads `.md` rules and Cursor reads `.mdc` rules.
+fn rule_file(path: &Path) -> bool {
+    matches!(extension(path), Some("md" | "mdc"))
+}
+
 fn relevant_project_file(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -132,26 +216,18 @@ fn relevant_project_file(path: &Path) -> bool {
             | "CLAUDE.MD"
             | "CLAUDE.local.md"
             | ".cursorrules"
-            | "project.toml"
-            | "local.toml"
-            | "settings.json"
-            | "settings.local.json"
-    ) || path
-        .components()
-        .any(|component| component.as_os_str() == ".mdmanager")
-        || (path.extension().and_then(|extension| extension.to_str()) == Some("md")
-            && path
-                .components()
-                .zip(path.components().skip(1))
-                .any(|(left, right)| left.as_os_str() == ".claude" && right.as_os_str() == "rules"))
-        || (path.extension().and_then(|extension| extension.to_str()) == Some("mdc")
-            && path
-                .components()
-                .zip(path.components().skip(1))
-                .any(|(left, right)| left.as_os_str() == ".cursor" && right.as_os_str() == "rules"))
+    ) || (matches!(name, "settings.json" | "settings.local.json")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.ends_with(".claude")))
+        || path
+            .components()
+            .any(|component| component.as_os_str() == ".mdmanager")
+        || (extension(path) == Some("md") && inside(path, ".claude", "rules"))
+        || (extension(path) == Some("mdc") && inside(path, ".cursor", "rules"))
 }
 
-pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
+pub(super) fn current_watch_signature(input: &WatchInput) -> WatchSignature {
     let mut hasher = DefaultHasher::new();
     for path in [
         input.paths.config.clone(),
@@ -161,12 +237,8 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
         hash_tree(&path, &mut hasher, false);
     }
     // Global targets can live anywhere; `mdmanager status` compares each configured path.
-    if let Some(global) = input.global {
-        for target in global.target_names() {
-            if let Ok(path) = global.target_path(target) {
-                hash_tree(&path, &mut hasher, false);
-            }
-        }
+    for path in &input.global_targets {
+        hash_tree(path, &mut hasher, false);
     }
     let codex_home = if env::var_os("HOME").as_deref() == Some(input.paths.home.as_os_str()) {
         env::var_os("CODEX_HOME")
@@ -175,8 +247,8 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
     } else {
         input.paths.home.join(".codex")
     };
-    let claude_config = claude_config_dir(input.paths);
-    let pi_agent = pi_agent_dir(input.paths);
+    let claude_config = claude_config_dir(&input.paths);
+    let pi_agent = pi_agent_dir(&input.paths);
     for path in [
         claude_config.join("CLAUDE.md"),
         claude_config.join("settings.json"),
@@ -196,7 +268,7 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
         hash_tree(&path, &mut hasher, false);
     }
     hash_dependency_tree(&claude_config.join("rules"), &mut hasher, false, true);
-    if let Ok(main_checkout) = crate::git_worktree::worktree_root(&input.audit.directory)
+    if let Ok(main_checkout) = crate::git_worktree::worktree_root(&input.directory)
         .and_then(|root| crate::git_worktree::main_worktree(&root))
     {
         hash_tree(
@@ -208,41 +280,304 @@ pub(super) fn current_watch_signature(input: &ReloadInput<'_>) -> u64 {
     if let Some(root) = &input.watch_root {
         hash_tree(root, &mut hasher, true);
     }
-    hash_context_sources(input.audit, &mut hasher);
-    hash_ancestor_candidates(
-        &input.audit.directory,
-        input.watch_root.as_deref(),
-        &mut hasher,
-    );
-    hasher.finish()
+    hash_ancestor_candidates(&input.directory, input.watch_root.as_deref(), &mut hasher);
+    WatchSignature {
+        files: hasher.finish(),
+        sources: hash_context_sources(&input.sources),
+    }
 }
 
-/// Tracks the last accepted watch signature on the TUI session thread.
+/// One refresh generation of Project, Local and Global discovery, Context resolution and
+/// inspection, observed together off the input thread.
+pub(super) struct Observations {
+    pub(super) project: Option<Workspace>,
+    pub(super) project_error: Option<String>,
+    pub(super) watch_root: Option<PathBuf>,
+    pub(super) project_root: PathBuf,
+    pub(super) global: Option<GlobalConfig>,
+    pub(super) global_error: Option<String>,
+    pub(super) global_active_profile: Option<String>,
+    pub(super) local_repository: Option<LocalRepository>,
+    pub(super) global_sources: Vec<(ContextRuntime, ContextSource)>,
+    // Its `context` is the selected runtime's Audit, before any Claude descendant scan.
+    pub(super) inspection: InstructionInspection,
+    // The watch signature of these observations' own inputs.
+    pub(super) signature: WatchSignature,
+}
+
+impl Observations {
+    pub(super) fn discover(
+        paths: &Paths,
+        directory: &Path,
+        runtime: ContextRuntime,
+        global: Option<GlobalConfig>,
+        global_error: Option<String>,
+        document_paths: &[PathBuf],
+    ) -> Self {
+        let (project, project_error) = match Workspace::discover(directory) {
+            Ok(project) => (project, None),
+            Err(error) => (None, Some(error)),
+        };
+        let watch_root = crate::git_worktree::worktree_root(directory).ok();
+        let project_root = project.as_ref().map_or_else(
+            || watch_root.clone().unwrap_or_else(|| directory.to_owned()),
+            |project| project.root.clone(),
+        );
+        let local_repository = LocalRepository::discover(directory, paths).ok();
+        let (global_active_profile, global_error) =
+            match global.as_ref().map_or(Ok(None), deploy::active_profile) {
+                Ok(profile) => (profile, global_error),
+                Err(error) => (None, Some(error)),
+            };
+        let global_sources = discovered_global_sources(
+            paths,
+            directory,
+            global.as_ref(),
+            global_active_profile.as_deref(),
+        );
+        let context = Audit::resolve(runtime, directory, paths, global.as_ref());
+        let inspection = InstructionInspection::observe(&InspectionInput {
+            context: &context,
+            global: &global,
+            global_active_profile: &global_active_profile,
+            global_error: &global_error,
+            global_sources: &global_sources,
+            local_repository: &local_repository,
+            project: &project,
+            project_error: &project_error,
+            project_root: &project_root,
+            document_paths: document_paths.iter().map(PathBuf::as_path).collect(),
+        });
+        let signature = current_watch_signature(&WatchInput::new(
+            &context,
+            paths,
+            global.as_ref(),
+            &watch_root,
+        ));
+        Self {
+            project,
+            project_error,
+            watch_root,
+            project_root,
+            global,
+            global_error,
+            global_active_profile,
+            local_repository,
+            global_sources,
+            inspection,
+            signature,
+        }
+    }
+}
+
+fn discovered_global_sources(
+    paths: &Paths,
+    directory: &Path,
+    global: Option<&GlobalConfig>,
+    active_profile: Option<&str>,
+) -> Vec<(ContextRuntime, ContextSource)> {
+    let configured = global.map_or_else(Vec::new, |global| {
+        let ids: Vec<&str> = match active_profile {
+            Some(profile) => global
+                .profile_target_names(profile)
+                .map(|ids| ids.collect())
+                .unwrap_or_default(),
+            None => global.target_names().collect(),
+        };
+        ids.into_iter()
+            .filter_map(|id| global.target_path(id).ok())
+            .collect()
+    });
+    let mut seen = HashSet::new();
+    ContextRuntime::ALL
+        .into_iter()
+        .flat_map(|runtime| {
+            // Cursor has no user instruction file; its always-applied home rules play that role,
+            // and both Cursor runtimes report the same files.
+            let cursor = matches!(
+                runtime,
+                ContextRuntime::Cursor | ContextRuntime::CursorAgent
+            );
+            Audit::resolve(runtime, directory, paths, None)
+                .sources
+                .into_iter()
+                .filter(move |source| {
+                    (source.scope == "user" || cursor && source.scope == "user rule")
+                        && source.group == SourceGroup::Startup
+                        && matches!(
+                            source.state,
+                            SourceState::Startup
+                                | SourceState::SelectedEmpty
+                                | SourceState::Truncated { .. }
+                        )
+                })
+                .take(if cursor { usize::MAX } else { 1 })
+                .map(move |source| (runtime, source))
+        })
+        .filter(|(_, source)| {
+            !configured.contains(&source.path) && seen.insert(source.path.clone())
+        })
+        .collect()
+}
+
+/// What the session asks the reload worker to check, taken from its accepted observations.
+pub(super) struct RefreshRequest {
+    pub(super) watch: WatchInput,
+    pub(super) runtime: ContextRuntime,
+    // Open and historical documents, observed again by a refresh.
+    pub(super) document_paths: Vec<PathBuf>,
+}
+
+struct Finished {
+    topology: Topology,
+    observations: Option<Observations>,
+}
+
+/// Compares the watch signature with `signature` and refreshes only when it changed; without
+/// a signature it refreshes unconditionally.
+fn check(
+    request: RefreshRequest,
+    signature: Option<WatchSignature>,
+    mut topology: Topology,
+) -> Finished {
+    topology.revalidate(&request.watch.directory);
+    let changed = signature.is_none_or(|signature| {
+        topology.scope(|| current_watch_signature(&request.watch)) != signature
+    });
+    let observations = changed.then(|| {
+        // A refresh asks Git once for its generation instead of trusting answers kept between
+        // quiet checks.
+        topology.forget();
+        topology.scope(|| {
+            let paths = &request.watch.paths;
+            let (global, global_error) = if paths.config.exists() {
+                match GlobalConfig::load(paths) {
+                    Ok(global) => (Some(global), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
+            Observations::discover(
+                paths,
+                &request.watch.directory,
+                request.runtime,
+                global,
+                global_error,
+                &request.document_paths,
+            )
+        })
+    });
+    Finished {
+        topology,
+        observations,
+    }
+}
+
+struct Pending {
+    generation: u64,
+    runtime: ContextRuntime,
+    notify: bool,
+    receiver: Receiver<Finished>,
+}
+
+/// A refresh the session accepted from the worker; `notify` announces a detected disk change.
+pub(super) struct Refreshed {
+    pub(super) observations: Observations,
+    pub(super) notify: bool,
+}
+
+/// Runs watch checks and refreshes on a worker thread, at most one at a time, and hands the
+/// session only results that are still current.
 pub(super) struct ReloadWatcher {
-    pub(super) signature: u64,
+    pub(super) signature: WatchSignature,
+    topology: Topology,
+    // Raised by every started check and every explicit refresh request; a result is current only
+    // while its generation is the latest.
+    generation: u64,
+    pending: Option<Pending>,
+    // A refresh the session asked for; `Some(true)` announces it as a disk change.
+    requested: Option<bool>,
     last_watch: Instant,
 }
 
 impl ReloadWatcher {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(signature: WatchSignature, topology: Topology) -> Self {
         Self {
-            signature: 0,
+            signature,
+            topology,
+            generation: 0,
+            pending: None,
+            requested: None,
             last_watch: Instant::now(),
         }
     }
 
-    /// Polling requests a refresh; the caller accepts a new signature after observing disk.
-    pub(super) fn poll_reload(&mut self, input: &ReloadInput<'_>) -> bool {
-        if self.last_watch.elapsed() < AUTO_RELOAD_INTERVAL {
-            return false;
-        }
-        self.last_watch = Instant::now();
-        current_watch_signature(input) != self.signature
+    /// Git answers of the accepted generation, for discovery the session runs itself.
+    pub(super) fn topology(&mut self) -> &mut Topology {
+        &mut self.topology
     }
 
-    pub(super) fn accept_reload(&mut self, signature: u64) {
-        self.signature = signature;
+    /// Discards the result of any running check.
+    pub(super) fn invalidate(&mut self) {
+        self.generation += 1;
+    }
+
+    /// Discards any running check and refreshes as soon as the worker is free.
+    pub(super) fn request_refresh(&mut self, notify: bool) {
+        self.invalidate();
+        self.requested = Some(notify || self.requested == Some(true));
+    }
+
+    pub(super) fn due(&self) -> bool {
+        self.pending.is_none()
+            && (self.requested.is_some() || self.last_watch.elapsed() >= AUTO_RELOAD_INTERVAL)
+    }
+
+    pub(super) fn start(&mut self, request: RefreshRequest) {
+        let requested = self.requested.take();
+        let signature = requested.is_none().then_some(self.signature);
+        let topology = self.topology.clone();
+        let runtime = request.runtime;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(check(request, signature, topology));
+        });
+        self.generation += 1;
+        self.pending = Some(Pending {
+            generation: self.generation,
+            runtime,
+            notify: requested.unwrap_or(true),
+            receiver,
+        });
+    }
+
+    /// Returns a finished refresh while it is current: the session still shows `runtime` and
+    /// requested no newer generation since the check started.
+    pub(super) fn poll(&mut self, runtime: ContextRuntime) -> Option<Refreshed> {
+        let finished = match self.pending.as_ref()?.receiver.try_recv() {
+            Ok(finished) => Some(finished),
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        let pending = self.pending.take()?;
         self.last_watch = Instant::now();
+        let finished = finished?;
+        self.topology = finished.topology;
+        let observations = finished.observations?;
+        if pending.generation != self.generation || pending.runtime != runtime {
+            return None;
+        }
+        self.signature = observations.signature;
+        Some(Refreshed {
+            observations,
+            notify: pending.notify,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_pending(&self) -> bool {
+        self.pending.is_some()
     }
 }
 
@@ -258,38 +593,84 @@ mod tests {
 
     #[test]
     fn watcher_ignores_runtime_session_churn() {
-        let (home, _repository, _paths, app) = fixture();
-        let initial = current_watch_signature(&ReloadInput {
-            audit: &app.inspection.context,
-            paths: &app.paths,
-            global: app.global.as_ref(),
-            watch_root: &app.watch_root,
-        });
+        let (home, repository, _paths, app) = fixture();
+        let initial = current_watch_signature(&app.watch_input());
         let transcript = home
             .path()
             .join(".claude/projects/session/transcript.jsonl");
         fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         fs::write(transcript, "session output\n").unwrap();
-        assert_eq!(
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                global: app.global.as_ref(),
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
+        assert_eq!(current_watch_signature(&app.watch_input()), initial);
+
+        // Files no discovery reads change their directories' metadata, not the signature.
+        let rules = repository.path().join(".claude/rules");
+        fs::create_dir_all(&rules).unwrap();
+        fs::write(rules.join("seed.md"), "rule\n").unwrap();
+        let before_churn = current_watch_signature(&app.watch_input());
+        for churn in [
+            "notes/build.log",
+            "__pycache__/x.pyc",
+            ".AGENTS.md.swp",
+            ".venv/lib/settings.json",
+            ".swarmr/report.md",
+            ".claude/rules/.seed.md.swp",
+        ] {
+            let path = repository.path().join(churn);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "churn\n").unwrap();
+            assert_eq!(
+                current_watch_signature(&app.watch_input()),
+                before_churn,
+                "{churn}"
+            );
+            fs::remove_file(&path).unwrap();
+            assert_eq!(
+                current_watch_signature(&app.watch_input()),
+                before_churn,
+                "{churn}"
+            );
+        }
+        let nested = repository.path().join("notes/CLAUDE.md");
+        fs::write(&nested, "# Nested\n").unwrap();
+        let with_nested = current_watch_signature(&app.watch_input());
+        assert_ne!(with_nested, before_churn);
+        fs::remove_file(nested).unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), with_nested);
 
         let instruction = home.path().join(".claude/CLAUDE.md");
         fs::write(instruction, "# Global instructions\n").unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), initial);
+    }
+
+    #[test]
+    fn runtime_switch_discards_a_running_check() {
+        let (_home, repository, _paths, mut app) = fixture();
+        fs::write(repository.path().join("AGENTS.md"), "# Changed\n").unwrap();
+        app.watcher.request_refresh(true);
+        app.poll_reload();
+        assert!(app.watcher.is_pending());
+        let pi = ContextRuntime::ALL
+            .iter()
+            .position(|runtime| *runtime == ContextRuntime::Pi)
+            .unwrap();
+        app.select_runtime(pi);
+        while app.watcher.is_pending() {
+            std::thread::yield_now();
+            app.poll_reload();
+        }
+        // The Claude refresh finished but was discarded, so the change is still unaccepted
+        // and the next check finds it.
+        assert_eq!(app.context.audit.runtime, ContextRuntime::Pi);
+        assert!(app.message.is_none());
         assert_ne!(
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                global: app.global.as_ref(),
-                watch_root: &app.watch_root
-            }),
-            initial
+            app.watcher.signature,
+            current_watch_signature(&app.watch_input())
+        );
+        app.reload_from_disk();
+        assert_eq!(app.inspection.context.runtime, ContextRuntime::Pi);
+        assert_eq!(
+            app.watcher.signature,
+            current_watch_signature(&app.watch_input())
         );
     }
 
@@ -336,14 +717,7 @@ custom = ["common"]
         .unwrap();
         let global = GlobalConfig::load(&paths).unwrap();
         let app = App::new_at(paths, Some(global), directory).unwrap();
-        let signature = |app: &App| {
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                global: app.global.as_ref(),
-                watch_root: &app.watch_root,
-            })
-        };
+        let signature = |app: &App| current_watch_signature(&app.watch_input());
         let initial = signature(&app);
         fs::write(ancestor, "# After\n").unwrap();
         assert_ne!(signature(&app), initial);
@@ -401,14 +775,7 @@ custom = ["common"]
                     .position(|runtime| *runtime == ContextRuntime::Cursor)
                     .unwrap(),
             );
-            let signature = |app: &App| {
-                current_watch_signature(&ReloadInput {
-                    audit: &app.inspection.context,
-                    paths: &app.paths,
-                    global: app.global.as_ref(),
-                    watch_root: &app.watch_root,
-                })
-            };
+            let signature = |app: &App| current_watch_signature(&app.watch_input());
             let state = |app: &App, path: &Path| {
                 app.context
                     .audit
@@ -500,14 +867,7 @@ custom = ["common"]
         }
 
         let mut app = App::new_at(Paths::for_home(home.path()), None, linked.clone()).unwrap();
-        let signature = |app: &App| {
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                global: app.global.as_ref(),
-                watch_root: &app.watch_root,
-            })
-        };
+        let signature = |app: &App| current_watch_signature(&app.watch_input());
         let state = |app: &App, path: &Path| {
             app.context
                 .audit
@@ -585,33 +945,12 @@ custom = ["common"]
         fs::create_dir_all(directory.join("cache/nested")).unwrap();
         let app = App::new_at(Paths::for_home(home.path()), None, directory.clone()).unwrap();
         assert!(app.watch_root.is_none());
-        let initial = current_watch_signature(&ReloadInput {
-            audit: &app.inspection.context,
-            paths: &app.paths,
-            global: app.global.as_ref(),
-            watch_root: &app.watch_root,
-        });
+        let initial = current_watch_signature(&app.watch_input());
 
         fs::write(directory.join("cache/nested/unrelated.txt"), "changed\n").unwrap();
-        assert_eq!(
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                global: app.global.as_ref(),
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
+        assert_eq!(current_watch_signature(&app.watch_input()), initial);
 
         fs::write(directory.join("AGENTS.md"), "# Instructions\n").unwrap();
-        assert_ne!(
-            current_watch_signature(&ReloadInput {
-                audit: &app.inspection.context,
-                paths: &app.paths,
-                global: app.global.as_ref(),
-                watch_root: &app.watch_root
-            }),
-            initial
-        );
+        assert_ne!(current_watch_signature(&app.watch_input()), initial);
     }
 }
