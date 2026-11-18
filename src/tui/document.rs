@@ -12,6 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::active_theme;
 use super::markdown::RenderMode;
+use crate::theme::Theme;
 
 const LINE_HIGHLIGHT_DURATION: Duration = Duration::from_millis(1200);
 
@@ -31,6 +32,60 @@ pub(super) struct DocumentState {
     pub(super) search: Option<SearchPrompt>,
     last_search: Option<(String, usize)>,
     pub(super) line_prompt: Option<LinePrompt>,
+    layout: Option<DocumentLayout>,
+}
+
+/// Parsed lines and wrapped-row starts of the last laid-out document. Draws,
+/// searches and line jumps reuse them, so their cost does not grow with every
+/// frame; a change of content, render mode, theme or content width rebuilds them.
+struct DocumentLayout {
+    content: String,
+    mode: RenderMode,
+    theme: Theme,
+    lines: Vec<Line<'static>>,
+    // Zero until wrapped; real widths are at least 1.
+    width: u16,
+    // `row_starts[i]` is the first wrapped row of line `i`; the last entry is the row total.
+    row_starts: Vec<usize>,
+}
+
+impl DocumentLayout {
+    fn cached<'a>(slot: &'a mut Option<Self>, content: &str, mode: RenderMode) -> &'a mut Self {
+        let theme = active_theme();
+        if !slot.as_ref().is_some_and(|layout| {
+            layout.mode == mode && layout.theme == theme && layout.content == content
+        }) {
+            *slot = Some(Self {
+                content: content.to_owned(),
+                mode,
+                theme,
+                lines: mode.lines(content),
+                width: 0,
+                row_starts: Vec::new(),
+            });
+        }
+        slot.as_mut().unwrap()
+    }
+
+    fn wrap(&mut self, width: u16) {
+        if self.width == width {
+            return;
+        }
+        self.width = width;
+        self.row_starts = std::iter::once(0)
+            .chain(self.lines.iter().scan(0, |rows, line| {
+                *rows += Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width)
+                    .max(1);
+                Some(*rows)
+            }))
+            .collect();
+    }
+
+    fn rows(&self) -> usize {
+        *self.row_starts.last().unwrap()
+    }
 }
 
 pub(super) struct LinePrompt {
@@ -39,18 +94,6 @@ pub(super) struct LinePrompt {
 
 pub(super) struct SearchPrompt {
     pub(super) query: String,
-}
-
-fn wrapped_line_offset(lines: &[Line<'_>], index: usize, width: u16) -> usize {
-    lines[..index]
-        .iter()
-        .map(|line| {
-            Paragraph::new(line.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(width)
-                .max(1)
-        })
-        .sum()
 }
 
 /// Renders accepted document text; never reads its source path from disk.
@@ -143,8 +186,10 @@ pub(super) fn render_plain_document(
     readable: bool,
     numbered: bool,
 ) {
-    let lines = document.render_mode.lines(content);
-    render_lines(frame, document, area, title, lines, readable, numbered);
+    let mode = document.render_mode;
+    render_lines(
+        frame, document, area, title, content, mode, readable, numbered,
+    );
 }
 
 pub(super) fn render_raw_document(
@@ -159,18 +204,21 @@ pub(super) fn render_raw_document(
         document,
         area,
         title,
-        RenderMode::Raw.lines(content),
+        content,
+        RenderMode::Raw,
         false,
         false,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_lines(
     frame: &mut Frame<'_>,
     document: &mut DocumentState,
     area: Rect,
     title: &str,
-    lines: Vec<Line<'static>>,
+    content: &str,
+    mode: RenderMode,
     readable: bool,
     numbered: bool,
 ) {
@@ -191,7 +239,8 @@ fn render_lines(
         inner.x + inner.width.saturating_sub(width) / 2
     };
     let readable_area = Rect::new(x, inner.y, width, inner.height);
-    let number_width = lines.len().max(1).to_string().len().max(3);
+    let layout = DocumentLayout::cached(&mut document.layout, content, mode);
+    let number_width = layout.lines.len().max(1).to_string().len().max(3);
     let gutter_width = if numbered {
         u16::try_from(number_width)
             .unwrap_or(u16::MAX)
@@ -209,12 +258,27 @@ fn render_lines(
     if document.highlighted_line.is_some() && highlighted.is_none() {
         document.highlighted_line = None;
     }
+    layout.wrap(content_area.width.max(1));
+    document.document_width = content_area.width.max(1);
+    document.document_height = content_area.height;
+    document.max_scroll = scroll_max(layout.rows(), content_area.height);
+    document.scroll = document.scroll.min(document.max_scroll);
+    // Lay out only the source lines that reach the viewport; `skip` hides the
+    // wrapped rows of the first one that lie above it.
+    let scroll = usize::from(document.scroll);
+    let first = layout
+        .row_starts
+        .partition_point(|start| *start <= scroll)
+        .saturating_sub(1);
+    let end = layout
+        .row_starts
+        .partition_point(|start| *start < scroll + usize::from(content_area.height))
+        .clamp(first, layout.lines.len());
+    let skip = u16::try_from(scroll - layout.row_starts[first]).unwrap_or(u16::MAX);
     let text = Text::from(
-        lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
-                let mut line = line.clone();
+        (first..end)
+            .map(|index| {
+                let mut line = layout.lines[index].clone();
                 if highlighted == Some(index + 1) {
                     let highlight = Style::new()
                         .fg(active_theme().background)
@@ -229,26 +293,15 @@ fn render_lines(
             })
             .collect::<Vec<_>>(),
     );
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    document.document_width = content_area.width.max(1);
-    document.document_height = content_area.height;
-    document.max_scroll = scroll_max(
-        paragraph.line_count(content_area.width.max(1)),
-        content_area.height,
-    );
-    document.scroll = document.scroll.min(document.max_scroll);
     frame.render_widget(block, area);
     if numbered {
         let mut gutter = Vec::new();
-        for (index, line) in lines.iter().enumerate() {
+        for index in first..end {
             gutter.push(Line::styled(
                 format!("{:>number_width$} │ ", index + 1),
                 Style::new().fg(active_theme().muted),
             ));
-            let wrapped = Paragraph::new(line.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(content_area.width.max(1))
-                .max(1);
+            let wrapped = layout.row_starts[index + 1] - layout.row_starts[index];
             gutter.extend((1..wrapped).map(|_| {
                 Line::styled(
                     format!("{:number_width$} │ ", ""),
@@ -256,12 +309,14 @@ fn render_lines(
                 )
             }));
         }
-        frame.render_widget(
-            Paragraph::new(gutter).scroll((document.scroll, 0)),
-            gutter_area,
-        );
+        frame.render_widget(Paragraph::new(gutter).scroll((skip, 0)), gutter_area);
     }
-    frame.render_widget(paragraph.scroll((document.scroll, 0)), content_area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((skip, 0)),
+        content_area,
+    );
 }
 
 pub(super) fn render_info(
@@ -411,17 +466,19 @@ pub(super) fn info_panel_geometry(screen: Rect, text: &str) -> (Rect, u16) {
 
 impl DocumentState {
     pub(super) fn go_to_line(&mut self, text: &str, input: String) -> (bool, String) {
-        let lines = self.render_mode.lines(text);
-        if lines.is_empty() {
+        let layout = DocumentLayout::cached(&mut self.layout, text, self.render_mode);
+        let count = layout.lines.len();
+        if count == 0 {
             return (false, "Document has no lines".into());
         }
         let Ok(line) = input.parse::<usize>() else {
-            return (false, format!("Line must be between 1 and {}", lines.len()));
+            return (false, format!("Line must be between 1 and {count}"));
         };
-        if line == 0 || line > lines.len() {
-            return (false, format!("Line must be between 1 and {}", lines.len()));
+        if line == 0 || line > count {
+            return (false, format!("Line must be between 1 and {count}"));
         }
-        let offset = wrapped_line_offset(&lines, line - 1, self.document_width.max(1));
+        layout.wrap(self.document_width.max(1));
+        let offset = layout.row_starts[line - 1];
         self.scroll = u16::try_from(offset)
             .unwrap_or(u16::MAX)
             .saturating_sub(self.document_height / 2)
@@ -445,12 +502,14 @@ impl DocumentState {
             return None;
         }
         let width = self.document_width.max(1);
-        let displayed = if raw {
+        let mode = if raw {
             RenderMode::Raw
         } else {
             self.render_mode
-        }
-        .lines(text);
+        };
+        let layout = DocumentLayout::cached(&mut self.layout, text, mode);
+        layout.wrap(width);
+        let displayed = &layout.lines;
         let matches = lines
             .iter()
             .enumerate()
@@ -458,7 +517,7 @@ impl DocumentState {
                 line.to_lowercase().find(&needle)?;
                 let visible = displayed[index].to_string();
                 let Some(match_start) = visible.to_lowercase().find(&needle) else {
-                    return Some(wrapped_line_offset(&displayed, index, width));
+                    return Some(layout.row_starts[index]);
                 };
                 let match_end = match_start + needle.len();
                 let mut folded_bytes = 0;
@@ -470,7 +529,7 @@ impl DocumentState {
                     .wrap(Wrap { trim: false })
                     .line_count(width)
                     .saturating_sub(1);
-                Some(wrapped_line_offset(&displayed, index, width) + within_line)
+                Some(layout.row_starts[index] + within_line)
             })
             .collect::<Vec<_>>();
         // The last match can lie below the maximum viewport origin. Retain its
@@ -795,5 +854,84 @@ mod tests {
             handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
         }
         assert!(draw_at(&mut app, 160, 50).contains("error detail 80"));
+    }
+
+    #[test]
+    fn numbered_viewport_follows_wrapped_rows_at_every_scroll() {
+        let (_home, repository, _paths, mut app) = fixture();
+        let content = (1..=60)
+            .map(|line| {
+                if line % 3 == 0 {
+                    format!("**L{line}** ").repeat(30)
+                } else {
+                    format!("L{line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(repository.path().join("AGENTS.md"), content).unwrap();
+        app.reload_from_disk();
+        app.open(View::File {
+            title: "AGENTS.md".into(),
+            path: repository.path().join("AGENTS.md"),
+            about: "Project file".into(),
+        });
+        // Mode and width changes must relayout: each visible row carries only
+        // its own line's tokens beside the right gutter number or a continuation.
+        for (mode, width) in [
+            (RenderMode::Markdown, 80),
+            (RenderMode::Raw, 80),
+            (RenderMode::Raw, 54),
+            (RenderMode::Markdown, 54),
+        ] {
+            app.document.render_mode = mode;
+            app.document.scroll = 0;
+            draw_at(&mut app, width, 24);
+            let max_scroll = app.document.max_scroll;
+            assert!(max_scroll > 0);
+            let mut previous_rows = Vec::new();
+            for scroll in 0..=max_scroll + 1 {
+                app.document.scroll = scroll;
+                let screen = draw_at(&mut app, width, 24);
+                let rows = screen
+                    .lines()
+                    .skip_while(|row| !row.contains("Contents"))
+                    .skip(1)
+                    .take_while(|row| !row.contains('└'))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                // One scroll step moves the viewport by exactly one wrapped row.
+                if (1..=max_scroll).contains(&scroll) {
+                    assert_eq!(rows[..rows.len() - 1], previous_rows[1..], "{screen}");
+                }
+                let mut current = None;
+                let mut last = None;
+                for row in &rows {
+                    let mut parts = row.split('│').skip(1);
+                    let number = parts.next().unwrap().trim();
+                    let text = parts.next().unwrap().trim();
+                    if !number.is_empty() {
+                        let number = number.parse::<usize>().unwrap();
+                        if let Some(previous) = current {
+                            assert_eq!(number, previous + 1, "{screen}");
+                        }
+                        current = Some(number);
+                    }
+                    assert!(!text.is_empty(), "{screen}");
+                    assert!(mode == RenderMode::Raw || !text.contains('*'), "{screen}");
+                    for token in text.split_whitespace() {
+                        let token = token.trim_matches('*');
+                        let line = current.unwrap_or_else(|| token[1..].parse::<usize>().unwrap());
+                        assert_eq!(token, format!("L{line}"), "{screen}");
+                        last = Some(line);
+                    }
+                }
+                if scroll >= max_scroll {
+                    assert_eq!(app.document.scroll, max_scroll);
+                    assert_eq!(last, Some(60), "{screen}");
+                }
+                previous_rows = rows;
+            }
+        }
     }
 }

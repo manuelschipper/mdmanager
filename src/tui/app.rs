@@ -62,6 +62,9 @@ use crate::theme::{self, Theme};
 
 const RELOAD_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 const PAGE_LINES: u16 = 8;
+// Queued input is applied for at most this long before the next draw, so a long
+// burst still shows progress.
+const INPUT_BUDGET: Duration = Duration::from_millis(50);
 const INTRO_DURATION: Duration = Duration::from_millis(1800);
 const INTRO_WORDMARK: [&str; 5] = [
     "███╗   ███╗ ██████╗ ",
@@ -377,6 +380,8 @@ impl App {
         self.section_index = section_index;
         self.document.scroll = 0;
         self.document.max_scroll = 0;
+        // A highlight left on a page without a document would keep the session redrawing.
+        self.document.highlighted_line = None;
         SessionAction::Continue
     }
 
@@ -615,32 +620,44 @@ impl App {
         self.message_expires_at = None;
     }
 
-    fn poll_message(&mut self) {
-        if self
+    fn poll_message(&mut self) -> bool {
+        let expired = self
             .message_expires_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        if expired {
             self.clear_message();
         }
+        expired
     }
 
-    fn poll_intro(&mut self) {
-        if self
+    fn poll_intro(&mut self) -> bool {
+        let finished = self
             .intro_started
-            .is_some_and(|started| started.elapsed() >= INTRO_DURATION)
-        {
+            .is_some_and(|started| started.elapsed() >= INTRO_DURATION);
+        if finished {
             self.intro_started = None;
         }
+        finished
     }
 
-    fn poll_reload(&mut self) {
-        if let Some(refreshed) = self.watcher.poll(self.context.audit.runtime) {
+    fn poll_reload(&mut self) -> bool {
+        let refreshed = self.watcher.poll(self.context.audit.runtime);
+        let accepted = refreshed.is_some();
+        if let Some(refreshed) = refreshed {
             self.accept_observations(refreshed.observations, refreshed.notify);
         }
         if self.watcher.due() {
             let request = self.refresh_request();
             self.watcher.start(request);
         }
+        accepted
+    }
+
+    /// The intro, the scan spinner and a line highlight change the screen as time passes.
+    fn animating(&self) -> bool {
+        self.intro_started.is_some()
+            || self.context.scan_spinner().is_some()
+            || self.document.highlighted_line.is_some()
     }
 
     fn move_context_selection(&mut self, down: bool) {
@@ -672,13 +689,15 @@ impl App {
     // A finished scan only adds Context sources, which the watch signature then covers too;
     // disk changes since its audit reach the session through the watcher, whose refresh
     // replaces the audit.
-    fn poll_context_scan(&mut self) {
-        if self.context.poll_scan(self.global.as_ref()) {
+    fn poll_context_scan(&mut self) -> bool {
+        let finished = self.context.poll_scan(self.global.as_ref());
+        if finished {
             let selection = self.context_selection();
             self.inspection.observe_context(self.context.audit.clone());
             self.watcher.signature.observe_known(&self.inspection);
             self.restore_context_selection(selection);
         }
+        finished
     }
 
     fn open_picker(&mut self) {
@@ -836,30 +855,66 @@ pub(crate) fn run(
 }
 
 fn session(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
+    let mut redraw = true;
     loop {
-        app.poll_intro();
-        app.poll_context_scan();
-        app.poll_reload();
-        app.poll_message();
-        terminal.draw(|frame| render(frame, app))?;
+        redraw |= app.poll_intro();
+        redraw |= app.poll_context_scan();
+        redraw |= app.poll_reload();
+        redraw |= app.poll_message();
+        if redraw || app.animating() {
+            terminal.draw(|frame| render(frame, app))?;
+            redraw = false;
+        }
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if handle_key(app, key) == SessionAction::Quit {
-            return Ok(());
+        // Apply every queued event before drawing once, so held keys and
+        // trackpad scrolling do not wait behind one frame per key.
+        let started = Instant::now();
+        // The last draw laid out the screen the first queued key acts on.
+        let mut laid_out = true;
+        loop {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if !laid_out {
+                        lay_out(terminal, app);
+                        laid_out = true;
+                    }
+                    match handle_key(app, key) {
+                        SessionAction::Quit => return Ok(()),
+                        SessionAction::Scrolled => {}
+                        SessionAction::Continue => laid_out = false,
+                    }
+                    redraw = true;
+                }
+                Event::Resize(..) => {
+                    terminal.autoresize()?;
+                    laid_out = false;
+                    redraw = true;
+                }
+                _ => {}
+            }
+            if started.elapsed() >= INPUT_BUDGET || !event::poll(Duration::ZERO)? {
+                break;
+            }
         }
     }
+}
+
+/// Renders without writing to the terminal. Keys read scroll bounds and
+/// document widths from the last render, so a key after a view, prompt, selection
+/// or size change needs this layout before it acts.
+fn lay_out(terminal: &mut ratatui::DefaultTerminal, app: &mut App) {
+    render(&mut terminal.get_frame(), app);
+    // The next draw renders into this buffer and diffs it against the screen.
+    terminal.current_buffer_mut().reset();
 }
 
 #[derive(Eq, PartialEq)]
 enum SessionAction {
     Continue,
+    // Only the document scroll moved, which leaves the layout unchanged.
+    Scrolled,
     Quit,
 }
 
@@ -913,7 +968,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> SessionAction {
         } else {
             app.document.scroll.saturating_sub(PAGE_LINES)
         };
-        return SessionAction::Continue;
+        return SessionAction::Scrolled;
     }
     match key.code {
         KeyCode::Char('q') => SessionAction::Quit,
@@ -949,7 +1004,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> SessionAction {
                     app.section_index = app.section_index.saturating_sub(1);
                     app.document.scroll = 0;
                 }
-                _ => app.document.scroll = app.document.scroll.saturating_sub(1),
+                _ => {
+                    app.document.scroll = app.document.scroll.saturating_sub(1);
+                    return SessionAction::Scrolled;
+                }
             }
             SessionAction::Continue
         }
@@ -984,7 +1042,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> SessionAction {
                         .document
                         .scroll
                         .saturating_add(1)
-                        .min(app.document.max_scroll)
+                        .min(app.document.max_scroll);
+                    return SessionAction::Scrolled;
                 }
             }
             SessionAction::Continue

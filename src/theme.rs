@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Theme {
     pub(crate) background: Color,
     pub(crate) surface: Color,
