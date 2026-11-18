@@ -71,23 +71,20 @@ impl WatchInput {
 
 /// How a watched tree is walked; each mode mirrors the discovery that reads the tree.
 #[derive(Clone, Copy)]
-enum Walk<'a> {
+enum Walk {
     /// Every file, such as mdmanager state or a runtime settings directory.
     All,
-    /// A Git worktree, holding the instruction files Claude's subfolder scan finds. Codex
-    /// fallback filenames from its configuration also count.
-    Project(&'a [String]),
+    /// A Git worktree, holding the instruction files Claude's subfolder scan finds. Like the
+    /// scan, it skips only `.git` directories and does not enter linked directories.
+    Project,
     /// A Claude or Cursor rule directory: files with this extension, following links and
     /// skipping no directory, as the rule resolvers do.
     Rules(&'static str),
 }
 
-fn hash_tree(path: &Path, hasher: &mut DefaultHasher, walk: Walk<'_>) {
-    if !path.exists() {
-        path.hash(hasher);
-        0_u8.hash(hasher);
-        return;
-    }
+// Only files discovery would read are hashed, so a missing tree, an empty one, and one holding
+// only other files all hash alike.
+fn hash_tree(path: &Path, hasher: &mut DefaultHasher, walk: Walk) {
     let rules = matches!(walk, Walk::Rules(_));
     let walker = WalkDir::new(path)
         .follow_links(rules)
@@ -95,30 +92,28 @@ fn hash_tree(path: &Path, hasher: &mut DefaultHasher, walk: Walk<'_>) {
         .filter_entry(|entry| rules || !ignored_watch_entry(entry));
     for entry in walker.flatten() {
         // Claude's subfolder scan follows links inside nested rule directories.
-        if matches!(walk, Walk::Project(_))
+        if matches!(walk, Walk::Project)
             && entry.path().ends_with(".claude/rules")
             && entry.path().is_dir()
         {
             hash_tree(entry.path(), hasher, Walk::Rules("md"));
         }
-        // A directory's own metadata changes whenever anything inside it is added or removed;
-        // only the files discovery reads, and where linked directories point, count.
+        // A directory's own metadata changes whenever anything inside it is added or removed.
         if entry.file_type().is_dir() {
-            if entry.path_is_symlink() {
-                entry.path().hash(hasher);
-                fs::read_link(entry.path()).ok().hash(hasher);
-            }
             continue;
         }
         let relevant = match walk {
             Walk::All => true,
-            Walk::Project(fallback_names) => relevant_project_file(entry.path(), fallback_names),
+            Walk::Project => relevant_project_file(entry.path()),
             Walk::Rules(rule_extension) => extension(entry.path()) == Some(rule_extension),
         };
         if !relevant {
             continue;
         }
         entry.path().hash(hasher);
+        // The resolved path changes when a linked directory anywhere above the file, even
+        // above the walked tree, is retargeted, whatever the new file's metadata.
+        fs::canonicalize(entry.path()).ok().hash(hasher);
         if entry.path_is_symlink() {
             fs::read_link(entry.path()).ok().hash(hasher);
         }
@@ -250,36 +245,42 @@ const ANCESTOR_CANDIDATES: [&str; 11] = [
 // `.claude` or rule directory, including ancestors inside the Git worktree.
 fn hash_ancestor_candidates(directory: &Path, codex: &CodexSettings, hasher: &mut DefaultHasher) {
     for ancestor in directory.ancestors() {
-        for name in ANCESTOR_CANDIDATES
-            .iter()
-            .copied()
-            .chain(codex.fallback_names.iter().map(String::as_str))
-        {
+        for name in ANCESTOR_CANDIDATES {
             hash_tree(&ancestor.join(name), hasher, Walk::All);
-        }
-        // A new marker moves the Codex project root and so its candidate directories.
-        for marker in &codex.root_markers {
-            ancestor.join(marker).exists().hash(hasher);
         }
         hash_tree(&ancestor.join(".claude/rules"), hasher, Walk::Rules("md"));
         hash_tree(&ancestor.join(".cursor/rules"), hasher, Walk::Rules("mdc"));
+    }
+    // Codex reads its fallback filenames only from its project root, the nearest ancestor with
+    // a root marker, down to the launch directory; a marker appearing or disappearing on that
+    // chain moves the root.
+    for ancestor in directory.ancestors() {
+        for name in &codex.fallback_names {
+            hash_tree(&ancestor.join(name), hasher, Walk::All);
+        }
+        let markers = codex
+            .root_markers
+            .iter()
+            .map(|marker| ancestor.join(marker).exists())
+            .collect::<Vec<_>>();
+        markers.hash(hasher);
+        if markers.contains(&true) {
+            break;
+        }
     }
 }
 
 fn ignored_watch_entry(entry: &DirEntry) -> bool {
     entry.depth() > 0
         && entry.file_type().is_dir()
-        && matches!(
-            entry.file_name().to_str(),
-            Some(".git" | "target" | "node_modules")
-        )
+        && matches!(entry.file_name().to_str(), Some(".git"))
 }
 
 fn extension(path: &Path) -> Option<&str> {
     path.extension().and_then(|extension| extension.to_str())
 }
 
-fn relevant_project_file(path: &Path, codex_fallback_names: &[String]) -> bool {
+fn relevant_project_file(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -292,7 +293,6 @@ fn relevant_project_file(path: &Path, codex_fallback_names: &[String]) -> bool {
             name,
             "AGENTS.MD" | "AGENTS.override.md" | "CLAUDE.MD" | ".cursorrules"
         )
-        || codex_fallback_names.iter().any(|fallback| fallback == name)
         || (matches!(name, "settings.json" | "settings.local.json")
             && path
                 .parent()
@@ -353,7 +353,7 @@ fn hash_watched_files(input: &WatchInput) -> u64 {
         );
     }
     if let Some(root) = &input.watch_root {
-        hash_tree(root, &mut hasher, Walk::Project(&codex.fallback_names));
+        hash_tree(root, &mut hasher, Walk::Project);
     }
     hash_ancestor_candidates(&input.directory, &codex, &mut hasher);
     hasher.finish()
@@ -707,12 +707,29 @@ mod tests {
                 "{churn}"
             );
         }
-        let nested = repository.path().join("notes/CLAUDE.md");
-        fs::write(&nested, "# Nested\n").unwrap();
-        let with_nested = current_watch_signature(&app.watch_input());
-        assert_ne!(with_nested, before_churn);
-        fs::remove_file(nested).unwrap();
-        assert_ne!(current_watch_signature(&app.watch_input()), with_nested);
+        // Creating or removing a rule directory that holds no supported rule is churn too.
+        let cursor = repository.path().join(".cursor");
+        fs::remove_dir_all(&cursor).unwrap();
+        assert_eq!(current_watch_signature(&app.watch_input()), before_churn);
+        fs::create_dir_all(cursor.join("rules")).unwrap();
+        fs::write(cursor.join("rules/first.md"), "churn\n").unwrap();
+        assert_eq!(current_watch_signature(&app.watch_input()), before_churn);
+        fs::remove_dir_all(&cursor).unwrap();
+
+        // Claude's subfolder scan reports instructions inside dependency and build directories.
+        for nested in [
+            "notes/CLAUDE.md",
+            "node_modules/a/CLAUDE.md",
+            "target/a/CLAUDE.md",
+        ] {
+            let nested = repository.path().join(nested);
+            fs::create_dir_all(nested.parent().unwrap()).unwrap();
+            fs::write(&nested, "# Nested\n").unwrap();
+            let with_nested = current_watch_signature(&app.watch_input());
+            assert_ne!(with_nested, before_churn, "{nested:?}");
+            fs::remove_file(&nested).unwrap();
+            assert_eq!(current_watch_signature(&app.watch_input()), before_churn);
+        }
 
         let instruction = home.path().join(".claude/CLAUDE.md");
         fs::write(instruction, "# Global instructions\n").unwrap();
@@ -763,15 +780,21 @@ mod tests {
         .unwrap();
         let nested = repository.path().join("nested");
         fs::create_dir(&nested).unwrap();
-        for created in [
-            repository.path().join("PROJECT_GUIDE.md"),
-            nested.join("PROJECT_GUIDE.md"),
+        // Codex reads fallback names only from its project root down to the launch directory.
+        for (created, read) in [
+            (repository.path().join("PROJECT_GUIDE.md"), true),
+            (nested.join("PROJECT_GUIDE.md"), false),
+            (
+                repository.path().join(".swarmr/reviews/PROJECT_GUIDE.md"),
+                false,
+            ),
         ] {
             let before = current_watch_signature(&app.watch_input());
+            fs::create_dir_all(created.parent().unwrap()).unwrap();
             fs::write(&created, "created\n").unwrap();
-            assert_ne!(
-                current_watch_signature(&app.watch_input()),
-                before,
+            assert_eq!(
+                current_watch_signature(&app.watch_input()) != before,
+                read,
                 "{created:?}"
             );
         }
@@ -817,6 +840,30 @@ mod tests {
         symlink(&second, &staged).unwrap();
         fs::rename(&staged, &link).unwrap();
         assert_ne!(current_watch_signature(&app.watch_input()), before);
+
+        // A retarget to a rule tree with the same names, sizes and times still counts.
+        let third = external.path().join("third");
+        fs::create_dir_all(third.join("rules")).unwrap();
+        let original = second.join("rules/retargeted.md");
+        let copy = third.join("rules/retargeted.md");
+        fs::write(&copy, "rule\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&copy)
+            .unwrap()
+            .set_modified(fs::metadata(&original).unwrap().modified().unwrap())
+            .unwrap();
+        let before = current_watch_signature(&app.watch_input());
+        symlink(&third, &staged).unwrap();
+        fs::rename(&staged, &link).unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
+
+        // A linked directory with no supported rule changes nothing the resolver reads.
+        let before = current_watch_signature(&app.watch_input());
+        let empty = external.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        symlink(&empty, third.join("rules/linked-empty")).unwrap();
+        assert_eq!(current_watch_signature(&app.watch_input()), before);
     }
 
     #[test]
@@ -1035,10 +1082,8 @@ custom = ["common"]
         let unrelated = workspace.path().join("unrelated");
         fs::create_dir(&unrelated).unwrap();
         symlink(&unrelated, linked.join("ordinary-link")).unwrap();
-        for ignored in [".git", "target", "node_modules"] {
-            fs::create_dir_all(linked.join("controls").join(ignored).join("watch-control"))
-                .unwrap();
-        }
+        // Claude's subfolder scan skips only `.git` directories.
+        fs::create_dir_all(linked.join("controls/.git/watch-control")).unwrap();
 
         let mut app = App::new_at(Paths::for_home(home.path()), None, linked.clone()).unwrap();
         let signature = |app: &App| current_watch_signature(&app.watch_input());
@@ -1053,16 +1098,11 @@ custom = ["common"]
         assert_eq!(state(&app, &source), Some(SourceState::Startup));
         let initial = signature(&app);
         fs::write(unrelated.join("CLAUDE.md"), "unrelated").unwrap();
-        for ignored in [".git", "target", "node_modules"] {
-            fs::write(
-                linked
-                    .join("controls")
-                    .join(ignored)
-                    .join("watch-control/CLAUDE.md"),
-                "ignored",
-            )
-            .unwrap();
-        }
+        fs::write(
+            linked.join("controls/.git/watch-control/CLAUDE.md"),
+            "ignored",
+        )
+        .unwrap();
         assert_eq!(signature(&app), initial);
         let settings = main.join(".claude/settings.local.json");
         fs::write(
