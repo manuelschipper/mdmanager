@@ -996,15 +996,20 @@ pub(crate) fn claude_managed_dir() -> &'static Path {
     directory
 }
 
-fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
+/// `CODEX_HOME` applies only when `paths` describes the process's own home.
+pub(crate) fn codex_home(paths: &Paths) -> PathBuf {
     let process_home = env::var_os("HOME").map(PathBuf::from);
-    let codex_home = if process_home.as_ref() == Some(&paths.home) {
+    if process_home.as_ref() == Some(&paths.home) {
         env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| paths.home.join(".codex"))
     } else {
         paths.home.join(".codex")
-    };
+    }
+}
+
+fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
+    let codex_home = codex_home(paths);
     let settings = codex_settings(&codex_home);
     let mut sources = Vec::new();
 
@@ -1633,9 +1638,9 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
 }
 
 #[derive(Debug)]
-struct CodexSettings {
-    root_markers: Vec<String>,
-    fallback_names: Vec<String>,
+pub(crate) struct CodexSettings {
+    pub(crate) root_markers: Vec<String>,
+    pub(crate) fallback_names: Vec<String>,
     max_bytes: usize,
     warning: Option<String>,
     projects: std::collections::BTreeMap<String, CodexProjectSettings>,
@@ -1655,7 +1660,7 @@ struct CodexProjectSettings {
     trust_level: Option<String>,
 }
 
-fn codex_settings(home: &Path) -> CodexSettings {
+pub(crate) fn codex_settings(home: &Path) -> CodexSettings {
     let mut settings = CodexSettings {
         root_markers: vec![".git".into()],
         fallback_names: Vec::new(),

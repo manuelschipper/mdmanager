@@ -38,7 +38,7 @@ use self::overview::{
     OverviewInput, home_canvas_height, home_canvas_width, home_header_line, home_item_key,
     home_target_reference, render_home,
 };
-use self::reload::{Observations, RefreshRequest, ReloadWatcher, WatchInput};
+use self::reload::{Baseline, Observations, RefreshRequest, ReloadWatcher, WatchInput};
 use super::context_ui;
 use super::{ACTIVE_THEME, activate_theme, active_theme, reset_theme};
 use std::env;
@@ -262,6 +262,7 @@ impl App {
             inspection,
             signature,
         } = topology.scope(|| {
+            let baseline = Baseline::startup(&paths, &directory, global.as_ref());
             Observations::discover(
                 &paths,
                 &directory,
@@ -269,6 +270,7 @@ impl App {
                 global,
                 global_error,
                 &[],
+                &baseline,
             )
         });
         let mut context = ContextUi::new(paths.clone(), inspection.context.clone());

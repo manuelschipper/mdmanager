@@ -1,6 +1,5 @@
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
-use std::env;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -13,8 +12,9 @@ use walkdir::{DirEntry, WalkDir};
 use super::inspection::{InspectionInput, InstructionInspection};
 use crate::config::{GlobalConfig, Paths};
 use crate::context::{
-    Audit, ContextRuntime, ContextSource, SourceGroup, SourceState, claude_config_dir,
-    claude_managed_dir, pi_agent_dir,
+    Audit, CodexSettings, ContextRuntime, ContextSource, SourceGroup, SourceState,
+    claude_config_dir, claude_filename_matches, claude_managed_dir, codex_home, codex_settings,
+    pi_agent_dir,
 };
 use crate::deploy;
 use crate::git_worktree::Topology;
@@ -42,9 +42,22 @@ impl WatchInput {
         watch_root: &Option<PathBuf>,
     ) -> Self {
         Self {
-            paths: paths.clone(),
-            directory: audit.directory.clone(),
             sources: source_paths(audit),
+            ..Self::before_discovery(paths, &audit.directory, global, watch_root)
+        }
+    }
+
+    // Before the first discovery no Context sources are known yet.
+    fn before_discovery(
+        paths: &Paths,
+        directory: &Path,
+        global: Option<&GlobalConfig>,
+        watch_root: &Option<PathBuf>,
+    ) -> Self {
+        Self {
+            paths: paths.clone(),
+            directory: directory.to_owned(),
+            sources: Vec::new(),
             global_targets: global.map_or_else(Vec::new, |global| {
                 global
                     .target_names()
@@ -56,32 +69,37 @@ impl WatchInput {
     }
 }
 
-fn hash_tree(path: &Path, hasher: &mut DefaultHasher, project_tree: bool) {
-    hash_dependency_tree(path, hasher, project_tree, false);
+/// How a watched tree is walked; each mode mirrors the discovery that reads the tree.
+#[derive(Clone, Copy)]
+enum Walk<'a> {
+    /// Every file, such as mdmanager state or a runtime settings directory.
+    All,
+    /// A Git worktree, holding the instruction files Claude's subfolder scan finds. Codex
+    /// fallback filenames from its configuration also count.
+    Project(&'a [String]),
+    /// A Claude or Cursor rule directory: files with this extension, following links and
+    /// skipping no directory, as the rule resolvers do.
+    Rules(&'static str),
 }
 
-fn hash_dependency_tree(
-    path: &Path,
-    hasher: &mut DefaultHasher,
-    project_tree: bool,
-    rule_directory: bool,
-) {
+fn hash_tree(path: &Path, hasher: &mut DefaultHasher, walk: Walk<'_>) {
     if !path.exists() {
         path.hash(hasher);
         0_u8.hash(hasher);
         return;
     }
+    let rules = matches!(walk, Walk::Rules(_));
     let walker = WalkDir::new(path)
-        .follow_links(rule_directory)
+        .follow_links(rules)
         .into_iter()
-        .filter_entry(|entry| !ignored_watch_entry(entry));
+        .filter_entry(|entry| rules || !ignored_watch_entry(entry));
     for entry in walker.flatten() {
-        // Claude and Cursor rule directories share the resolver's linked traversal.
-        if !rule_directory
-            && (entry.path().ends_with(".claude/rules") || entry.path().ends_with(".cursor/rules"))
+        // Claude's subfolder scan follows links inside nested rule directories.
+        if matches!(walk, Walk::Project(_))
+            && entry.path().ends_with(".claude/rules")
             && entry.path().is_dir()
         {
-            hash_dependency_tree(entry.path(), hasher, false, true);
+            hash_tree(entry.path(), hasher, Walk::Rules("md"));
         }
         // A directory's own metadata changes whenever anything inside it is added or removed;
         // only the files discovery reads, and where linked directories point, count.
@@ -92,9 +110,12 @@ fn hash_dependency_tree(
             }
             continue;
         }
-        if (project_tree && !relevant_project_file(entry.path()))
-            || (rule_directory && !rule_file(entry.path()))
-        {
+        let relevant = match walk {
+            Walk::All => true,
+            Walk::Project(fallback_names) => relevant_project_file(entry.path(), fallback_names),
+            Walk::Rules(rule_extension) => extension(entry.path()) == Some(rule_extension),
+        };
+        if !relevant {
             continue;
         }
         entry.path().hash(hasher);
@@ -127,10 +148,16 @@ fn source_paths(audit: &Audit) -> Vec<PathBuf> {
         .collect()
 }
 
-fn hash_context_sources(sources: &[PathBuf]) -> u64 {
+fn hash_source(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for source in sources {
-        hash_tree(source, &mut hasher, false);
+    hash_tree(path, &mut hasher, Walk::All);
+    hasher.finish()
+}
+
+fn combine(hashes: impl Iterator<Item = u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for hash in hashes {
+        hash.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -145,36 +172,97 @@ pub(super) struct WatchSignature {
 
 impl WatchSignature {
     pub(super) fn observe_context(&mut self, audit: &Audit) {
-        self.sources = hash_context_sources(&source_paths(audit));
+        self.sources = combine(source_paths(audit).iter().map(|path| hash_source(path)));
     }
 }
 
-fn hash_ancestor_candidates(
-    directory: &Path,
-    watch_root: Option<&Path>,
-    hasher: &mut DefaultHasher,
-) {
-    for ancestor in directory
-        .ancestors()
-        .filter(|ancestor| watch_root.is_none_or(|root| !ancestor.starts_with(root)))
-    {
-        for name in [
-            "AGENTS.override.md",
-            "AGENTS.md",
-            "AGENTS.MD",
-            "CLAUDE.md",
-            "CLAUDE.MD",
-            "CLAUDE.local.md",
-            ".cursorrules",
-            ".claude/CLAUDE.md",
-            ".claude/AGENTS.md",
-            ".claude/settings.json",
-            ".claude/settings.local.json",
-        ] {
-            hash_tree(&ancestor.join(name), hasher, false);
+/// Watched state hashed before a refresh reads it. Accepting a refresh with this signature,
+/// rather than one taken after discovery, keeps an edit that lands while discovery runs a
+/// difference for the next check.
+pub(super) struct Baseline {
+    files: u64,
+    sources: HashMap<PathBuf, u64>,
+    order: Vec<PathBuf>,
+}
+
+impl Baseline {
+    pub(super) fn observe(input: &WatchInput) -> Self {
+        Self {
+            files: hash_watched_files(input),
+            sources: input
+                .sources
+                .iter()
+                .map(|path| (path.clone(), hash_source(path)))
+                .collect(),
+            order: input.sources.clone(),
         }
-        hash_tree(&ancestor.join(".claude/rules"), hasher, true);
-        hash_tree(&ancestor.join(".cursor/rules"), hasher, true);
+    }
+
+    /// The baseline for the session's first discovery, before any Context source is known.
+    pub(super) fn startup(paths: &Paths, directory: &Path, global: Option<&GlobalConfig>) -> Self {
+        Self::observe(&WatchInput::before_discovery(
+            paths,
+            directory,
+            global,
+            &crate::git_worktree::worktree_root(directory).ok(),
+        ))
+    }
+
+    fn signature(&self) -> WatchSignature {
+        WatchSignature {
+            files: self.files,
+            sources: combine(self.order.iter().map(|path| self.sources[path])),
+        }
+    }
+
+    /// The signature of a refresh whose audit lists `sources`. Sources the baseline hashed
+    /// keep that hash; only sources the refresh newly found are hashed now. When the refresh
+    /// changed which trees are watched, such as the Git worktree or the Global targets, the
+    /// next check hashes the new trees, differs, and refreshes once more.
+    fn signature_for(&self, sources: &[PathBuf]) -> WatchSignature {
+        WatchSignature {
+            files: self.files,
+            sources: combine(sources.iter().map(|path| {
+                self.sources
+                    .get(path)
+                    .copied()
+                    .unwrap_or_else(|| hash_source(path))
+            })),
+        }
+    }
+}
+
+const ANCESTOR_CANDIDATES: [&str; 11] = [
+    "AGENTS.override.md",
+    "AGENTS.md",
+    "AGENTS.MD",
+    "CLAUDE.md",
+    "CLAUDE.MD",
+    "CLAUDE.local.md",
+    ".cursorrules",
+    ".claude/CLAUDE.md",
+    ".claude/AGENTS.md",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+];
+
+// Every runtime resolves the launch directory and its ancestors by name, through any linked
+// `.claude` or rule directory, including ancestors inside the Git worktree.
+fn hash_ancestor_candidates(directory: &Path, codex: &CodexSettings, hasher: &mut DefaultHasher) {
+    for ancestor in directory.ancestors() {
+        for name in ANCESTOR_CANDIDATES
+            .iter()
+            .copied()
+            .chain(codex.fallback_names.iter().map(String::as_str))
+        {
+            hash_tree(&ancestor.join(name), hasher, Walk::All);
+        }
+        // A new marker moves the Codex project root and so its candidate directories.
+        for marker in &codex.root_markers {
+            ancestor.join(marker).exists().hash(hasher);
+        }
+        hash_tree(&ancestor.join(".claude/rules"), hasher, Walk::Rules("md"));
+        hash_tree(&ancestor.join(".cursor/rules"), hasher, Walk::Rules("mdc"));
     }
 }
 
@@ -187,66 +275,53 @@ fn ignored_watch_entry(entry: &DirEntry) -> bool {
         )
 }
 
-fn inside(path: &Path, parent: &str, child: &str) -> bool {
-    path.components()
-        .zip(path.components().skip(1))
-        .any(|(left, right)| left.as_os_str() == parent && right.as_os_str() == child)
-}
-
 fn extension(path: &Path) -> Option<&str> {
     path.extension().and_then(|extension| extension.to_str())
 }
 
-/// Claude reads `.md` rules and Cursor reads `.mdc` rules.
-fn rule_file(path: &Path) -> bool {
-    matches!(extension(path), Some("md" | "mdc"))
-}
-
-fn relevant_project_file(path: &Path) -> bool {
+fn relevant_project_file(path: &Path, codex_fallback_names: &[String]) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    matches!(
-        name,
-        "AGENTS.md"
-            | "AGENTS.MD"
-            | "AGENTS.override.md"
-            | "CLAUDE.md"
-            | "CLAUDE.MD"
-            | "CLAUDE.local.md"
-            | ".cursorrules"
-    ) || (matches!(name, "settings.json" | "settings.local.json")
-        && path
-            .parent()
-            .is_some_and(|parent| parent.ends_with(".claude")))
+    // The subfolder scan also accepts another spelling the filesystem resolves to these names.
+    ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"]
+        .into_iter()
+        .any(|candidate| claude_filename_matches(path, candidate))
+        || matches!(
+            name,
+            "AGENTS.MD" | "AGENTS.override.md" | "CLAUDE.MD" | ".cursorrules"
+        )
+        || codex_fallback_names.iter().any(|fallback| fallback == name)
+        || (matches!(name, "settings.json" | "settings.local.json")
+            && path
+                .parent()
+                .is_some_and(|parent| parent.ends_with(".claude")))
         || path
             .components()
             .any(|component| component.as_os_str() == ".mdmanager")
-        || (extension(path) == Some("md") && inside(path, ".claude", "rules"))
-        || (extension(path) == Some("mdc") && inside(path, ".cursor", "rules"))
+        || (extension(path) == Some("md")
+            && path
+                .components()
+                .zip(path.components().skip(1))
+                .any(|(left, right)| left.as_os_str() == ".claude" && right.as_os_str() == "rules"))
 }
 
-pub(super) fn current_watch_signature(input: &WatchInput) -> WatchSignature {
+fn hash_watched_files(input: &WatchInput) -> u64 {
     let mut hasher = DefaultHasher::new();
     for path in [
         input.paths.config.clone(),
         input.paths.data_dir.clone(),
         input.paths.state_dir.clone(),
     ] {
-        hash_tree(&path, &mut hasher, false);
+        hash_tree(&path, &mut hasher, Walk::All);
     }
     // Global targets can live anywhere; `mdmanager status` compares each configured path.
     for path in &input.global_targets {
-        hash_tree(path, &mut hasher, false);
+        hash_tree(path, &mut hasher, Walk::All);
     }
-    let codex_home = if env::var_os("HOME").as_deref() == Some(input.paths.home.as_os_str()) {
-        env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| input.paths.home.join(".codex"))
-    } else {
-        input.paths.home.join(".codex")
-    };
+    let codex_home = codex_home(&input.paths);
+    let codex = codex_settings(&codex_home);
     let claude_config = claude_config_dir(&input.paths);
     let pi_agent = pi_agent_dir(&input.paths);
     for path in [
@@ -265,26 +340,28 @@ pub(super) fn current_watch_signature(input: &WatchInput) -> WatchSignature {
         pi_agent.join("CLAUDE.md"),
         pi_agent.join("CLAUDE.MD"),
     ] {
-        hash_tree(&path, &mut hasher, false);
+        hash_tree(&path, &mut hasher, Walk::All);
     }
-    hash_dependency_tree(&claude_config.join("rules"), &mut hasher, false, true);
+    hash_tree(&claude_config.join("rules"), &mut hasher, Walk::Rules("md"));
     if let Ok(main_checkout) = crate::git_worktree::worktree_root(&input.directory)
         .and_then(|root| crate::git_worktree::main_worktree(&root))
     {
         hash_tree(
             &main_checkout.join(".claude/settings.local.json"),
             &mut hasher,
-            false,
+            Walk::All,
         );
     }
     if let Some(root) = &input.watch_root {
-        hash_tree(root, &mut hasher, true);
+        hash_tree(root, &mut hasher, Walk::Project(&codex.fallback_names));
     }
-    hash_ancestor_candidates(&input.directory, input.watch_root.as_deref(), &mut hasher);
-    WatchSignature {
-        files: hasher.finish(),
-        sources: hash_context_sources(&input.sources),
-    }
+    hash_ancestor_candidates(&input.directory, &codex, &mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+pub(super) fn current_watch_signature(input: &WatchInput) -> WatchSignature {
+    Baseline::observe(input).signature()
 }
 
 /// One refresh generation of Project, Local and Global discovery, Context resolution and
@@ -301,7 +378,7 @@ pub(super) struct Observations {
     pub(super) global_sources: Vec<(ContextRuntime, ContextSource)>,
     // Its `context` is the selected runtime's Audit, before any Claude descendant scan.
     pub(super) inspection: InstructionInspection,
-    // The watch signature of these observations' own inputs.
+    // The watch signature of these observations' own inputs, hashed before discovery read them.
     pub(super) signature: WatchSignature,
 }
 
@@ -313,6 +390,7 @@ impl Observations {
         global: Option<GlobalConfig>,
         global_error: Option<String>,
         document_paths: &[PathBuf],
+        baseline: &Baseline,
     ) -> Self {
         let (project, project_error) = match Workspace::discover(directory) {
             Ok(project) => (project, None),
@@ -348,12 +426,7 @@ impl Observations {
             project_root: &project_root,
             document_paths: document_paths.iter().map(PathBuf::as_path).collect(),
         });
-        let signature = current_watch_signature(&WatchInput::new(
-            &context,
-            paths,
-            global.as_ref(),
-            &watch_root,
-        ));
+        let signature = baseline.signature_for(&source_paths(&context));
         Self {
             project,
             project_error,
@@ -441,9 +514,8 @@ fn check(
     mut topology: Topology,
 ) -> Finished {
     topology.revalidate(&request.watch.directory);
-    let changed = signature.is_none_or(|signature| {
-        topology.scope(|| current_watch_signature(&request.watch)) != signature
-    });
+    let baseline = topology.scope(|| Baseline::observe(&request.watch));
+    let changed = signature.is_none_or(|signature| baseline.signature() != signature);
     let observations = changed.then(|| {
         // A refresh asks Git once for its generation instead of trusting answers kept between
         // quiet checks.
@@ -465,6 +537,7 @@ fn check(
                 global,
                 global_error,
                 &request.document_paths,
+                &baseline,
             )
         })
     });
@@ -606,6 +679,7 @@ mod tests {
         let rules = repository.path().join(".claude/rules");
         fs::create_dir_all(&rules).unwrap();
         fs::write(rules.join("seed.md"), "rule\n").unwrap();
+        fs::create_dir_all(repository.path().join(".cursor/rules")).unwrap();
         let before_churn = current_watch_signature(&app.watch_input());
         for churn in [
             "notes/build.log",
@@ -614,6 +688,9 @@ mod tests {
             ".venv/lib/settings.json",
             ".swarmr/report.md",
             ".claude/rules/.seed.md.swp",
+            // Each rule directory loads only its own runtime's rule format.
+            ".claude/rules/cursor-format.mdc",
+            ".cursor/rules/claude-format.md",
         ] {
             let path = repository.path().join(churn);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -672,6 +749,103 @@ mod tests {
             app.watcher.signature,
             current_watch_signature(&app.watch_input())
         );
+    }
+
+    #[test]
+    fn watcher_tracks_instruction_names_from_configuration_and_filesystem_case() {
+        let (home, repository, _paths, app) = fixture();
+        let codex = home.path().join(".codex");
+        fs::create_dir_all(&codex).unwrap();
+        fs::write(
+            codex.join("config.toml"),
+            "project_doc_fallback_filenames = [\"PROJECT_GUIDE.md\"]\n",
+        )
+        .unwrap();
+        let nested = repository.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        for created in [
+            repository.path().join("PROJECT_GUIDE.md"),
+            nested.join("PROJECT_GUIDE.md"),
+        ] {
+            let before = current_watch_signature(&app.watch_input());
+            fs::write(&created, "created\n").unwrap();
+            assert_ne!(
+                current_watch_signature(&app.watch_input()),
+                before,
+                "{created:?}"
+            );
+        }
+
+        // Claude's subfolder scan accepts another spelling only where the filesystem resolves
+        // it to CLAUDE.md.
+        let before = current_watch_signature(&app.watch_input());
+        fs::write(nested.join("ClAuDe.md"), "mixed case\n").unwrap();
+        let case_insensitive = nested.join("CLAUDE.md").exists();
+        assert_eq!(
+            current_watch_signature(&app.watch_input()) != before,
+            case_insensitive
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_follows_linked_claude_directories_like_the_rule_resolver() {
+        use std::os::unix::fs::symlink;
+
+        let (_home, repository, _paths, app) = fixture();
+        let external = TempDir::new().unwrap();
+        let first = external.path().join("first");
+        let second = external.path().join("second");
+        fs::create_dir_all(first.join("rules")).unwrap();
+        fs::create_dir_all(second.join("rules")).unwrap();
+        fs::write(second.join("rules/retargeted.md"), "rule\n").unwrap();
+        let link = repository.path().join(".claude");
+        symlink(&first, &link).unwrap();
+
+        let before = current_watch_signature(&app.watch_input());
+        fs::write(first.join("rules/added.md"), "rule\n").unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
+
+        // The resolver skips no directory inside a rule tree.
+        let before = current_watch_signature(&app.watch_input());
+        fs::create_dir_all(first.join("rules/node_modules")).unwrap();
+        fs::write(first.join("rules/node_modules/new-rule.md"), "rule\n").unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
+
+        let before = current_watch_signature(&app.watch_input());
+        let staged = repository.path().join(".claude-next");
+        symlink(&second, &staged).unwrap();
+        fs::rename(&staged, &link).unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
+    }
+
+    #[test]
+    fn refresh_accepts_the_state_hashed_before_discovery() {
+        let (_home, repository, paths, app) = fixture();
+        let baseline = Baseline::observe(&app.watch_input());
+        // An edit that lands while discovery runs must still differ at the next check.
+        fs::write(
+            repository.path().join("AGENTS.md"),
+            "# Edited mid-refresh\n",
+        )
+        .unwrap();
+        let observations = Observations::discover(
+            &paths,
+            &app.inspection.context.directory,
+            app.context.audit.runtime,
+            None,
+            None,
+            &[],
+            &baseline,
+        );
+        assert_eq!(observations.signature, baseline.signature());
+        let refreshed = WatchInput::new(
+            &observations.inspection.context,
+            &paths,
+            None,
+            &observations.watch_root,
+        );
+        assert_ne!(current_watch_signature(&refreshed), observations.signature);
     }
 
     #[test]
