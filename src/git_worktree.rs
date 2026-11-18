@@ -21,13 +21,16 @@ pub(crate) struct Topology {
 
 impl Topology {
     /// Keeps remembered answers only while the `.git` entries at and above `directory` are
-    /// unchanged; adding, removing or repointing one asks Git again.
-    pub(crate) fn revalidate(&mut self, directory: &Path) {
+    /// unchanged; adding, removing or repointing one asks Git again. Returns whether the
+    /// remembered answers were kept.
+    pub(crate) fn revalidate(&mut self, directory: &Path) -> bool {
         let marker = topology_marker(directory);
-        if self.marker != Some(marker) {
+        let kept = self.marker == Some(marker);
+        if !kept {
             self.answers.clear();
             self.marker = Some(marker);
         }
+        kept
     }
 
     pub(crate) fn forget(&mut self) {
@@ -181,13 +184,14 @@ mod tests {
     fn topology_asks_git_again_after_a_repository_appears() {
         let directory = tempfile::TempDir::new().unwrap();
         let mut topology = Topology::default();
-        topology.revalidate(directory.path());
+        assert!(!topology.revalidate(directory.path()));
         assert!(topology.scope(|| worktree_root(directory.path())).is_err());
+        assert!(topology.revalidate(directory.path()));
 
         git(directory.path(), &["init", "-q"]).unwrap();
         // Without revalidation the remembered answer stands.
         assert!(topology.scope(|| worktree_root(directory.path())).is_err());
-        topology.revalidate(directory.path());
+        assert!(!topology.revalidate(directory.path()));
         assert_eq!(
             topology.scope(|| worktree_root(directory.path())).unwrap(),
             fs::canonicalize(directory.path()).unwrap()

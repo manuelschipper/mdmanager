@@ -323,9 +323,16 @@ fn find_manifest(start: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// The Section files the discovered manifest declares, readable even when the Project fails to
-/// load, such as while a Section is missing. A manifest that does not parse declares none.
-pub(crate) fn declared_section_paths(start: &Path) -> Vec<PathBuf> {
+/// A Section entry the discovered manifest declares.
+pub(crate) struct DeclaredSection {
+    pub(crate) path: PathBuf,
+    /// The entry resolves outside `.mdmanager/`, where the Project loader refuses to read it.
+    pub(crate) outside: bool,
+}
+
+/// The Section entries the discovered manifest declares, readable even when the Project fails
+/// to load, such as while a Section is missing. A manifest that does not parse declares none.
+pub(crate) fn declared_sections(start: &Path) -> Vec<DeclaredSection> {
     let Ok(Some(manifest_path)) = find_manifest(start) else {
         return Vec::new();
     };
@@ -336,10 +343,21 @@ pub(crate) fn declared_section_paths(start: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mdmanager = manifest_path.parent().unwrap_or(&manifest_path);
+    let boundary = mdmanager
+        .parent()
+        .and_then(|root| section_boundary(root).ok());
     manifest
         .sections
         .iter()
-        .map(|section| mdmanager.join(&section.path))
+        .map(|section| {
+            let path = mdmanager.join(&section.path);
+            let outside = fs::canonicalize(&path).is_ok_and(|resolved| {
+                boundary
+                    .as_ref()
+                    .is_none_or(|boundary| !resolved.starts_with(boundary))
+            });
+            DeclaredSection { path, outside }
+        })
         .collect()
 }
 
@@ -531,11 +549,15 @@ fn reject_target_symlink(path: &Path) -> Result<(), String> {
     }
 }
 
-fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, String>, String> {
-    // A clone must render the same bytes, so Sections resolve inside the committed .mdmanager/.
-    let boundary = fs::canonicalize(root)
+// A clone must render the same bytes, so Sections resolve inside the committed .mdmanager/.
+fn section_boundary(root: &Path) -> Result<PathBuf, String> {
+    Ok(fs::canonicalize(root)
         .map_err(|error| format!("cannot resolve project root {}: {error}", root.display()))?
-        .join(".mdmanager");
+        .join(".mdmanager"))
+}
+
+fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, String>, String> {
+    let boundary = section_boundary(root)?;
     let mut contents = IndexMap::new();
     for section in &manifest.sections {
         let path = root.join(".mdmanager").join(&section.path);

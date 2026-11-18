@@ -234,9 +234,9 @@ fn hash_candidates(paths: &Paths, directory: &Path) -> u64 {
     if !paths.config.starts_with(&paths.data_dir) {
         hash_file(&paths.config, &mut hasher);
     }
-    if !paths.state_dir.starts_with(&paths.data_dir) {
-        hash_all(&paths.state_dir, &mut hasher);
-    }
+    // The state directory is walked itself even inside the data directory: the data walk does
+    // not enter a linked state directory, so retargeting one would go unnoticed.
+    hash_all(&paths.state_dir, &mut hasher);
 
     let claude_config = claude_config_dir(paths);
     let codex_home = codex_home(paths);
@@ -312,6 +312,17 @@ fn hash_candidates(paths: &Paths, directory: &Path) -> u64 {
             break;
         }
     }
+    // Each declared Section entry counts by where it resolves, not by its contents: contents
+    // inside the Project are known files, and contents outside it are never read.
+    for section in crate::project::declared_sections(directory) {
+        section.path.hash(&mut hasher);
+        fs::symlink_metadata(&section.path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .ok()
+            .hash(&mut hasher);
+        fs::read_link(&section.path).ok().hash(&mut hasher);
+        fs::canonicalize(&section.path).ok().hash(&mut hasher);
+    }
     // Subfolder discovery reloads only inside Git worktrees.
     if worktree.is_some() {
         hash_descendants(directory, paths, &mut hasher);
@@ -356,16 +367,19 @@ impl Observations {
             Err(error) => (None, Some(error)),
         };
         // A Project that fails to load still declares its Sections; observing them keeps a
-        // missing or broken Section watched until it is restored.
+        // missing or broken Section watched until it is restored. Like the Project loader, this
+        // never reads a Section that resolves outside `.mdmanager/`.
         let document_paths = document_paths
             .iter()
             .cloned()
             .chain(
                 project_error
                     .is_some()
-                    .then(|| crate::project::declared_section_paths(directory))
+                    .then(|| crate::project::declared_sections(directory))
                     .into_iter()
-                    .flatten(),
+                    .flatten()
+                    .filter(|section| !section.outside)
+                    .map(|section| section.path),
             )
             .collect::<Vec<_>>();
         let worktree_root = crate::git_worktree::worktree_root(directory).ok();
@@ -484,13 +498,15 @@ fn check(
     signature: Option<WatchSignature>,
     mut topology: Topology,
 ) -> Finished {
-    topology.revalidate(&request.watch.directory);
+    let kept = topology.revalidate(&request.watch.directory);
     let baseline = topology.scope(|| WatchSignature::observe(&request.watch));
     let changed = signature.is_none_or(|signature| baseline != signature);
     let observations = changed.then(|| {
         // A refresh asks Git once for its generation instead of trusting answers kept between
-        // quiet checks.
-        topology.forget();
+        // quiet checks; answers this check already asked for again are this generation's.
+        if kept {
+            topology.forget();
+        }
         topology.scope(|| {
             let paths = &request.watch.paths;
             let (global, global_error) = if paths.config.exists() {
@@ -925,6 +941,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn watcher_keeps_a_missing_project_section_watched() {
         let (_home, repository, _paths, mut app) = fixture();
@@ -948,6 +965,54 @@ mod tests {
         );
         app.reload_from_disk();
         assert!(app.project_error.is_none());
+
+        // A Section linked outside `.mdmanager/` fails to load; its target's contents are never
+        // read or watched, but replacing the link still recovers.
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("common.md");
+        fs::write(&target, "# Outside\n").unwrap();
+        fs::remove_file(&section).unwrap();
+        std::os::unix::fs::symlink(&target, &section).unwrap();
+        assert_ne!(
+            current_watch_signature(&app.watch_input()),
+            app.watcher.signature
+        );
+        app.reload_from_disk();
+        assert!(app.project_error.is_some());
+        assert!(!app.inspection.files.contains_key(&section));
+        fs::write(&target, "# Outside, edited\n").unwrap();
+        assert_eq!(
+            current_watch_signature(&app.watch_input()),
+            app.watcher.signature
+        );
+        fs::remove_file(&section).unwrap();
+        fs::write(&section, "# Common\n").unwrap();
+        assert_ne!(
+            current_watch_signature(&app.watch_input()),
+            app.watcher.signature
+        );
+        app.reload_from_disk();
+        assert!(app.project_error.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watcher_follows_a_linked_state_directory() {
+        use std::os::unix::fs::symlink;
+
+        let (home, _repository, paths, app) = fixture();
+        let external = TempDir::new().unwrap();
+        for name in ["first", "second"] {
+            fs::create_dir(external.path().join(name)).unwrap();
+            fs::write(external.path().join(name).join("state.toml"), name).unwrap();
+        }
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        symlink(external.path().join("first"), &paths.state_dir).unwrap();
+        let before = current_watch_signature(&app.watch_input());
+        let staged = home.path().join("state-next");
+        symlink(external.path().join("second"), &staged).unwrap();
+        fs::rename(&staged, &paths.state_dir).unwrap();
+        assert_ne!(current_watch_signature(&app.watch_input()), before);
     }
 
     #[test]
