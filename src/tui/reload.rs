@@ -905,7 +905,7 @@ mod tests {
         assert_ne!(current_watch_signature(&app.watch_input()), before);
         app.reload_from_disk();
         assert_eq!(
-            app.inspection.document(&section).unwrap(),
+            &*app.inspection.document(&section).unwrap(),
             "# Edited Section\n"
         );
     }

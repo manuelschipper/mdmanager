@@ -49,7 +49,7 @@ pub(super) fn render_managed(
                 area,
                 "Managed target unavailable",
                 "",
-                &error,
+                &error.into(),
                 false,
             );
             return;
@@ -171,7 +171,7 @@ pub(super) fn render_managed(
             (" Generated document ".into(), workspace.rendered.clone())
         } else {
             workspace.sections.get((*section_index) - 1).map_or_else(
-                || (" Section ".into(), String::new()),
+                || (" Section ".into(), "".into()),
                 |section| (format!(" {} ", section.name), section.content.clone()),
             )
         };
@@ -231,10 +231,18 @@ pub(super) fn render_diff(
                 document,
                 diff_area,
                 " Unified difference ",
-                workspace.difference.as_deref().unwrap_or_default(),
+                &workspace.difference.unwrap_or_default(),
             );
         }
-        Err(error) => render_document(frame, document, area, "Difference", "", &error, false),
+        Err(error) => render_document(
+            frame,
+            document,
+            area,
+            "Difference",
+            "",
+            &error.into(),
+            false,
+        ),
     }
 }
 
@@ -271,7 +279,15 @@ pub(super) fn render_managed_document(
             );
         }
         Err(error) => {
-            render_document(frame, document, body, "Managed target", "", &error, false);
+            render_document(
+                frame,
+                document,
+                body,
+                "Managed target",
+                "",
+                &error.into(),
+                false,
+            );
         }
     }
 }

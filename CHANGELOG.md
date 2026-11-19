@@ -9,10 +9,10 @@
   about 27, quiet checks start none, and finished subfolder scans and document opens no longer
   rerun discovery.
 - **TUI scrolling keeps up with key bursts** — The TUI applies every queued key before drawing
-  once, and caches each document's parsed and wrapped lines so a draw lays out only the visible
-  rows. Held arrows and trackpad scrolling on long documents no longer trail behind after the
-  keys stop, search no longer rewraps the document for every match, and a quiet screen is no
-  longer redrawn every 100 ms.
+  once, and caches each document's parsed lines and wrapped rows so a draw renders only the
+  visible rows, even inside a very long line. Held arrows and trackpad scrolling on long
+  documents no longer trail behind after the keys stop, search no longer rewraps the document
+  for every match, and a quiet screen is no longer redrawn every 100 ms.
 
 ## mdmanager 0.5.0 — Nov 12, 2026
 

@@ -427,14 +427,8 @@ pub(super) fn render_source(
     document: &mut DocumentState,
     area: Rect,
 ) {
-    if let Some(source) = input
-        .inspection
-        .context
-        .sources
-        .get(input.source_index)
-        .cloned()
-    {
-        render_source_panel(frame, input, document, area, &source, true);
+    if let Some(source) = input.inspection.context.sources.get(input.source_index) {
+        render_source_panel(frame, input, document, area, source, true);
     } else {
         render_document(
             frame,
@@ -442,7 +436,7 @@ pub(super) fn render_source(
             area,
             "Source",
             "",
-            "No source selected.",
+            &"No source selected.".into(),
             false,
         );
     }

@@ -43,6 +43,7 @@ use super::context_ui;
 use super::{ACTIVE_THEME, activate_theme, active_theme, reset_theme};
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -380,8 +381,6 @@ impl App {
         self.section_index = section_index;
         self.document.scroll = 0;
         self.document.max_scroll = 0;
-        // A highlight left on a page without a document would keep the session redrawing.
-        self.document.highlighted_line = None;
         SessionAction::Continue
     }
 
@@ -653,10 +652,11 @@ impl App {
         accepted
     }
 
-    /// The intro, the scan spinner and a line highlight change the screen as time passes.
+    /// The intro, a visible scan spinner and a line highlight change the screen as time passes.
     fn animating(&self) -> bool {
         self.intro_started.is_some()
-            || self.context.scan_spinner().is_some()
+            || (matches!(self.view, View::Home | View::Context)
+                && self.context.scan_spinner().is_some())
             || self.document.highlighted_line.is_some()
     }
 
@@ -765,7 +765,7 @@ impl App {
         )
     }
 
-    fn searchable_text(&self) -> Option<String> {
+    fn searchable_text(&self) -> Option<Arc<str>> {
         match &self.view {
             View::File { path, .. } | View::SectionDocument { path, .. } => {
                 self.inspection.document(path).ok()
@@ -783,7 +783,7 @@ impl App {
         }
     }
 
-    fn numbered_text(&self) -> Option<String> {
+    fn numbered_text(&self) -> Option<Arc<str>> {
         match &self.view {
             View::File { path, .. } | View::SectionDocument { path, .. } => {
                 self.inspection.document(path).ok()
@@ -861,6 +861,7 @@ fn session(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::R
         redraw |= app.poll_context_scan();
         redraw |= app.poll_reload();
         redraw |= app.poll_message();
+        redraw |= app.document.expire_highlight();
         if redraw || app.animating() {
             terminal.draw(|frame| render(frame, app))?;
             redraw = false;
@@ -1628,7 +1629,10 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
                 &about,
                 &path,
             );
-            let content = app.inspection.document(&path).unwrap_or_else(|error| error);
+            let content = app
+                .inspection
+                .document(&path)
+                .unwrap_or_else(|error| error.into());
             render_document(
                 frame,
                 &mut app.document,
@@ -1640,7 +1644,10 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
             );
         }
         View::SectionDocument { title, path, about } => {
-            let content = app.inspection.document(&path).unwrap_or_else(|error| error);
+            let content = app
+                .inspection
+                .document(&path)
+                .unwrap_or_else(|error| error.into());
             render_document(
                 frame,
                 &mut app.document,

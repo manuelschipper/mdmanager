@@ -652,7 +652,7 @@ pub(super) fn global_symlink_home_status(
         .and_then(|(global, profile)| global.render(profile, id).ok())
         .zip(input.inspection.document(path).ok())
         .map_or("no active Profile", |(expected, deployed)| {
-            if expected == deployed {
+            if *expected == *deployed {
                 "matches Profile"
             } else {
                 "differs from Profile"
@@ -743,7 +743,7 @@ mod tests {
             .unwrap();
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(&app.view, View::File { path: selected, .. } if selected == &path));
-        assert_eq!(app.searchable_text().unwrap(), "# Global\n");
+        assert_eq!(&*app.searchable_text().unwrap(), "# Global\n");
     }
 
     #[test]

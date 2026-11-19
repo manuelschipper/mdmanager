@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use walkdir::{DirEntry, WalkDir};
@@ -164,7 +165,7 @@ pub(crate) struct ContextSource {
     pub(crate) scope: String,
     pub(crate) group: SourceGroup,
     pub(crate) state: SourceState,
-    pub(crate) content: String,
+    pub(crate) content: Arc<str>,
     pub(crate) imports: Vec<PathBuf>,
     pub(crate) managed: Option<ManagedSource>,
 }
@@ -1389,7 +1390,7 @@ fn push_cursor_agent_source(
         scope,
         group: source_group(&state),
         state,
-        content,
+        content: content.into(),
         imports: Vec::new(),
         managed: None,
     });
@@ -2108,7 +2109,7 @@ fn push_source(
         scope: scope.into(),
         group,
         state,
-        content,
+        content: content.into(),
         imports: Vec::new(),
         managed: None,
     });

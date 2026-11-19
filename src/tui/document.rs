@@ -1,12 +1,16 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::Clear;
+use std::collections::VecDeque;
+use std::mem;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
+use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -35,34 +39,50 @@ pub(super) struct DocumentState {
     layout: Option<DocumentLayout>,
 }
 
-/// Parsed lines and wrapped-row starts of the last laid-out document. Draws,
-/// searches and line jumps reuse them, so their cost does not grow with every
-/// frame; a change of content, render mode, theme or content width rebuilds them.
+/// Parsed lines and wrapped rows of the last laid-out document. Draws, searches
+/// and line jumps reuse them, so a draw costs only its visible rows; a change of
+/// content, render mode, theme or content width rebuilds them.
 struct DocumentLayout {
-    content: String,
+    // Holding the accepted text keeps its allocation alive, so a caller passing
+    // the same allocation is a cache hit without comparing the text.
+    content: Arc<str>,
     mode: RenderMode,
     theme: Theme,
     lines: Vec<Line<'static>>,
     // Zero until wrapped; real widths are at least 1.
     width: u16,
+    rows: Vec<Line<'static>>,
     // `row_starts[i]` is the first wrapped row of line `i`; the last entry is the row total.
     row_starts: Vec<usize>,
 }
 
 impl DocumentLayout {
-    fn cached<'a>(slot: &'a mut Option<Self>, content: &str, mode: RenderMode) -> &'a mut Self {
+    fn cached<'a>(
+        slot: &'a mut Option<Self>,
+        content: &Arc<str>,
+        mode: RenderMode,
+    ) -> &'a mut Self {
         let theme = active_theme();
-        if !slot.as_ref().is_some_and(|layout| {
-            layout.mode == mode && layout.theme == theme && layout.content == content
-        }) {
-            *slot = Some(Self {
-                content: content.to_owned(),
-                mode,
-                theme,
-                lines: mode.lines(content),
-                width: 0,
-                row_starts: Vec::new(),
-            });
+        match slot {
+            Some(layout)
+                if layout.mode == mode
+                    && layout.theme == theme
+                    && (Arc::ptr_eq(&layout.content, content) || layout.content == *content) =>
+            {
+                // Equal text in a new allocation, such as after a refresh, becomes the identity.
+                layout.content = Arc::clone(content);
+            }
+            _ => {
+                *slot = Some(Self {
+                    content: Arc::clone(content),
+                    mode,
+                    theme,
+                    lines: mode.lines(content),
+                    width: 0,
+                    rows: Vec::new(),
+                    row_starts: Vec::new(),
+                });
+            }
         }
         slot.as_mut().unwrap()
     }
@@ -72,20 +92,98 @@ impl DocumentLayout {
             return;
         }
         self.width = width;
-        self.row_starts = std::iter::once(0)
-            .chain(self.lines.iter().scan(0, |rows, line| {
-                *rows += Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width)
-                    .max(1);
-                Some(*rows)
-            }))
-            .collect();
+        self.rows.clear();
+        self.row_starts = vec![0];
+        for line in &self.lines {
+            self.rows.extend(wrap_line(line, width));
+            self.row_starts.push(self.rows.len());
+        }
     }
+}
 
-    fn rows(&self) -> usize {
-        *self.row_starts.last().unwrap()
+/// Splits one line into the rows `Paragraph` with `Wrap { trim: false }` shows for
+/// it. This restates `WordWrapper::process_input` from ratatui-widgets 0.3, which
+/// ratatui keeps private, so rows can be cached and drawn without rewrapping their
+/// line; `wrapped_rows_match_paragraph_wrapping` holds the two together.
+fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    // Items are (span index, grapheme), so rows keep their spans' styles.
+    let mut row = Vec::new();
+    let mut row_width = 0;
+    let mut word = Vec::new();
+    let mut word_width = 0;
+    let mut whitespace = VecDeque::new();
+    let mut whitespace_width = 0;
+    let mut after_word = false;
+    for (index, span) in line.spans.iter().enumerate() {
+        for grapheme in span.styled_graphemes(Style::default()) {
+            let is_whitespace = grapheme.is_whitespace();
+            let symbol_width = grapheme.symbol.cell_width();
+            if symbol_width > width {
+                continue;
+            }
+            if (after_word && is_whitespace)
+                || (row.is_empty() && word_width + whitespace_width + symbol_width > width)
+            {
+                row.extend(whitespace.drain(..).map(|(item, _)| item));
+                row_width += whitespace_width;
+                row.append(&mut word);
+                row_width += word_width;
+                whitespace_width = 0;
+                word_width = 0;
+            }
+            if row_width >= width
+                || (symbol_width > 0 && row_width + whitespace_width + word_width >= width)
+            {
+                let mut remaining = width.saturating_sub(row_width);
+                rows.push(mem::take(&mut row));
+                row_width = 0;
+                while let Some(&(_, item_width)) = whitespace.front() {
+                    if item_width > remaining {
+                        break;
+                    }
+                    whitespace_width -= item_width;
+                    remaining -= item_width;
+                    whitespace.pop_front();
+                }
+                if is_whitespace && whitespace.is_empty() {
+                    continue;
+                }
+            }
+            if is_whitespace {
+                whitespace_width += symbol_width;
+                whitespace.push_back(((index, grapheme.symbol), symbol_width));
+            } else {
+                word_width += symbol_width;
+                word.push((index, grapheme.symbol));
+            }
+            after_word = !is_whitespace;
+        }
     }
+    row.extend(whitespace.into_iter().map(|(item, _)| item));
+    row.append(&mut word);
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows.into_iter()
+        .map(|items| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut current = None;
+            for (index, symbol) in items {
+                if current == Some(index) {
+                    spans.last_mut().unwrap().content.to_mut().push_str(symbol);
+                } else {
+                    spans.push(Span::styled(symbol.to_owned(), line.spans[index].style));
+                    current = Some(index);
+                }
+            }
+            Line {
+                spans,
+                style: line.style,
+                alignment: line.alignment,
+            }
+        })
+        .collect()
 }
 
 pub(super) struct LinePrompt {
@@ -103,7 +201,7 @@ pub(super) fn render_document(
     area: Rect,
     title: &str,
     about: &str,
-    content: &str,
+    content: &Arc<str>,
     numbered: bool,
 ) {
     if about.is_empty() {
@@ -182,7 +280,7 @@ pub(super) fn render_plain_document(
     document: &mut DocumentState,
     area: Rect,
     title: &str,
-    content: &str,
+    content: &Arc<str>,
     readable: bool,
     numbered: bool,
 ) {
@@ -197,7 +295,7 @@ pub(super) fn render_raw_document(
     document: &mut DocumentState,
     area: Rect,
     title: &str,
-    content: &str,
+    content: &Arc<str>,
 ) {
     render_lines(
         frame,
@@ -217,7 +315,7 @@ fn render_lines(
     document: &mut DocumentState,
     area: Rect,
     title: &str,
-    content: &str,
+    content: &Arc<str>,
     mode: RenderMode,
     readable: bool,
     numbered: bool,
@@ -239,6 +337,7 @@ fn render_lines(
         inner.x + inner.width.saturating_sub(width) / 2
     };
     let readable_area = Rect::new(x, inner.y, width, inner.height);
+    let highlighted = document.highlighted_line();
     let layout = DocumentLayout::cached(&mut document.layout, content, mode);
     let number_width = layout.lines.len().max(1).to_string().len().max(3);
     let gutter_width = if numbered {
@@ -252,71 +351,75 @@ fn render_lines(
     let [gutter_area, content_area] =
         Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)])
             .areas(readable_area);
-    let highlighted = document
-        .highlighted_line
-        .and_then(|(line, started)| (started.elapsed() < LINE_HIGHLIGHT_DURATION).then_some(line));
-    if document.highlighted_line.is_some() && highlighted.is_none() {
-        document.highlighted_line = None;
-    }
     layout.wrap(content_area.width.max(1));
     document.document_width = content_area.width.max(1);
     document.document_height = content_area.height;
-    document.max_scroll = scroll_max(layout.rows(), content_area.height);
+    document.max_scroll = scroll_max(layout.rows.len(), content_area.height);
     document.scroll = document.scroll.min(document.max_scroll);
-    // Lay out only the source lines that reach the viewport; `skip` hides the
-    // wrapped rows of the first one that lie above it.
-    let scroll = usize::from(document.scroll);
-    let first = layout
+    let first_row = usize::from(document.scroll);
+    let end_row = (first_row + usize::from(content_area.height)).min(layout.rows.len());
+    let mut line = layout
         .row_starts
-        .partition_point(|start| *start <= scroll)
+        .partition_point(|start| *start <= first_row)
         .saturating_sub(1);
-    let end = layout
-        .row_starts
-        .partition_point(|start| *start < scroll + usize::from(content_area.height))
-        .clamp(first, layout.lines.len());
-    let skip = u16::try_from(scroll - layout.row_starts[first]).unwrap_or(u16::MAX);
-    let text = Text::from(
-        (first..end)
-            .map(|index| {
-                let mut line = layout.lines[index].clone();
-                if highlighted == Some(index + 1) {
-                    let highlight = Style::new()
-                        .fg(active_theme().background)
-                        .bg(active_theme().warning);
-                    for span in &mut line.spans {
-                        span.style = span.style.patch(highlight);
-                    }
-                    line.style(highlight)
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>(),
-    );
+    let mut text = Vec::new();
+    let mut gutter = Vec::new();
+    for row in first_row..end_row {
+        while layout.row_starts[line + 1] <= row {
+            line += 1;
+        }
+        let mut wrapped = layout.rows[row].clone();
+        if highlighted == Some(line + 1) {
+            let highlight = Style::new()
+                .fg(active_theme().background)
+                .bg(active_theme().warning);
+            for span in &mut wrapped.spans {
+                span.style = span.style.patch(highlight);
+            }
+            wrapped = wrapped.style(highlight);
+        }
+        text.push(wrapped);
+        if numbered {
+            let label = if row == layout.row_starts[line] {
+                format!("{:>number_width$} │ ", line + 1)
+            } else {
+                format!("{:number_width$} │ ", "")
+            };
+            gutter.push(Line::styled(label, Style::new().fg(active_theme().muted)));
+        }
+    }
     frame.render_widget(block, area);
     if numbered {
-        let mut gutter = Vec::new();
-        for index in first..end {
-            gutter.push(Line::styled(
-                format!("{:>number_width$} │ ", index + 1),
-                Style::new().fg(active_theme().muted),
-            ));
-            let wrapped = layout.row_starts[index + 1] - layout.row_starts[index];
-            gutter.extend((1..wrapped).map(|_| {
-                Line::styled(
-                    format!("{:number_width$} │ ", ""),
-                    Style::new().fg(active_theme().muted),
-                )
-            }));
-        }
-        frame.render_widget(Paragraph::new(gutter).scroll((skip, 0)), gutter_area);
+        frame.render_widget(Paragraph::new(gutter), gutter_area);
     }
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((skip, 0)),
-        content_area,
-    );
+    render_rows(&text, content_area, frame.buffer_mut());
+}
+
+/// Draws rows from `wrap_line` the way `Paragraph` draws its wrapped rows. An
+/// unwrapped `Paragraph` would truncate a row whose last wide grapheme overhangs
+/// the width, which wrapping lets through.
+fn render_rows(rows: &[Line<'_>], area: Rect, buf: &mut Buffer) {
+    for (y, row) in (area.y..area.bottom()).zip(rows) {
+        let row_width = row
+            .styled_graphemes(Style::default())
+            .map(|grapheme| grapheme.symbol.cell_width())
+            .sum::<u16>();
+        let mut x = match row.alignment.unwrap_or(Alignment::Left) {
+            Alignment::Left => 0,
+            Alignment::Center => (area.width / 2).saturating_sub(row_width / 2),
+            Alignment::Right => area.width.saturating_sub(row_width),
+        };
+        for grapheme in row.styled_graphemes(Style::default()) {
+            let width = grapheme.symbol.cell_width();
+            if width == 0 {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((area.x + x, y)) {
+                cell.set_symbol(grapheme.symbol).set_style(grapheme.style);
+            }
+            x += width;
+        }
+    }
 }
 
 pub(super) fn render_info(
@@ -465,7 +568,24 @@ pub(super) fn info_panel_geometry(screen: Rect, text: &str) -> (Rect, u16) {
 }
 
 impl DocumentState {
-    pub(super) fn go_to_line(&mut self, text: &str, input: String) -> (bool, String) {
+    /// The highlighted line number while its highlight lasts.
+    fn highlighted_line(&self) -> Option<usize> {
+        self.highlighted_line.and_then(|(line, started)| {
+            (started.elapsed() < LINE_HIGHLIGHT_DURATION).then_some(line)
+        })
+    }
+
+    /// Drops an expired highlight and reports whether one was dropped, so the
+    /// session redraws once to remove it wherever the document is hidden.
+    pub(super) fn expire_highlight(&mut self) -> bool {
+        let expired = self.highlighted_line.is_some() && self.highlighted_line().is_none();
+        if expired {
+            self.highlighted_line = None;
+        }
+        expired
+    }
+
+    pub(super) fn go_to_line(&mut self, text: &Arc<str>, input: String) -> (bool, String) {
         let layout = DocumentLayout::cached(&mut self.layout, text, self.render_mode);
         let count = layout.lines.len();
         if count == 0 {
@@ -489,7 +609,7 @@ impl DocumentState {
 
     pub(super) fn apply_search(
         &mut self,
-        text: &str,
+        text: &Arc<str>,
         query: String,
         raw: bool,
     ) -> Option<(bool, String)> {
@@ -753,6 +873,56 @@ mod tests {
             .find(|line| line.contains("line 80"))
             .unwrap();
         assert_eq!(row.split('│').nth(1).unwrap().trim(), "80");
+
+        // An overlay hides the document, yet the highlight still expires on its
+        // own so the quiet session stops redrawing.
+        app.open_theme_picker();
+        app.document.highlighted_line = Some((80, Instant::now() - Duration::from_secs(2)));
+        draw_at(&mut app, 80, 24);
+        assert!(app.document.expire_highlight());
+        assert!(!app.animating());
+        assert!(!app.document.expire_highlight());
+    }
+
+    #[test]
+    fn wrapped_rows_match_paragraph_wrapping() {
+        use ratatui::buffer::Buffer;
+        use ratatui::text::Span;
+        use ratatui::widgets::Widget;
+
+        let bold = Style::new().add_modifier(Modifier::BOLD);
+        let lines = [
+            Line::default(),
+            Line::raw("   "),
+            Line::raw("  leading and trailing  "),
+            Line::raw("a  b   c    d supercalifragilisticexpialidocious end"),
+            Line::raw("漢字かな交じり文 wide ｶﾞｷﾞ and e\u{301}combining 👍🏽 emoji"),
+            Line::raw("no\u{a0}break\u{a0}space and zero\u{200b}width\u{200b}space"),
+            Line::from(vec![
+                Span::styled("hel", bold),
+                Span::raw("lo wor"),
+                Span::styled("ld  again ", Style::new().fg(Color::Red)),
+                Span::raw("and again"),
+            ])
+            .style(Style::new().fg(Color::Blue)),
+        ];
+        for line in &lines {
+            for width in 1..=16 {
+                let expected_rows = Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width);
+                let rows = super::wrap_line(line, width);
+                assert_eq!(rows.len(), expected_rows, "{line} at {width}");
+                let area = Rect::new(0, 0, width, u16::try_from(rows.len()).unwrap());
+                let mut expected = Buffer::empty(area);
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .render(area, &mut expected);
+                let mut actual = Buffer::empty(area);
+                super::render_rows(&rows, area, &mut actual);
+                assert_eq!(actual, expected, "{line} at {width}");
+            }
+        }
     }
 
     #[test]

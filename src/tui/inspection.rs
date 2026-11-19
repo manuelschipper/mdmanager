@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::{GlobalConfig, target_display_name};
 use crate::context::{Audit, ContextRuntime, ContextSource, SourceGroup, SourceState};
@@ -51,7 +52,7 @@ impl InstructionStatus {
 
 /// Content and link identity observed together; paths are never reread while rendering.
 pub(super) struct FileObservation {
-    content: Result<String, String>,
+    content: Result<Arc<str>, String>,
     pub(super) symlink: Option<SymlinkInfo>,
     pub(super) canonical: Option<PathBuf>,
     pub(super) regular: bool,
@@ -192,6 +193,7 @@ impl InstructionInspection {
             path.to_owned(),
             FileObservation {
                 content: fs::read_to_string(path)
+                    .map(Arc::from)
                     .map_err(|error| format!("Cannot read {}: {error}", path.display())),
                 symlink: observe_symlink(path),
                 canonical: fs::canonicalize(path).ok(),
@@ -201,7 +203,7 @@ impl InstructionInspection {
         );
     }
 
-    pub(super) fn document(&self, path: &Path) -> Result<String, String> {
+    pub(super) fn document(&self, path: &Path) -> Result<Arc<str>, String> {
         self.files
             .get(path)
             .map(|file| file.content.clone())
@@ -324,7 +326,7 @@ fn observe_managed_workspace(
                         content: project
                             .section_content(section_id)
                             .unwrap_or_default()
-                            .to_owned(),
+                            .into(),
                         path,
                     })
                 })
@@ -336,8 +338,8 @@ fn observe_managed_workspace(
                 ),
                 status: inspected.status.label().into(),
                 target: inspected.path,
-                rendered: inspected.expected,
-                difference: inspected.difference,
+                rendered: inspected.expected.into(),
+                difference: inspected.difference.map(Arc::from),
                 instruction_status: InstructionStatus::Project(inspected.status),
                 sections,
             })
@@ -363,7 +365,8 @@ fn observe_managed_workspace(
                         id: section_id.clone(),
                         name: section.name.clone(),
                         content: fs::read_to_string(&path)
-                            .unwrap_or_else(|error| format!("Cannot read Section: {error}")),
+                            .unwrap_or_else(|error| format!("Cannot read Section: {error}"))
+                            .into(),
                         path,
                     })
                 })
@@ -372,8 +375,8 @@ fn observe_managed_workspace(
                 title: format!("Local Instructions · {}", target.filename()),
                 status: inspected.status.label().into(),
                 target: inspected.path,
-                rendered: inspected.rendered,
-                difference: inspected.difference,
+                rendered: inspected.rendered.into(),
+                difference: inspected.difference.map(Arc::from),
                 instruction_status: InstructionStatus::Local(inspected.status),
                 sections,
             })
@@ -402,7 +405,7 @@ fn observe_managed_workspace(
                         content: global
                             .section_content(section_id)
                             .unwrap_or_default()
-                            .to_owned(),
+                            .into(),
                         path,
                     })
                 })
@@ -415,8 +418,8 @@ fn observe_managed_workspace(
                 ),
                 status,
                 target: inspected.path,
-                rendered: inspected.expected,
-                difference: inspected.difference,
+                rendered: inspected.expected.into(),
+                difference: inspected.difference.map(Arc::from),
                 instruction_status: InstructionStatus::Global(inspected.status),
                 sections,
             })
@@ -448,8 +451,8 @@ pub(super) struct ManagedWorkspace {
     pub(super) title: String,
     pub(super) status: String,
     pub(super) target: PathBuf,
-    pub(super) rendered: String,
-    pub(super) difference: Option<String>,
+    pub(super) rendered: Arc<str>,
+    pub(super) difference: Option<Arc<str>>,
     pub(super) instruction_status: InstructionStatus,
     pub(super) sections: Vec<ManagedSection>,
 }
@@ -459,7 +462,7 @@ pub(super) struct ManagedSection {
     pub(super) id: String,
     pub(super) name: String,
     pub(super) path: PathBuf,
-    pub(super) content: String,
+    pub(super) content: Arc<str>,
 }
 
 #[derive(Clone, PartialEq)]
