@@ -604,12 +604,6 @@ impl DocumentState {
         })
     }
 
-    /// Whether the highlight's timer can change the screen: it is still running
-    /// and the last frame drew it.
-    pub(super) fn highlight_visible(&self) -> bool {
-        self.highlight_drawn && self.highlighted_line().is_some()
-    }
-
     /// Drops an expired highlight even while the document is hidden, and reports
     /// whether the screen still shows it, so the session redraws once to remove it.
     pub(super) fn expire_highlight(&mut self) -> bool {
@@ -620,8 +614,9 @@ impl DocumentState {
         expired && self.highlight_drawn
     }
 
-    /// Starts a frame; document renders mark whether they draw the highlight.
-    pub(super) fn begin_frame(&mut self) {
+    /// Records that the screen shows no highlighted row: at the start of each
+    /// frame, before document renders mark one, and when an overlay masks it.
+    pub(super) fn hide_highlight(&mut self) {
         self.highlight_drawn = false;
     }
 
@@ -914,16 +909,21 @@ mod tests {
             .unwrap();
         assert_eq!(row.split('│').nth(1).unwrap().trim(), "80");
 
-        assert!(app.animating());
-
-        // An overlay hides the document: its highlight timer requests no frames,
-        // and expiry still drops it without a redraw.
-        app.open_theme_picker();
-        draw_at(&mut app, 80, 24);
+        // A highlight changes the screen only when it expires: shown, its expiry
+        // redraws once; masked by Help or hidden by an overlay, expiry only drops it.
         assert!(!app.animating());
-        app.document.highlighted_line = Some((80, Instant::now() - Duration::from_secs(2)));
-        assert!(!app.document.expire_highlight());
-        assert!(app.document.highlighted_line.is_none());
+        let expired = Instant::now() - Duration::from_secs(2);
+        app.document.highlighted_line = Some((80, expired));
+        assert!(app.document.expire_highlight());
+        for hide in [|app: &mut App| app.help = true, App::open_theme_picker] {
+            app.document.highlighted_line = Some((80, Instant::now()));
+            hide(&mut app);
+            draw_at(&mut app, 80, 24);
+            app.document.highlighted_line = Some((80, expired));
+            assert!(!app.document.expire_highlight());
+            assert!(app.document.highlighted_line.is_none());
+            app.help = false;
+        }
     }
 
     #[test]

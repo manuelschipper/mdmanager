@@ -150,6 +150,9 @@ struct App {
     // Set once by `run` at process start; cleared by expiry or the first key.
     // Nothing else ever sets it, so the intro cannot replay.
     intro_started: Option<Instant>,
+    // Whether the last frame drew the intro or the scan spinner. Hidden, their
+    // timers change nothing, and their ends are accepted state changes that redraw.
+    timer_drawn: bool,
 }
 
 impl App {
@@ -310,6 +313,7 @@ impl App {
             message_expires_at: None,
             watcher: ReloadWatcher::new(signature, topology),
             intro_started: None,
+            timer_drawn: false,
         })
     }
 
@@ -652,12 +656,11 @@ impl App {
         accepted
     }
 
-    /// The intro, a visible scan spinner and a line highlight change the screen as time passes.
+    /// The intro and the scan spinner change the screen as time passes, but only
+    /// while the last frame showed them. A line highlight changes only when it
+    /// expires, which `expire_highlight` reports.
     fn animating(&self) -> bool {
-        self.intro_started.is_some()
-            || (matches!(self.view, View::Home | View::Context)
-                && self.context.scan_spinner().is_some())
-            || self.document.highlight_visible()
+        self.timer_drawn
     }
 
     fn move_context_selection(&mut self, down: bool) {
@@ -1448,7 +1451,8 @@ fn enter_home(app: &mut App) {
 }
 
 fn render(frame: &mut Frame<'_>, app: &mut App) {
-    app.document.begin_frame();
+    app.timer_drawn = false;
+    app.document.hide_highlight();
     frame.render_widget(
         Block::default().style(
             Style::new()
@@ -1485,10 +1489,18 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
         .and_then(|started| intro_phase(started.elapsed()))
     {
         render_intro(frame, phase);
+        app.timer_drawn = true;
         return;
     }
     render_page(frame, app);
+    // Home and Context show the spinner unless a picker replaced the page.
+    app.timer_drawn = app.theme_picker.is_none()
+        && app.picker.is_none()
+        && matches!(app.view, View::Home | View::Context)
+        && app.context.scan_spinner().is_some();
     if app.help {
+        // Dimming recolors the page, so a highlight's colors no longer show.
+        app.document.hide_highlight();
         let screen = frame.area();
         frame.buffer_mut().set_style(
             screen,
@@ -2367,6 +2379,10 @@ mod tests {
         let screen = draw(&mut app);
         assert!(screen.contains("███╗"));
         assert!(!screen.contains("PROJECT INSTRUCTIONS"));
+        assert!(app.animating());
+        // A too-small terminal hides the intro, so its timer requests no frames.
+        draw_at(&mut app, 50, 14);
+        assert!(!app.animating());
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert!(app.intro_started.is_none());

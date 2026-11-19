@@ -628,6 +628,12 @@ mod tests {
                 .contains(&ContextEntry::Nested)
         );
         assert!(draw(&mut app).contains("checking subfolders…"));
+        assert!(app.animating());
+        // The theme picker replaces the page, so the spinner's timer requests no frames.
+        app.open_theme_picker();
+        draw(&mut app);
+        assert!(!app.animating());
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         finish_context_scan(&mut app);
         // Scan sources join the accepted signature, so they do not look like a disk change.
         assert_eq!(
