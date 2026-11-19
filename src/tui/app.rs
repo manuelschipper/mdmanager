@@ -657,7 +657,7 @@ impl App {
         self.intro_started.is_some()
             || (matches!(self.view, View::Home | View::Context)
                 && self.context.scan_spinner().is_some())
-            || self.document.highlighted_line.is_some()
+            || self.document.highlight_visible()
     }
 
     fn move_context_selection(&mut self, down: bool) {
@@ -1448,6 +1448,7 @@ fn enter_home(app: &mut App) {
 }
 
 fn render(frame: &mut Frame<'_>, app: &mut App) {
+    app.document.begin_frame();
     frame.render_widget(
         Block::default().style(
             Style::new()

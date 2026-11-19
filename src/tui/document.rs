@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -37,6 +37,9 @@ pub(super) struct DocumentState {
     last_search: Option<(String, usize)>,
     pub(super) line_prompt: Option<LinePrompt>,
     layout: Option<DocumentLayout>,
+    // Whether the last frame drew a highlighted row. Covered or scrolled away,
+    // the highlight's timer changes nothing on screen.
+    highlight_drawn: bool,
 }
 
 /// Parsed lines and wrapped rows of the last laid-out document. Draws, searches
@@ -51,7 +54,7 @@ struct DocumentLayout {
     lines: Vec<Line<'static>>,
     // Zero until wrapped; real widths are at least 1.
     width: u16,
-    rows: Vec<Line<'static>>,
+    rows: Vec<Row>,
     // `row_starts[i]` is the first wrapped row of line `i`; the last entry is the row total.
     row_starts: Vec<usize>,
 }
@@ -101,13 +104,58 @@ impl DocumentLayout {
     }
 }
 
+/// One wrapped row as `Paragraph` draws it. Graphemes keep the boundaries and
+/// widths the line was segmented with; zero-width ones draw nothing and are left out.
+struct Row {
+    text: String,
+    // (end byte in `text`, cell width) of each grapheme.
+    graphemes: Vec<(u32, u16)>,
+    // (first grapheme, span style) of each run of one span's graphemes.
+    styles: Vec<(u32, Style)>,
+    line_style: Style,
+    alignment: Option<Alignment>,
+    width: u16,
+}
+
+impl Row {
+    /// Draws the row the way `Paragraph` draws a wrapped row. An unwrapped
+    /// `Paragraph` would truncate a last wide grapheme that overhangs the width,
+    /// which wrapping lets through.
+    fn render(&self, area: Rect, y: u16, highlight: Option<Style>, buf: &mut Buffer) {
+        let mut x = match self.alignment.unwrap_or(Alignment::Left) {
+            Alignment::Left => 0,
+            Alignment::Center => (area.width / 2).saturating_sub(self.width / 2),
+            Alignment::Right => area.width.saturating_sub(self.width),
+        };
+        let mut start = 0;
+        let mut runs = self.styles.iter().peekable();
+        let mut style = Style::default();
+        for (index, &(end, width)) in (0..).zip(&self.graphemes) {
+            if let Some(&(_, span_style)) = runs.next_if(|(first, _)| *first == index) {
+                // A highlight replaces the line style and patches every span, as
+                // the uncached renderer did.
+                style = match highlight {
+                    Some(highlight) => highlight.patch(span_style.patch(highlight)),
+                    None => self.line_style.patch(span_style),
+                };
+            }
+            if let Some(cell) = buf.cell_mut((area.x + x, y)) {
+                cell.set_symbol(&self.text[start..end as usize])
+                    .set_style(style);
+            }
+            start = end as usize;
+            x += width;
+        }
+    }
+}
+
 /// Splits one line into the rows `Paragraph` with `Wrap { trim: false }` shows for
 /// it. This restates `WordWrapper::process_input` from ratatui-widgets 0.3, which
 /// ratatui keeps private, so rows can be cached and drawn without rewrapping their
 /// line; `wrapped_rows_match_paragraph_wrapping` holds the two together.
-fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
+fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Row> {
     let mut rows = Vec::new();
-    // Items are (span index, grapheme), so rows keep their spans' styles.
+    // Items are (span index, grapheme, cell width), so rows keep their spans' styles.
     let mut row = Vec::new();
     let mut row_width = 0;
     let mut word = Vec::new();
@@ -125,7 +173,7 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
             if (after_word && is_whitespace)
                 || (row.is_empty() && word_width + whitespace_width + symbol_width > width)
             {
-                row.extend(whitespace.drain(..).map(|(item, _)| item));
+                row.extend(whitespace.drain(..));
                 row_width += whitespace_width;
                 row.append(&mut word);
                 row_width += word_width;
@@ -138,7 +186,7 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
                 let mut remaining = width.saturating_sub(row_width);
                 rows.push(mem::take(&mut row));
                 row_width = 0;
-                while let Some(&(_, item_width)) = whitespace.front() {
+                while let Some(&(_, _, item_width)) = whitespace.front() {
                     if item_width > remaining {
                         break;
                     }
@@ -150,38 +198,48 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
                     continue;
                 }
             }
+            let item = (index, grapheme.symbol, symbol_width);
             if is_whitespace {
                 whitespace_width += symbol_width;
-                whitespace.push_back(((index, grapheme.symbol), symbol_width));
+                whitespace.push_back(item);
             } else {
                 word_width += symbol_width;
-                word.push((index, grapheme.symbol));
+                word.push(item);
             }
             after_word = !is_whitespace;
         }
     }
-    row.extend(whitespace.into_iter().map(|(item, _)| item));
+    row.extend(whitespace);
     row.append(&mut word);
     if !row.is_empty() || rows.is_empty() {
         rows.push(row);
     }
     rows.into_iter()
         .map(|items| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut row = Row {
+                text: String::new(),
+                graphemes: Vec::new(),
+                styles: Vec::new(),
+                line_style: line.style,
+                alignment: line.alignment,
+                width: 0,
+            };
             let mut current = None;
-            for (index, symbol) in items {
-                if current == Some(index) {
-                    spans.last_mut().unwrap().content.to_mut().push_str(symbol);
-                } else {
-                    spans.push(Span::styled(symbol.to_owned(), line.spans[index].style));
+            for (index, symbol, width) in items {
+                if width == 0 {
+                    continue;
+                }
+                if current != Some(index) {
+                    let first = u32::try_from(row.graphemes.len()).unwrap();
+                    row.styles.push((first, line.spans[index].style));
                     current = Some(index);
                 }
+                row.text.push_str(symbol);
+                row.graphemes
+                    .push((u32::try_from(row.text.len()).unwrap(), width));
+                row.width += width;
             }
-            Line {
-                spans,
-                style: line.style,
-                alignment: line.alignment,
-            }
+            row
         })
         .collect()
 }
@@ -362,23 +420,23 @@ fn render_lines(
         .row_starts
         .partition_point(|start| *start <= first_row)
         .saturating_sub(1);
-    let mut text = Vec::new();
+    let highlight = Style::new()
+        .fg(active_theme().background)
+        .bg(active_theme().warning);
     let mut gutter = Vec::new();
-    for row in first_row..end_row {
+    frame.render_widget(block, area);
+    for (y, row) in (content_area.y..).zip(first_row..end_row) {
         while layout.row_starts[line + 1] <= row {
             line += 1;
         }
-        let mut wrapped = layout.rows[row].clone();
-        if highlighted == Some(line + 1) {
-            let highlight = Style::new()
-                .fg(active_theme().background)
-                .bg(active_theme().warning);
-            for span in &mut wrapped.spans {
-                span.style = span.style.patch(highlight);
-            }
-            wrapped = wrapped.style(highlight);
-        }
-        text.push(wrapped);
+        let highlighted = highlighted == Some(line + 1);
+        document.highlight_drawn |= highlighted;
+        layout.rows[row].render(
+            content_area,
+            y,
+            highlighted.then_some(highlight),
+            frame.buffer_mut(),
+        );
         if numbered {
             let label = if row == layout.row_starts[line] {
                 format!("{:>number_width$} │ ", line + 1)
@@ -388,37 +446,8 @@ fn render_lines(
             gutter.push(Line::styled(label, Style::new().fg(active_theme().muted)));
         }
     }
-    frame.render_widget(block, area);
     if numbered {
         frame.render_widget(Paragraph::new(gutter), gutter_area);
-    }
-    render_rows(&text, content_area, frame.buffer_mut());
-}
-
-/// Draws rows from `wrap_line` the way `Paragraph` draws its wrapped rows. An
-/// unwrapped `Paragraph` would truncate a row whose last wide grapheme overhangs
-/// the width, which wrapping lets through.
-fn render_rows(rows: &[Line<'_>], area: Rect, buf: &mut Buffer) {
-    for (y, row) in (area.y..area.bottom()).zip(rows) {
-        let row_width = row
-            .styled_graphemes(Style::default())
-            .map(|grapheme| grapheme.symbol.cell_width())
-            .sum::<u16>();
-        let mut x = match row.alignment.unwrap_or(Alignment::Left) {
-            Alignment::Left => 0,
-            Alignment::Center => (area.width / 2).saturating_sub(row_width / 2),
-            Alignment::Right => area.width.saturating_sub(row_width),
-        };
-        for grapheme in row.styled_graphemes(Style::default()) {
-            let width = grapheme.symbol.cell_width();
-            if width == 0 {
-                continue;
-            }
-            if let Some(cell) = buf.cell_mut((area.x + x, y)) {
-                cell.set_symbol(grapheme.symbol).set_style(grapheme.style);
-            }
-            x += width;
-        }
     }
 }
 
@@ -575,14 +604,25 @@ impl DocumentState {
         })
     }
 
-    /// Drops an expired highlight and reports whether one was dropped, so the
-    /// session redraws once to remove it wherever the document is hidden.
+    /// Whether the highlight's timer can change the screen: it is still running
+    /// and the last frame drew it.
+    pub(super) fn highlight_visible(&self) -> bool {
+        self.highlight_drawn && self.highlighted_line().is_some()
+    }
+
+    /// Drops an expired highlight even while the document is hidden, and reports
+    /// whether the screen still shows it, so the session redraws once to remove it.
     pub(super) fn expire_highlight(&mut self) -> bool {
         let expired = self.highlighted_line.is_some() && self.highlighted_line().is_none();
         if expired {
             self.highlighted_line = None;
         }
-        expired
+        expired && self.highlight_drawn
+    }
+
+    /// Starts a frame; document renders mark whether they draw the highlight.
+    pub(super) fn begin_frame(&mut self) {
+        self.highlight_drawn = false;
     }
 
     pub(super) fn go_to_line(&mut self, text: &Arc<str>, input: String) -> (bool, String) {
@@ -874,14 +914,16 @@ mod tests {
             .unwrap();
         assert_eq!(row.split('│').nth(1).unwrap().trim(), "80");
 
-        // An overlay hides the document, yet the highlight still expires on its
-        // own so the quiet session stops redrawing.
+        assert!(app.animating());
+
+        // An overlay hides the document: its highlight timer requests no frames,
+        // and expiry still drops it without a redraw.
         app.open_theme_picker();
-        app.document.highlighted_line = Some((80, Instant::now() - Duration::from_secs(2)));
         draw_at(&mut app, 80, 24);
-        assert!(app.document.expire_highlight());
         assert!(!app.animating());
+        app.document.highlighted_line = Some((80, Instant::now() - Duration::from_secs(2)));
         assert!(!app.document.expire_highlight());
+        assert!(app.document.highlighted_line.is_none());
     }
 
     #[test]
@@ -898,6 +940,7 @@ mod tests {
             Line::raw("a  b   c    d supercalifragilisticexpialidocious end"),
             Line::raw("漢字かな交じり文 wide ｶﾞｷﾞ and e\u{301}combining 👍🏽 emoji"),
             Line::raw("no\u{a0}break\u{a0}space and zero\u{200b}width\u{200b}space"),
+            Line::raw("A\t\u{301}BC after a filtered tab"),
             Line::from(vec![
                 Span::styled("hel", bold),
                 Span::raw("lo wor"),
@@ -919,8 +962,26 @@ mod tests {
                     .wrap(Wrap { trim: false })
                     .render(area, &mut expected);
                 let mut actual = Buffer::empty(area);
-                super::render_rows(&rows, area, &mut actual);
+                for (y, row) in (0..).zip(&rows) {
+                    row.render(area, y, None, &mut actual);
+                }
                 assert_eq!(actual, expected, "{line} at {width}");
+
+                // The uncached highlight patched every span and replaced the line style.
+                let highlight = Style::new().fg(Color::Black).bg(Color::Yellow);
+                let mut highlighted = line.clone();
+                for span in &mut highlighted.spans {
+                    span.style = span.style.patch(highlight);
+                }
+                let mut expected = Buffer::empty(area);
+                Paragraph::new(highlighted.style(highlight))
+                    .wrap(Wrap { trim: false })
+                    .render(area, &mut expected);
+                let mut actual = Buffer::empty(area);
+                for (y, row) in (0..).zip(&rows) {
+                    row.render(area, y, Some(highlight), &mut actual);
+                }
+                assert_eq!(actual, expected, "highlighted {line} at {width}");
             }
         }
     }
