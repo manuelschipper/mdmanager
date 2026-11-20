@@ -1811,7 +1811,8 @@ fn render_page(
     }
     let message_area = app.message_expires_at.and_then(|_| {
         let (_, text) = app.message.as_ref()?;
-        let (x, y, width) = if matches!(app.view, View::Home) {
+        let home = matches!(app.view, View::Home);
+        let (x, y, available) = if home {
             let without_message = home_header_line(&OverviewInput {
                 message: &None,
                 ..app.overview_input()
@@ -1823,8 +1824,13 @@ fn render_page(
         } else {
             (footer.x, footer.y + 1, footer.width)
         };
-        let width = (Line::raw(text).width() + 2).min(usize::from(width));
-        Some(Rect::new(x, y, width as u16, 1))
+        let width = (Line::raw(text).width() + 2).min(usize::from(available)) as u16;
+        let x = if home {
+            x
+        } else {
+            x + available / 2 - width / 2
+        };
+        Some(Rect::new(x, y, width, 1))
     });
     (spinner_area, message_area)
 }
@@ -2490,6 +2496,22 @@ mod tests {
         }
         assert!(draw_at(&mut app, 61, 16).contains("checking subfolders"));
         assert!(app.animating());
+    }
+
+    #[test]
+    fn footer_message_expires_without_a_redraw_when_help_covers_it() {
+        let (_home, _repository, _paths, mut app) = fixture();
+        app.open(View::Context);
+        let message = "Test reload message";
+        for covered in [false, true] {
+            app.help = covered;
+            app.set_message(true, message);
+            app.message_expires_at = Some(Instant::now());
+            let screen = draw_at(&mut app, 160, 16);
+            assert_eq!(screen.contains(message), !covered);
+            assert_eq!(app.poll_message(), !covered);
+            assert!(app.message.is_none());
+        }
     }
 
     #[test]
