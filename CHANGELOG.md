@@ -23,6 +23,9 @@
   visible rows, even inside a very long line. Held arrows and trackpad scrolling on long
   documents no longer trail behind after the keys stop, search no longer rewraps the document
   for every match, and a quiet screen is no longer redrawn every 100 ms.
+- **Context About and timer rendering** — Context caches the visible About layout so long import
+  lists no longer slow document scrolling. Clipped or covered scan spinners, line highlights,
+  and transient status messages no longer send empty timer frames to the terminal.
 
 ## mdmanager 0.5.0 — Nov 12, 2026
 

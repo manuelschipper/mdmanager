@@ -218,13 +218,14 @@ pub(super) fn render_home(
     document: &mut DocumentState,
     home_index: &mut usize,
     area: Rect,
-) {
+) -> Option<Rect> {
     document.scroll = 0;
     document.max_scroll = 0;
     let items = input.inspection.home_items.clone();
     (*home_index) = (*home_index).min(items.len().saturating_sub(1));
     let mut rows = Vec::new();
     let mut selected_row = 0;
+    let mut context_row = None;
     let mut previous_group = "";
     for (index, item) in items.iter().enumerate() {
         let group = home_group(item);
@@ -244,22 +245,28 @@ pub(super) fn render_home(
         if index == (*home_index) {
             selected_row = rows.len();
         }
+        if matches!(item, HomeItem::Context) {
+            context_row = Some(rows.len());
+        }
         rows.push(ListItem::new(home_line(input, item)));
     }
     let mut state = ListState::default().with_selected(Some(selected_row));
+    let block = Block::default()
+        .border_style(Style::new().fg(active_theme().dim))
+        .style(Style::new().bg(active_theme().surface))
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
     frame.render_stateful_widget(
         List::new(rows)
-            .block(
-                Block::default()
-                    .border_style(Style::new().fg(active_theme().dim))
-                    .style(Style::new().bg(active_theme().surface))
-                    .borders(Borders::ALL),
-            )
+            .block(block)
             .highlight_style(active_theme().selected())
             .highlight_symbol("▸ "),
         area,
         &mut state,
     );
+    let row = context_row?.checked_sub(state.offset())?;
+    (row < usize::from(inner.height))
+        .then(|| Rect::new(inner.x, inner.y + row as u16, inner.width, 1))
 }
 
 fn home_line(input: &OverviewInput<'_>, item: &HomeItem) -> Line<'static> {

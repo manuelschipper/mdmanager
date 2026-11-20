@@ -16,7 +16,7 @@ mod overview;
 mod reload;
 
 use self::context_view::{
-    ContextEntry, ContextViewInput, context_entries, render_context, render_source,
+    ContextEntry, ContextViewInput, SourceAbout, context_entries, render_context, render_source,
 };
 use self::document::{
     COMPACT_WIDTH, DocumentState, LinePrompt, SearchPrompt, bounded, bounded_around,
@@ -83,6 +83,16 @@ enum DiagnosticKind {
     Global,
 }
 
+enum ScanResultDraw {
+    Hidden,
+    Visible,
+    // Even with its Context row clipped, Home can resize when the scan status changes.
+    HomeClipped {
+        canvas_width: u16,
+        screen_width: u16,
+    },
+}
+
 #[derive(Clone)]
 enum View {
     Home,
@@ -144,18 +154,21 @@ struct App {
     section_index: usize,
     document: DocumentState,
     context_preview: bool,
+    source_about: Option<SourceAbout>,
     help: bool,
     picker: Option<RuntimePicker>,
     theme_picker: Option<ThemePicker>,
     message: Option<(bool, String)>,
     message_expires_at: Option<Instant>,
+    message_drawn: bool,
     watcher: ReloadWatcher,
     // Set once by `run` at process start; cleared by expiry or the first key.
     // Nothing else ever sets it, so the intro cannot replay.
     intro_started: Option<Instant>,
     // Whether the last frame drew the intro or the scan spinner. Hidden, their
-    // timers change nothing, and their ends are accepted state changes that redraw.
+    // timers change nothing on screen.
     timer_drawn: bool,
+    scan_result_draw: ScanResultDraw,
 }
 
 impl App {
@@ -310,14 +323,17 @@ impl App {
             section_index: 0,
             document,
             context_preview: false,
+            source_about: None,
             help: false,
             picker: None,
             theme_picker: None,
             message: ui_error.map(|error| (false, error)),
             message_expires_at: None,
+            message_drawn: false,
             watcher: ReloadWatcher::new(signature, topology, listings),
             intro_started: None,
             timer_drawn: false,
+            scan_result_draw: ScanResultDraw::Hidden,
         })
     }
 
@@ -539,6 +555,7 @@ impl App {
         self.context
             .reload_and_scan(inspection.context.clone(), self.watcher.topology());
         self.inspection = inspection;
+        self.source_about = None;
         self.observe_open_documents();
         self.restore_context_selection(selected_context);
         if let Some(key) = selected_home {
@@ -656,7 +673,7 @@ impl App {
         if expired {
             self.clear_message();
         }
-        expired
+        expired && self.message_drawn
     }
 
     fn poll_intro(&mut self) -> bool {
@@ -666,7 +683,7 @@ impl App {
         if finished {
             self.intro_started = None;
         }
-        finished
+        finished && self.timer_drawn
     }
 
     fn poll_reload(&mut self) -> bool {
@@ -723,10 +740,19 @@ impl App {
         if finished {
             let selection = self.context_selection();
             self.inspection.observe_context(self.context.audit.clone());
+            self.source_about = None;
             self.watcher.signature.observe_known(&self.inspection);
             self.restore_context_selection(selection);
         }
         finished
+            && match self.scan_result_draw {
+                ScanResultDraw::Hidden => false,
+                ScanResultDraw::Visible => true,
+                ScanResultDraw::HomeClipped {
+                    canvas_width,
+                    screen_width,
+                } => home_canvas_width(&self.overview_input(), screen_width) != canvas_width,
+            }
     }
 
     fn open_picker(&mut self) {
@@ -759,6 +785,7 @@ impl App {
         let (context, global) = (&mut self.context, self.global.as_ref());
         context.select_runtime(index, global, self.watcher.topology());
         self.inspection.observe_context(self.context.audit.clone());
+        self.source_about = None;
         // Only the known-files half of the signature depends on the runtime. A running check
         // of the previous runtime can no longer be accepted; a change it found is found again
         // by the next one.
@@ -1486,6 +1513,8 @@ fn enter_home(app: &mut App) {
 
 fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.timer_drawn = false;
+    app.message_drawn = false;
+    app.scan_result_draw = ScanResultDraw::Hidden;
     app.document.hide_highlight();
     frame.render_widget(
         Block::default().style(
@@ -1526,13 +1555,9 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
         app.timer_drawn = true;
         return;
     }
-    render_page(frame, app);
-    // Home and Context show the spinner unless a picker replaced the page.
-    app.timer_drawn = app.theme_picker.is_none()
-        && app.picker.is_none()
-        && matches!(app.view, View::Home | View::Context)
-        && app.context.scan_spinner().is_some();
-    if app.help {
+    let spinner = app.context.scan_spinner();
+    let (spinner_area, message_area) = render_page(frame, app, spinner);
+    let help_area = if app.help {
         // Dimming recolors the page, so a highlight's colors no longer show.
         app.document.hide_highlight();
         let screen = frame.area();
@@ -1543,8 +1568,26 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
                 .bg(active_theme().background)
                 .add_modifier(Modifier::DIM),
         );
-        render_help(frame, app, screen);
+        Some(render_help(frame, app, screen))
+    } else {
+        None
+    };
+    if help_area == Some(frame.area()) {
+        app.scan_result_draw = ScanResultDraw::Hidden;
     }
+    // Scan glyphs can disappear when the list scrolls, the title is clipped,
+    // or Help covers them. Look for the sampled glyph on its actual row.
+    app.timer_drawn = spinner.zip(spinner_area).is_some_and(|(glyph, area)| {
+        (area.left()..area.right()).any(|x| {
+            frame
+                .buffer_mut()
+                .cell((x, area.y))
+                .is_some_and(|cell| cell.symbol() == glyph)
+        })
+    });
+    app.message_drawn = message_area.is_some_and(|area| {
+        !area.is_empty() && help_area.is_none_or(|help| help.intersection(area) != area)
+    });
 }
 
 // One brightness step of the startup intro: the wordmark color and, once the
@@ -1586,18 +1629,22 @@ fn render_intro(frame: &mut Frame<'_>, (mark, caption): (Color, Option<Color>)) 
     );
 }
 
-fn render_page(frame: &mut Frame<'_>, app: &mut App) {
+fn render_page(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    spinner: Option<&'static str>,
+) -> (Option<Rect>, Option<Rect>) {
     if app.theme_picker.is_some() {
         render_theme_picker(frame, app, frame.area());
-        return;
+        return (None, None);
     }
     if app.picker.is_some() {
         render_picker(frame, app, frame.area());
-        return;
+        return (None, None);
     }
     if let View::Info { title, text, .. } = app.view.clone() {
         render_info(frame, &mut app.document, frame.area(), &title, &text);
-        return;
+        return (None, None);
     }
     if matches!(app.view, View::LibraryBrowser) {
         render_library(
@@ -1613,7 +1660,7 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
             &mut app.section_index,
             frame.area(),
         );
-        return;
+        return (None, None);
     }
     if let View::GlobalProfile(profile) = app.view.clone() {
         render_global_profile(
@@ -1630,7 +1677,7 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
             frame.area(),
             &profile,
         );
-        return;
+        return (None, None);
     }
     let canvas = canvas_area(frame.area(), app);
     let header_height = header_height(app, canvas.width);
@@ -1642,27 +1689,38 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
     ])
     .areas(canvas);
     render_header(frame, app, header);
+    let mut spinner_area = None;
     match app.view.clone() {
-        View::Home => render_home(
-            frame,
-            &OverviewInput {
-                global: &app.global,
-                global_active_profile: &app.global_active_profile,
-                global_sources: &app.global_sources,
-                inspection: &app.inspection,
-                is_home: matches!(app.view, View::Home),
-                local_repository: &app.local_repository,
-                message: &app.message,
-                paths: &app.paths,
-                project: &app.project,
-                project_root: &app.project_root,
-                scan_spinner: app.context.scan_spinner(),
-                scan_status: &app.context.scan_status,
-            },
-            &mut app.document,
-            &mut app.home_index,
-            body,
-        ),
+        View::Home => {
+            spinner_area = render_home(
+                frame,
+                &OverviewInput {
+                    global: &app.global,
+                    global_active_profile: &app.global_active_profile,
+                    global_sources: &app.global_sources,
+                    inspection: &app.inspection,
+                    is_home: true,
+                    local_repository: &app.local_repository,
+                    message: &app.message,
+                    paths: &app.paths,
+                    project: &app.project,
+                    project_root: &app.project_root,
+                    scan_spinner: spinner,
+                    scan_status: &app.context.scan_status,
+                },
+                &mut app.document,
+                &mut app.home_index,
+                body,
+            );
+            app.scan_result_draw = if spinner_area.is_some() {
+                ScanResultDraw::Visible
+            } else {
+                ScanResultDraw::HomeClipped {
+                    canvas_width: canvas.width,
+                    screen_width: frame.area().width,
+                }
+            };
+        }
         View::Info { .. } => unreachable!("Info views use the focus panel"),
         View::File { title, path, about } => {
             let about = external_file_about(
@@ -1744,9 +1802,9 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
         View::LibraryBrowser | View::GlobalProfile(_) => {
             unreachable!("Library views use focus panels")
         }
-        View::Context => render_context(
-            frame,
-            &ContextViewInput {
+        View::Context | View::Source => {
+            app.scan_result_draw = ScanResultDraw::Visible;
+            let input = ContextViewInput {
                 context_entry_index: app.context_entry_index,
                 context_nested_expanded: app.context_nested_expanded,
                 global: &app.global,
@@ -1756,33 +1814,29 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
                 paths: &app.paths,
                 project: &app.project,
                 project_root: &app.project_root,
-                scan_spinner: app.context.scan_spinner(),
+                scan_spinner: spinner,
                 scan_status: &app.context.scan_status,
                 source_index: app.context.source_index,
-            },
-            &mut app.document,
-            &mut app.context_preview,
-            body,
-        ),
-        View::Source => render_source(
-            frame,
-            &ContextViewInput {
-                context_entry_index: app.context_entry_index,
-                context_nested_expanded: app.context_nested_expanded,
-                global: &app.global,
-                global_active_profile: &app.global_active_profile,
-                inspection: &app.inspection,
-                local_repository: &app.local_repository,
-                paths: &app.paths,
-                project: &app.project,
-                project_root: &app.project_root,
-                scan_spinner: app.context.scan_spinner(),
-                scan_status: &app.context.scan_status,
-                source_index: app.context.source_index,
-            },
-            &mut app.document,
-            body,
-        ),
+            };
+            if matches!(app.view, View::Context) {
+                spinner_area = render_context(
+                    frame,
+                    &input,
+                    &mut app.document,
+                    &mut app.context_preview,
+                    &mut app.source_about,
+                    body,
+                );
+            } else {
+                render_source(
+                    frame,
+                    &input,
+                    &mut app.document,
+                    &mut app.source_about,
+                    body,
+                );
+            }
+        }
     }
     render_footer(frame, app, footer);
     if app.document.search.is_some() {
@@ -1791,6 +1845,30 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
     if app.document.line_prompt.is_some() {
         render_line_prompt(frame, &app.document);
     }
+    let message_area = app.message_expires_at.and_then(|_| {
+        let (_, text) = app.message.as_ref()?;
+        let home = matches!(app.view, View::Home);
+        let (x, y, available) = if home {
+            let without_message = home_header_line(&OverviewInput {
+                message: &None,
+                ..app.overview_input()
+            });
+            if header_height != home_header_height(without_message, header.width) {
+                return Some(canvas);
+            }
+            (header.x + 1, header.y + 2, header.width.saturating_sub(2))
+        } else {
+            (footer.x, footer.y + 1, footer.width)
+        };
+        let width = (Line::raw(text).width() + 2).min(usize::from(available)) as u16;
+        let x = if home {
+            x
+        } else {
+            x + available / 2 - width / 2
+        };
+        Some(Rect::new(x, y, width, 1))
+    });
+    (spinner_area, message_area)
 }
 
 fn canvas_area(area: Rect, app: &App) -> Rect {
@@ -1860,7 +1938,11 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn header_height(app: &App, width: u16) -> u16 {
-    let Some(line) = home_header_line(&app.overview_input()) else {
+    home_header_height(home_header_line(&app.overview_input()), width)
+}
+
+fn home_header_height(line: Option<Line<'_>>, width: u16) -> u16 {
+    let Some(line) = line else {
         return 3;
     };
     u16::try_from(
@@ -2012,7 +2094,7 @@ fn render_footer_line(frame: &mut Frame<'_>, app: &App, area: Rect, keys: &str) 
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, app: &App, screen: Rect) {
+fn render_help(frame: &mut Frame<'_>, app: &App, screen: Rect) -> Rect {
     let workflow = "HOW CHANGES WORK\nThe TUI does not edit instructions or apply compositions. Ask your coding agent to read `mdmanager docs start` and make those changes through the CLI; this page reloads from disk.\n\nTHEMES\nPress t to preview themes. Enter saves the selected UI theme to mdmanager.toml.";
     let (context, text) = match &app.view {
         View::Home => (
@@ -2141,6 +2223,7 @@ fn render_help(frame: &mut Frame<'_>, app: &App, screen: Rect) {
             .style(Style::new().fg(active_theme().muted)),
         controls_area,
     );
+    area
 }
 
 fn render_picker(frame: &mut Frame<'_>, app: &App, screen: Rect) {
@@ -2433,11 +2516,55 @@ mod tests {
     }
 
     #[test]
+    fn home_scan_animates_only_while_its_row_is_visible() {
+        let (_home, _repository, _paths, mut app) = fixture();
+        assert!(draw_at(&mut app, 61, 16).contains("checking subfolders"));
+        assert!(app.animating());
+
+        for _ in 0..app.home_items().len() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(!draw_at(&mut app, 61, 16).contains("checking subfolders"));
+        assert!(!app.animating());
+
+        for _ in 0..app.home_items().len() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        assert!(draw_at(&mut app, 61, 16).contains("checking subfolders"));
+        assert!(app.animating());
+    }
+
+    #[test]
+    fn footer_message_expires_without_a_redraw_when_help_covers_it() {
+        let (_home, _repository, _paths, mut app) = fixture();
+        app.open(View::Context);
+        let message = "Test reload message";
+        for covered in [false, true] {
+            app.help = covered;
+            app.set_message(true, message);
+            app.message_expires_at = Some(Instant::now());
+            let screen = draw_at(&mut app, 160, 16);
+            assert_eq!(screen.contains(message), !covered);
+            assert_eq!(app.poll_message(), !covered);
+            assert!(app.message.is_none());
+        }
+    }
+
+    #[test]
     fn intro_expires_on_its_own_and_quit_keys_still_work() {
         let (_home, _repository, _paths, mut app) = fixture();
-        app.intro_started = Some(Instant::now().checked_sub(INTRO_DURATION).unwrap());
+        let expired = Instant::now() - INTRO_DURATION;
+        app.intro_started = Some(Instant::now());
+        draw(&mut app);
+        app.intro_started = Some(expired);
+        assert!(app.poll_intro());
         assert!(!draw(&mut app).contains("███╗"));
-        app.poll_intro();
+        assert!(app.intro_started.is_none());
+
+        app.intro_started = Some(Instant::now());
+        draw_at(&mut app, 50, 14);
+        app.intro_started = Some(expired);
+        assert!(!app.poll_intro());
         assert!(app.intro_started.is_none());
 
         app.intro_started = Some(Instant::now());

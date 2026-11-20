@@ -11,8 +11,8 @@ use unicode_width::UnicodeWidthStr;
 use super::active_theme;
 use super::context_ui::ContextScanStatus;
 use super::document::{
-    DocumentState, bounded, pad_right, relative_message, render_document, render_plain_document,
-    truncate_end,
+    DocumentState, Row, bounded, pad_right, relative_message, render_document,
+    render_plain_document, truncate_end, wrap_line,
 };
 use super::inspection::HomeItem;
 use super::inspection::{
@@ -24,6 +24,7 @@ use crate::context::{
 };
 use crate::local::{self, LocalRepository};
 use crate::project::Workspace;
+use crate::theme::Theme;
 
 /// Borrowed context view inputs from the session's accepted observations.
 pub(super) struct ContextViewInput<'a> {
@@ -47,14 +48,24 @@ pub(super) enum ContextEntry {
     Nested,
 }
 
+/// Wrapped rows of the last source's About panel in the accepted inspection.
+pub(super) struct SourceAbout {
+    source_index: usize,
+    width: u16,
+    theme: Theme,
+    lines: u16,
+    rows: Vec<Row>,
+}
+
 /// The chain stays selected while its preview appears beside it or below it when space permits.
 pub(super) fn render_context(
     frame: &mut Frame<'_>,
     input: &ContextViewInput<'_>,
     document: &mut DocumentState,
     context_preview: &mut bool,
+    about: &mut Option<SourceAbout>,
     area: Rect,
-) {
+) -> Option<Rect> {
     let scan_in_progress = input.inspection.context.runtime == ContextRuntime::Claude
         && matches!(
             input.scan_status,
@@ -93,7 +104,7 @@ pub(super) fn render_context(
                 .wrap(Wrap { trim: false }),
             bounded(area, 72, 5),
         );
-        return;
+        return None;
     }
     let (list_area, detail_area) = if input.inspection.context.sources.is_empty() {
         (area, None)
@@ -220,10 +231,6 @@ pub(super) fn render_context(
         }
         items.push(ListItem::new(""));
     }
-    let selected_source = match selected {
-        Some(ContextEntry::Source(index)) => input.inspection.context.sources.get(index).cloned(),
-        _ => None,
-    };
     let mut state = ListState::default().with_selected(selected_row);
     frame.render_stateful_widget(
         List::new(items)
@@ -272,8 +279,8 @@ pub(super) fn render_context(
         &mut state,
     );
     if let Some(detail_area) = detail_area {
-        if let Some(source) = selected_source {
-            render_source_panel(frame, input, document, detail_area, &source, false);
+        if let Some(ContextEntry::Source(index)) = selected {
+            render_source_panel(frame, input, document, about, detail_area, index, false);
         } else {
             frame.render_widget(
                 Paragraph::new("Select a source to preview its status and Markdown.")
@@ -292,6 +299,7 @@ pub(super) fn render_context(
     } else {
         document.max_scroll = 0;
     }
+    scan_in_progress.then(|| Rect::new(list_area.x, list_area.y, list_area.width, 1))
 }
 
 fn context_source_item(
@@ -425,10 +433,19 @@ pub(super) fn render_source(
     frame: &mut Frame<'_>,
     input: &ContextViewInput<'_>,
     document: &mut DocumentState,
+    about: &mut Option<SourceAbout>,
     area: Rect,
 ) {
-    if let Some(source) = input.inspection.context.sources.get(input.source_index) {
-        render_source_panel(frame, input, document, area, source, true);
+    if input.source_index < input.inspection.context.sources.len() {
+        render_source_panel(
+            frame,
+            input,
+            document,
+            about,
+            area,
+            input.source_index,
+            true,
+        );
     } else {
         render_document(
             frame,
@@ -446,10 +463,64 @@ fn render_source_panel(
     frame: &mut Frame<'_>,
     input: &ContextViewInput<'_>,
     document: &mut DocumentState,
+    about: &mut Option<SourceAbout>,
     area: Rect,
-    source: &ContextSource,
+    source_index: usize,
     numbered: bool,
 ) {
+    let source = &input.inspection.context.sources[source_index];
+    let width = area.width.saturating_sub(2);
+    let theme = active_theme();
+    if about.as_ref().is_none_or(|about| {
+        about.source_index != source_index || about.width != width || about.theme != theme
+    }) {
+        let metadata = source_metadata(input, source);
+        // The panel has room for at most one row per metadata field. Wrapping a
+        // field can push later fields offscreen, so stop when that space fills.
+        let mut rows = Vec::new();
+        for line in &metadata {
+            if rows.len() == metadata.len() {
+                break;
+            }
+            rows.extend(wrap_line(line, width, metadata.len() - rows.len()));
+        }
+        *about = Some(SourceAbout {
+            source_index,
+            width,
+            theme,
+            lines: metadata.len() as u16,
+            rows,
+        });
+    }
+    let about = about.as_ref().unwrap();
+    let [metadata_area, _, document_area] = Layout::vertical([
+        Constraint::Length((about.lines + 2).min(area.height.saturating_sub(4))),
+        Constraint::Length(1),
+        Constraint::Min(3),
+    ])
+    .areas(area);
+    let block = Block::default()
+        .title(" About ")
+        .title_style(Style::new().fg(theme.secondary))
+        .border_style(Style::new().fg(theme.dim))
+        .borders(Borders::ALL);
+    let inner = block.inner(metadata_area);
+    frame.render_widget(block, metadata_area);
+    for (row, y) in about.rows.iter().zip(inner.top()..inner.bottom()) {
+        row.render(inner, y, None, frame.buffer_mut());
+    }
+    render_plain_document(
+        frame,
+        document,
+        document_area,
+        " Contents ",
+        &source.content,
+        true,
+        numbered,
+    );
+}
+
+fn source_metadata(input: &ContextViewInput<'_>, source: &ContextSource) -> Vec<Line<'static>> {
     let reason = source
         .state
         .reason(input.paths, &input.inspection.context.directory)
@@ -527,37 +598,7 @@ fn render_source_panel(
             ),
         ]));
     }
-    let metadata_height = u16::try_from(metadata.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .min(area.height.saturating_sub(4));
-    let [metadata_area, _, document_area] = Layout::vertical([
-        Constraint::Length(metadata_height),
-        Constraint::Length(1),
-        Constraint::Min(3),
-    ])
-    .areas(area);
-    frame.render_widget(
-        Paragraph::new(metadata)
-            .block(
-                Block::default()
-                    .title(" About ")
-                    .title_style(Style::new().fg(active_theme().secondary))
-                    .border_style(Style::new().fg(active_theme().dim))
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false }),
-        metadata_area,
-    );
-    render_plain_document(
-        frame,
-        document,
-        document_area,
-        " Contents ",
-        &source.content,
-        true,
-        numbered,
-    );
+    metadata
 }
 
 fn source_style(state: &SourceState) -> Style {
@@ -615,6 +656,43 @@ mod tests {
     use std::fs;
 
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn source_about_refreshes_imports_at_the_same_path() {
+        let (_home, repository, _paths, mut app) = fixture();
+        let source = repository.path().join("CLAUDE.md");
+        fs::write(&source, "@old-import.md\n").unwrap();
+        app.reload_from_disk();
+        app.open(View::Context);
+        finish_context_scan(&mut app);
+        app.context_entry_index = context_entries(&app.inspection.context, false)
+            .iter()
+            .position(|entry| match entry {
+                ContextEntry::Source(index) => app.inspection.context.sources[*index]
+                    .path
+                    .ends_with("CLAUDE.md"),
+                ContextEntry::Nested => false,
+            })
+            .unwrap();
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let screen = draw(&mut app);
+        assert!(
+            screen
+                .lines()
+                .any(|row| row.contains("Imports") && row.contains("old-import.md")),
+            "{screen}"
+        );
+
+        fs::write(&source, "@new-import.md\n").unwrap();
+        app.reload_from_disk();
+        let screen = draw(&mut app);
+        assert!(
+            screen
+                .lines()
+                .any(|row| row.contains("Imports") && row.contains("new-import.md")),
+            "{screen}"
+        );
+    }
 
     #[test]
     fn claude_nested_sources_expand_in_place() {
