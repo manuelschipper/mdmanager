@@ -44,7 +44,7 @@ use self::reload::{
 use super::context_ui;
 use super::{ACTIVE_THEME, activate_theme, active_theme, reset_theme};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -102,6 +102,7 @@ enum View {
         title: String,
         path: PathBuf,
         about: String,
+        project_section: Option<String>,
     },
     Diff(ManagedRef),
     LibraryBrowser,
@@ -276,8 +277,7 @@ impl App {
                 &baseline,
             )
         });
-        let mut context = ContextUi::new(paths.clone(), inspection.context.clone());
-        context.start_scan(&topology);
+        let context = ContextUi::new(paths.clone(), inspection.context.clone());
         let view = global_error
             .as_ref()
             .map_or(View::Home, |error| View::Info {
@@ -321,10 +321,16 @@ impl App {
     }
 
     fn document_paths(&self) -> Vec<PathBuf> {
+        // Project Sections get their content and watch paths from the Project manifest.
         std::iter::once(&self.view)
             .chain(self.history.iter().map(|(view, _)| view))
             .filter_map(|view| match view {
-                View::File { path, .. } | View::SectionDocument { path, .. } => Some(path.clone()),
+                View::File { path, .. }
+                | View::SectionDocument {
+                    path,
+                    project_section: None,
+                    ..
+                } => Some(path.clone()),
                 _ => None,
             })
             .collect()
@@ -337,6 +343,25 @@ impl App {
         for path in self.document_paths() {
             self.inspection.observe_document_and_parent(&path);
         }
+    }
+
+    fn section_document(
+        &self,
+        path: &Path,
+        project_section: Option<&str>,
+    ) -> Result<Arc<str>, String> {
+        let Some(id) = project_section else {
+            return self.inspection.document(path);
+        };
+        if let Some(error) = &self.project_error {
+            return Err(error.clone());
+        }
+        self.project
+            .as_ref()
+            .filter(|project| project.section_path(id).as_deref() == Some(path))
+            .and_then(|project| project.section_content(id))
+            .cloned()
+            .ok_or_else(|| format!("Document is unavailable: {}", path.display()))
     }
 
     fn home_items(&self) -> Vec<HomeItem> {
@@ -772,9 +797,12 @@ impl App {
 
     fn searchable_text(&self) -> Option<Arc<str>> {
         match &self.view {
-            View::File { path, .. } | View::SectionDocument { path, .. } => {
-                self.inspection.document(path).ok()
-            }
+            View::File { path, .. } => self.inspection.document(path).ok(),
+            View::SectionDocument {
+                path,
+                project_section,
+                ..
+            } => self.section_document(path, project_section.as_deref()).ok(),
             View::Source => self.selected_source().map(|source| source.content.clone()),
             View::ManagedDocument(reference) => {
                 managed_workspace(&self.inspection.managed, reference)
@@ -790,9 +818,12 @@ impl App {
 
     fn numbered_text(&self) -> Option<Arc<str>> {
         match &self.view {
-            View::File { path, .. } | View::SectionDocument { path, .. } => {
-                self.inspection.document(path).ok()
-            }
+            View::File { path, .. } => self.inspection.document(path).ok(),
+            View::SectionDocument {
+                path,
+                project_section,
+                ..
+            } => self.section_document(path, project_section.as_deref()).ok(),
             View::Source => self.selected_source().map(|source| source.content.clone()),
             View::ManagedDocument(reference) => {
                 managed_workspace(&self.inspection.managed, reference)
@@ -1274,6 +1305,8 @@ fn enter(app: &mut App) {
                 app.open(View::SectionDocument {
                     title: section.name.clone(),
                     path: section.path.clone(),
+                    project_section: matches!(reference, ManagedRef::Project(_))
+                        .then(|| section.id.clone()),
                     about: format!(
                         "Section source · used by {}\nPath: {}",
                         workspace.title,
@@ -1297,6 +1330,7 @@ fn enter(app: &mut App) {
                 let usage = usage.strip_prefix("used by ").unwrap_or(&usage);
                 app.open(View::SectionDocument {
                     title: section.name.clone(),
+                    project_section: None,
                     about: format!(
                         "Personal Section · {}\nPath: {}\nUsed by: {}",
                         section.name,
@@ -1314,6 +1348,7 @@ fn enter(app: &mut App) {
                 };
                 app.open(View::SectionDocument {
                     title: section.name.clone(),
+                    project_section: Some(id.clone()),
                     about: format!(
                         "Project Section · committed with this repository\nPath: {}\nUsed by: {}",
                         path.display(),
@@ -1658,10 +1693,14 @@ fn render_page(frame: &mut Frame<'_>, app: &mut App) {
                 true,
             );
         }
-        View::SectionDocument { title, path, about } => {
+        View::SectionDocument {
+            title,
+            path,
+            about,
+            project_section,
+        } => {
             let content = app
-                .inspection
-                .document(&path)
+                .section_document(&path, project_section.as_deref())
                 .unwrap_or_else(|error| error.into());
             render_document(
                 frame,
@@ -2636,7 +2675,6 @@ mod tests {
         let target = project.target_path("agents").unwrap();
         let reference = ManagedRef::Project("agents".into());
         let mut app = App::new_at(paths, None, repository.path().to_owned()).unwrap();
-        finish_context_scan(&mut app);
         let views = [
             View::Home,
             View::Managed(reference.clone()),
@@ -2645,6 +2683,7 @@ mod tests {
                 title: "Section".into(),
                 path: section.clone(),
                 about: String::new(),
+                project_section: Some("agents".into()),
             },
             View::File {
                 title: "Target".into(),
@@ -2690,8 +2729,9 @@ mod tests {
             title: "Section".into(),
             path: section.clone(),
             about: String::new(),
+            project_section: Some("agents".into()),
         };
-        assert!(app.inspection.document(&section).is_err());
+        assert!(app.section_document(&section, Some("agents")).is_err());
         assert!(app.searchable_text().is_none());
         assert!(!draw(&mut app).contains("# New snapshot content"));
     }
@@ -2717,7 +2757,6 @@ mod tests {
         let report = deploy::apply(global, "default", None, true, true).unwrap();
         assert!(report.iter().any(|item| item.backup.is_some()));
         app.reload_from_disk();
-        finish_context_scan(&mut app);
 
         // Include all files, including absent-to-created paths, ownership, exclusions,
         // manifests and backups in both fixture roots.
@@ -3064,6 +3103,7 @@ agents = ["common"]
                 title: "Section".into(),
                 path,
                 about: String::new(),
+                project_section: None,
             },
         ] {
             app.open(view);

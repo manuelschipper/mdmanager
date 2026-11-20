@@ -619,9 +619,15 @@ mod tests {
     #[test]
     fn claude_nested_sources_expand_in_place() {
         let (_home, repository, _paths, mut app) = fixture();
+        assert!(matches!(
+            app.context.scan_status,
+            ContextScanStatus::NotStarted
+        ));
+        assert!(!draw(&mut app).contains("checking subfolders"));
         fs::create_dir(repository.path().join("child")).unwrap();
         fs::write(repository.path().join("child/CLAUDE.md"), "# Child\n").unwrap();
         app.reload_from_disk();
+        assert!(!draw(&mut app).contains("checking subfolders"));
         app.open(View::Context);
         assert!(
             !context_entries(&app.inspection.context, app.context_nested_expanded)

@@ -290,17 +290,16 @@ fn home_line(input: &OverviewInput<'_>, item: &HomeItem) -> Line<'static> {
                 text.push_str(&format!(" · {relevant} load when relevant"));
             }
             let mut spans = vec![Span::raw(text)];
-            if matches!(
-                input.scan_status,
-                ContextScanStatus::NotStarted | ContextScanStatus::Scanning
-            ) {
-                spans.push(Span::styled(
-                    input.scan_spinner.map_or_else(
-                        || " · checking subfolders…".into(),
-                        |spinner| format!(" · {spinner} checking subfolders…"),
-                    ),
-                    Style::new().fg(active_theme().muted),
-                ));
+            let scan = match input.scan_status {
+                ContextScanStatus::NotStarted => Some(" · open Context to check subfolders".into()),
+                ContextScanStatus::Scanning => Some(input.scan_spinner.map_or_else(
+                    || " · checking subfolders…".into(),
+                    |spinner| format!(" · {spinner} checking subfolders…"),
+                )),
+                _ => None,
+            };
+            if let Some(scan) = scan {
+                spans.push(Span::styled(scan, Style::new().fg(active_theme().muted)));
             }
             Line::from(spans)
         }

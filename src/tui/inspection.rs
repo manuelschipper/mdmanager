@@ -92,13 +92,6 @@ impl InstructionInspection {
                     .target_names()
                     .map(|id| ManagedRef::Project(id.to_owned())),
             );
-            paths.extend(
-                project
-                    .manifest
-                    .sections
-                    .iter()
-                    .filter_map(|section| project.section_path(&section.id)),
-            );
         }
         if let Some(repository) = &input.local_repository {
             for target in [local::ManagedTarget::Agents, local::ManagedTarget::Claude] {
@@ -139,12 +132,14 @@ impl InstructionInspection {
             let workspace = observe_managed_workspace(input, &reference);
             if let Ok(workspace) = &workspace {
                 paths.push(workspace.target.clone());
-                paths.extend(
-                    workspace
-                        .sections
-                        .iter()
-                        .map(|section| section.path.clone()),
-                );
+                if !matches!(reference, ManagedRef::Project(_)) {
+                    paths.extend(
+                        workspace
+                            .sections
+                            .iter()
+                            .map(|section| section.path.clone()),
+                    );
+                }
             }
             snapshot.managed.push((reference, workspace));
         }
@@ -325,8 +320,8 @@ fn observe_managed_workspace(
                         name: section.name.clone(),
                         content: project
                             .section_content(section_id)
-                            .unwrap_or_default()
-                            .into(),
+                            .cloned()
+                            .unwrap_or_default(),
                         path,
                     })
                 })

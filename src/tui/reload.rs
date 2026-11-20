@@ -447,8 +447,8 @@ fn hash_candidates(paths: &Paths, directory: &Path, listings: &mut DirectoryList
             break;
         }
     }
-    // Each declared Section entry counts by where it resolves, not by its contents: contents
-    // inside the Project are known files, and contents outside it are never read.
+    // Watch each declared entry even when the Project fails to load, so a repaired Section
+    // triggers a reload. Only watch file metadata for destinations inside .mdmanager/.
     for section in crate::project::declared_sections(directory) {
         section.path.hash(&mut hasher);
         fs::symlink_metadata(&section.path)
@@ -456,7 +456,12 @@ fn hash_candidates(paths: &Paths, directory: &Path, listings: &mut DirectoryList
             .ok()
             .hash(&mut hasher);
         fs::read_link(&section.path).ok().hash(&mut hasher);
-        fs::canonicalize(&section.path).ok().hash(&mut hasher);
+        section.resolved.hash(&mut hasher);
+        if let Some(resolved) = section.resolved
+            && !section.outside
+        {
+            hash_file(&resolved, &mut hasher);
+        }
     }
     // Subfolder discovery reloads only inside Git worktrees.
     if worktree.is_some() {
@@ -514,22 +519,6 @@ impl Observations {
             Ok(project) => (project, None),
             Err(error) => (None, Some(error)),
         };
-        // A Project that fails to load still declares its Sections; observing them keeps a
-        // missing or broken Section watched until it is restored. Like the Project loader, this
-        // never reads a Section that resolves outside `.mdmanager/`.
-        let document_paths = document_paths
-            .iter()
-            .cloned()
-            .chain(
-                project_error
-                    .is_some()
-                    .then(|| crate::project::declared_sections(directory))
-                    .into_iter()
-                    .flatten()
-                    .filter(|section| !section.outside)
-                    .map(|section| section.path),
-            )
-            .collect::<Vec<_>>();
         let worktree_root = crate::git_worktree::worktree_root(directory).ok();
         let project_root = project.as_ref().map_or_else(
             || worktree_root.unwrap_or_else(|| directory.to_owned()),
@@ -1095,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn non_git_watcher_tracks_known_project_sections() {
+    fn non_git_watcher_tracks_project_sections() {
         let home = TempDir::new().unwrap();
         let directory = TempDir::new().unwrap();
         fs::write(directory.path().join("AGENTS.md"), "# Agents\n").unwrap();
@@ -1118,8 +1107,12 @@ mod tests {
         assert_ne!(current_watch_signature(&app.watch_input()), before);
         app.reload_from_disk();
         assert_eq!(
-            &*app.inspection.document(&section).unwrap(),
-            "# Edited Section\n"
+            app.project
+                .as_ref()
+                .unwrap()
+                .section_content("agents")
+                .map(AsRef::as_ref),
+            Some("# Edited Section\n")
         );
     }
 
@@ -1156,16 +1149,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn watcher_keeps_a_missing_project_section_watched() {
+    fn project_section_recovers_from_a_missing_or_escaping_entry() {
+        use super::super::tests::{draw, open_library};
+
         let (_home, repository, _paths, mut app) = fixture();
         common_project(repository.path());
         app.reload_from_disk();
-        let section = app
-            .project
-            .as_ref()
-            .unwrap()
-            .section_path("common")
-            .unwrap();
+        let project = app.project.as_ref().unwrap();
+        let manifest = project.manifest_path.clone();
+        let section = project.section_path("common").unwrap();
         let content = fs::read_to_string(&section).unwrap();
         fs::remove_file(&section).unwrap();
         app.reload_from_disk();
@@ -1178,34 +1170,61 @@ mod tests {
         );
         app.reload_from_disk();
         assert!(app.project_error.is_none());
+        open_library(&mut app);
+        enter(&mut app);
+        assert_eq!(app.searchable_text().as_deref(), Some("# Common\n"));
 
         // A Section linked outside `.mdmanager/` fails to load; its target's contents are never
         // read or watched, but replacing the link still recovers.
         let outside = TempDir::new().unwrap();
         let target = outside.path().join("common.md");
         fs::write(&target, "# Outside\n").unwrap();
-        fs::remove_file(&section).unwrap();
-        std::os::unix::fs::symlink(&target, &section).unwrap();
+        let staged = section.with_extension("next");
+        std::os::unix::fs::symlink(&target, &staged).unwrap();
+        fs::rename(&staged, &section).unwrap();
         assert_ne!(
             current_watch_signature(&app.watch_input()),
             app.watcher.signature
         );
         app.reload_from_disk();
-        assert!(app.project_error.is_some());
+        let diagnostic = Workspace::load(&manifest).unwrap_err();
+        assert_eq!(
+            app.section_document(&section, Some("common")),
+            Err(diagnostic)
+        );
+        assert!(app.searchable_text().is_none());
+        let screen = draw(&mut app);
+        assert!(screen.contains("project Section"));
+        assert!(!screen.contains("Outside"));
         assert!(!app.inspection.files.contains_key(&section));
         fs::write(&target, "# Outside, edited\n").unwrap();
         assert_eq!(
             current_watch_signature(&app.watch_input()),
             app.watcher.signature
         );
-        fs::remove_file(&section).unwrap();
-        fs::write(&section, "# Common\n").unwrap();
+
+        app.open(View::Info {
+            kind: DiagnosticKind::Global,
+            title: "Global Instructions unavailable".into(),
+            text: String::new(),
+        });
+        app.reload_from_disk();
+        assert!(!app.inspection.files.contains_key(&section));
+        app.back();
+        assert!(app.searchable_text().is_none());
+
+        fs::write(&staged, "# Restored Section\n").unwrap();
+        fs::rename(&staged, &section).unwrap();
         assert_ne!(
             current_watch_signature(&app.watch_input()),
             app.watcher.signature
         );
         app.reload_from_disk();
         assert!(app.project_error.is_none());
+        assert_eq!(
+            app.searchable_text().as_deref(),
+            Some("# Restored Section\n")
+        );
     }
 
     #[cfg(unix)]
@@ -1276,23 +1295,13 @@ mod tests {
 
     #[test]
     fn context_changes_keep_pending_edits_to_known_files() {
-        let home = TempDir::new().unwrap();
-        let directory = TempDir::new().unwrap();
-        common_project(directory.path());
-        let mut app = App::new_at(
-            Paths::for_home(home.path()),
-            None,
-            directory.path().to_owned(),
+        let (_home, repository, _paths, mut app) = fixture();
+        // An edit lands before the next check, then the runtime switch adds new Context files.
+        fs::write(
+            repository.path().join("AGENTS.md"),
+            "# Edited before the check\n",
         )
         .unwrap();
-        let section = app
-            .project
-            .as_ref()
-            .unwrap()
-            .section_path("common")
-            .unwrap();
-        // An edit lands before the next check, then the runtime switch adds new Context files.
-        fs::write(&section, "# Edited before the check\n").unwrap();
         app.select_runtime(
             ContextRuntime::ALL
                 .iter()

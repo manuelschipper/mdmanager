@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -165,7 +166,7 @@ pub(crate) struct Workspace {
     pub(crate) manifest_path: PathBuf,
     pub(crate) source: String,
     pub(crate) manifest: Manifest,
-    contents: IndexMap<String, String>,
+    contents: IndexMap<String, Arc<str>>,
 }
 
 impl Workspace {
@@ -220,8 +221,8 @@ impl Workspace {
             .find(|section| section.id == id)
     }
 
-    pub(crate) fn section_content(&self, id: &str) -> Option<&str> {
-        self.contents.get(id).map(String::as_str)
+    pub(crate) fn section_content(&self, id: &str) -> Option<&Arc<str>> {
+        self.contents.get(id)
     }
 
     pub(crate) fn section_path(&self, id: &str) -> Option<PathBuf> {
@@ -240,7 +241,7 @@ impl Workspace {
             .map(|section| {
                 self.contents
                     .get(section)
-                    .map(String::as_str)
+                    .map(AsRef::as_ref)
                     .ok_or_else(|| format!("section {section} has no loaded content"))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -326,6 +327,7 @@ fn find_manifest(start: &Path) -> Result<Option<PathBuf>, String> {
 /// A Section entry the discovered manifest declares.
 pub(crate) struct DeclaredSection {
     pub(crate) path: PathBuf,
+    pub(crate) resolved: Option<PathBuf>,
     /// The entry resolves outside `.mdmanager/`, where the Project loader refuses to read it.
     pub(crate) outside: bool,
 }
@@ -349,14 +351,20 @@ pub(crate) fn declared_sections(start: &Path) -> Vec<DeclaredSection> {
     manifest
         .sections
         .iter()
-        .map(|section| {
+        .filter_map(|section| {
+            validate_relative_path("project Section", &section.path).ok()?;
             let path = mdmanager.join(&section.path);
-            let outside = fs::canonicalize(&path).is_ok_and(|resolved| {
+            let resolved = fs::canonicalize(&path).ok();
+            let outside = resolved.as_ref().is_some_and(|resolved| {
                 boundary
                     .as_ref()
                     .is_none_or(|boundary| !resolved.starts_with(boundary))
             });
-            DeclaredSection { path, outside }
+            Some(DeclaredSection {
+                path,
+                resolved,
+                outside,
+            })
         })
         .collect()
 }
@@ -556,7 +564,7 @@ fn section_boundary(root: &Path) -> Result<PathBuf, String> {
         .join(".mdmanager"))
 }
 
-fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, String>, String> {
+fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, Arc<str>>, String> {
     let boundary = section_boundary(root)?;
     let mut contents = IndexMap::new();
     for section in &manifest.sections {
@@ -575,7 +583,7 @@ fn read_sections(root: &Path, manifest: &Manifest) -> Result<IndexMap<String, St
         if content.is_empty() {
             return Err(format!("project Section {} is empty", path.display()));
         }
-        contents.insert(section.id.clone(), content);
+        contents.insert(section.id.clone(), content.into());
     }
     Ok(contents)
 }
