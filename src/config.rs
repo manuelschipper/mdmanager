@@ -121,6 +121,32 @@ pub(crate) struct GlobalConfig {
 
 impl GlobalConfig {
     pub(crate) fn load(paths: &Paths) -> Result<Self, String> {
+        let (source, manifest) = Self::load_manifest(paths)?;
+        let contents = read_sections(&manifest, paths)?;
+
+        Ok(Self {
+            paths: paths.clone(),
+            source,
+            manifest,
+            contents,
+        })
+    }
+
+    /// The manifest can declare a Section even while that Section is missing or unreadable.
+    pub(crate) fn declared_section_paths(paths: &Paths) -> Vec<PathBuf> {
+        let Ok((_, manifest)) = Self::load_manifest(paths) else {
+            return Vec::new();
+        };
+        paths.config.parent().map_or_else(Vec::new, |root| {
+            manifest
+                .sections
+                .iter()
+                .map(|section| root.join(&section.path))
+                .collect()
+        })
+    }
+
+    fn load_manifest(paths: &Paths) -> Result<(String, Manifest), String> {
         let source = match fs::read_to_string(&paths.config) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -137,14 +163,7 @@ impl GlobalConfig {
             .map_err(|error| format!("invalid {}: {error}", paths.config.display()))?;
         validate_manifest(&manifest, paths)?;
 
-        let contents = read_sections(&manifest, paths)?;
-
-        Ok(Self {
-            paths: paths.clone(),
-            source,
-            manifest,
-            contents,
-        })
+        Ok((source, manifest))
     }
 
     pub(crate) fn theme(&self) -> &str {

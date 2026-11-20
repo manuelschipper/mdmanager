@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **TUI watches relevant inputs** — Unrelated files in the shared mdmanager directory and
+  Codex fallbacks outside its resolved project chain no longer trigger reloads. Quiet checks
+  reuse unchanged worktree directory listings, and Claude subfolder scans reuse the refresh's
+  Git topology.
 - **Responsive TUI during file churn** — Watch checks and refreshes run off the input thread, so
   keys and drawing no longer stall while files change. Creating, editing or deleting files no
   instruction discovery reads, such as build logs, caches or editor swap files, no longer
