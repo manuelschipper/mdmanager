@@ -277,7 +277,8 @@ impl App {
                 &baseline,
             )
         });
-        let context = ContextUi::new(paths.clone(), inspection.context.clone());
+        let mut context = ContextUi::new(paths.clone(), inspection.context.clone());
+        context.start_scan(&topology);
         let view = global_error
             .as_ref()
             .map_or(View::Home, |error| View::Info {
@@ -535,12 +536,8 @@ impl App {
         self.global_active_profile = global_active_profile;
         self.local_repository = local_repository;
         self.global_sources = global_sources;
-        if matches!(self.view, View::Context | View::Source) {
-            self.context
-                .reload_and_scan(inspection.context.clone(), self.watcher.topology());
-        } else {
-            self.context.reload(inspection.context.clone());
-        }
+        self.context
+            .reload_and_scan(inspection.context.clone(), self.watcher.topology());
         self.inspection = inspection;
         self.observe_open_documents();
         self.restore_context_selection(selected_context);
@@ -2675,6 +2672,7 @@ mod tests {
         let target = project.target_path("agents").unwrap();
         let reference = ManagedRef::Project("agents".into());
         let mut app = App::new_at(paths, None, repository.path().to_owned()).unwrap();
+        finish_context_scan(&mut app);
         let views = [
             View::Home,
             View::Managed(reference.clone()),

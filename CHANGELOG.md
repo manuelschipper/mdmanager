@@ -5,8 +5,9 @@
 - **Project Section links** — Open Project Sections show the loader's diagnostic when a link
   leaves `.mdmanager/`. Edits to an outside destination no longer reload the Section view,
   and restoring a contained file brings its contents back.
-- **Home subfolder scan status** — The initial Claude subfolder scan starts when you open
-  Context. Home shows **checking subfolders** only during a scan.
+- **Home subfolder scan status** — Claude subfolder scans run at launch and after disk reloads
+  to keep Home's nested-source count current. Home shows **checking subfolders** only during
+  a scan.
 - **TUI watches relevant inputs** — Unrelated files in the shared mdmanager directory and
   Codex fallbacks outside its resolved project chain no longer trigger reloads. Quiet checks
   reuse unchanged worktree directory listings, and Claude subfolder scans reuse the refresh's

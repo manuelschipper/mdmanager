@@ -619,15 +619,12 @@ mod tests {
     #[test]
     fn claude_nested_sources_expand_in_place() {
         let (_home, repository, _paths, mut app) = fixture();
-        assert!(matches!(
-            app.context.scan_status,
-            ContextScanStatus::NotStarted
-        ));
-        assert!(!draw(&mut app).contains("checking subfolders"));
+        assert!(app.context.is_scanning());
         fs::create_dir(repository.path().join("child")).unwrap();
         fs::write(repository.path().join("child/CLAUDE.md"), "# Child\n").unwrap();
         app.reload_from_disk();
-        assert!(!draw(&mut app).contains("checking subfolders"));
+        assert!(app.context.is_scanning());
+        assert!(draw(&mut app).contains("checking subfolders"));
         app.open(View::Context);
         assert!(
             !context_entries(&app.inspection.context, app.context_nested_expanded)
@@ -666,9 +663,19 @@ mod tests {
         assert!(stacked.contains("child/CLAUDE.md"));
         assert!(stacked.contains("About"));
 
+        app.back();
+        let home = draw(&mut app);
+        assert!(home.contains("1 load when relevant"));
+        assert!(!home.contains("checking subfolders"));
+
         fs::remove_file(repository.path().join("child/CLAUDE.md")).unwrap();
         app.reload_from_disk();
+        assert!(app.context.is_scanning());
         finish_context_scan(&mut app);
+        let home = draw(&mut app);
+        assert!(!home.contains("load when relevant"));
+        assert!(!home.contains("checking subfolders"));
+        app.open(View::Context);
         assert!(!context_entries(&app.inspection.context, true).contains(&ContextEntry::Nested));
     }
 
