@@ -98,7 +98,7 @@ impl DocumentLayout {
         self.rows.clear();
         self.row_starts = vec![0];
         for line in &self.lines {
-            self.rows.extend(wrap_line(line, width));
+            self.rows.extend(wrap_line(line, width, usize::MAX));
             self.row_starts.push(self.rows.len());
         }
     }
@@ -106,7 +106,7 @@ impl DocumentLayout {
 
 /// One wrapped row as `Paragraph` draws it. Graphemes keep the boundaries and
 /// widths the line was segmented with; zero-width ones draw nothing and are left out.
-struct Row {
+pub(super) struct Row {
     text: String,
     // (end byte in `text`, cell width) of each grapheme.
     graphemes: Vec<(u32, u16)>,
@@ -118,15 +118,19 @@ struct Row {
 }
 
 impl Row {
+    fn offset(&self, width: u16) -> u16 {
+        match self.alignment.unwrap_or(Alignment::Left) {
+            Alignment::Left => 0,
+            Alignment::Center => (width / 2).saturating_sub(self.width / 2),
+            Alignment::Right => width.saturating_sub(self.width),
+        }
+    }
+
     /// Draws the row the way `Paragraph` draws a wrapped row. An unwrapped
     /// `Paragraph` would truncate a last wide grapheme that overhangs the width,
     /// which wrapping lets through.
-    fn render(&self, area: Rect, y: u16, highlight: Option<Style>, buf: &mut Buffer) {
-        let mut x = match self.alignment.unwrap_or(Alignment::Left) {
-            Alignment::Left => 0,
-            Alignment::Center => (area.width / 2).saturating_sub(self.width / 2),
-            Alignment::Right => area.width.saturating_sub(self.width),
-        };
+    pub(super) fn render(&self, area: Rect, y: u16, highlight: Option<Style>, buf: &mut Buffer) {
+        let mut x = self.offset(area.width);
         let mut start = 0;
         let mut runs = self.styles.iter().peekable();
         let mut style = Style::default();
@@ -153,7 +157,7 @@ impl Row {
 /// it. This restates `WordWrapper::process_input` from ratatui-widgets 0.3, which
 /// ratatui keeps private, so rows can be cached and drawn without rewrapping their
 /// line; `wrapped_rows_match_paragraph_wrapping` holds the two together.
-fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Row> {
+pub(super) fn wrap_line(line: &Line<'_>, width: u16, max_rows: usize) -> Vec<Row> {
     let mut rows = Vec::new();
     // Items are (span index, grapheme, cell width), so rows keep their spans' styles.
     let mut row = Vec::new();
@@ -163,7 +167,7 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Row> {
     let mut whitespace = VecDeque::new();
     let mut whitespace_width = 0;
     let mut after_word = false;
-    for (index, span) in line.spans.iter().enumerate() {
+    'spans: for (index, span) in line.spans.iter().enumerate() {
         for grapheme in span.styled_graphemes(Style::default()) {
             let is_whitespace = grapheme.is_whitespace();
             let symbol_width = grapheme.symbol.cell_width();
@@ -185,6 +189,9 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Row> {
             {
                 let mut remaining = width.saturating_sub(row_width);
                 rows.push(mem::take(&mut row));
+                if rows.len() == max_rows {
+                    break 'spans;
+                }
                 row_width = 0;
                 while let Some(&(_, _, item_width)) = whitespace.front() {
                     if item_width > remaining {
@@ -209,10 +216,12 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Row> {
             after_word = !is_whitespace;
         }
     }
-    row.extend(whitespace);
-    row.append(&mut word);
-    if !row.is_empty() || rows.is_empty() {
-        rows.push(row);
+    if rows.len() < max_rows {
+        row.extend(whitespace);
+        row.append(&mut word);
+        if !row.is_empty() || rows.is_empty() {
+            rows.push(row);
+        }
     }
     rows.into_iter()
         .map(|items| {
@@ -423,22 +432,31 @@ fn render_lines(
     let highlight = Style::new()
         .fg(active_theme().background)
         .bg(active_theme().warning);
+    let prompt_area = (document.search.is_some() || document.line_prompt.is_some())
+        .then(|| prompt_area(frame.area()));
     let mut gutter = Vec::new();
     frame.render_widget(block, area);
-    for (y, row) in (content_area.y..).zip(first_row..end_row) {
-        while layout.row_starts[line + 1] <= row {
+    for (y, row_index) in (content_area.y..).zip(first_row..end_row) {
+        while layout.row_starts[line + 1] <= row_index {
             line += 1;
         }
         let highlighted = highlighted == Some(line + 1);
-        document.highlight_drawn |= highlighted;
-        layout.rows[row].render(
+        let row = &layout.rows[row_index];
+        if highlighted && let Some(&(_, last_width)) = row.graphemes.last() {
+            let x = content_area.x + row.offset(content_area.width);
+            let last = x + row.width - last_width;
+            document.highlight_drawn |= prompt_area.is_none_or(|area| {
+                !area.contains((x, y).into()) || !area.contains((last, y).into())
+            });
+        }
+        row.render(
             content_area,
             y,
             highlighted.then_some(highlight),
             frame.buffer_mut(),
         );
         if numbered {
-            let label = if row == layout.row_starts[line] {
+            let label = if row_index == layout.row_starts[line] {
                 format!("{:>number_width$} │ ", line + 1)
             } else {
                 format!("{:number_width$} │ ", "")
@@ -727,9 +745,13 @@ pub(super) fn relative_message(project_root: &Path, message: &str) -> String {
     )
 }
 
+fn prompt_area(screen: Rect) -> Rect {
+    bounded(screen, 68, 5)
+}
+
 pub(super) fn render_search(frame: &mut Frame<'_>, document: &DocumentState) {
     let query = &document.search.as_ref().unwrap().query;
-    let area = bounded(frame.area(), 68, 5);
+    let area = prompt_area(frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(format!("Search: {}_\nenter find · esc cancel", query)).block(
@@ -750,7 +772,7 @@ pub(super) fn render_search(frame: &mut Frame<'_>, document: &DocumentState) {
 
 pub(super) fn render_line_prompt(frame: &mut Frame<'_>, document: &DocumentState) {
     let input = &document.line_prompt.as_ref().unwrap().input;
-    let area = bounded(frame.area(), 68, 5);
+    let area = prompt_area(frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(format!("Go to line: {input}_\nenter go · esc cancel")).block(
@@ -816,9 +838,9 @@ pub(super) fn handle_line_prompt_key(
 
 #[cfg(test)]
 mod tests {
-
     use super::super::tests::{draw_at, fixture};
     use super::super::*;
+    use super::prompt_area;
     use std::fs;
 
     #[test]
@@ -915,6 +937,27 @@ mod tests {
         let expired = Instant::now() - Duration::from_secs(2);
         app.document.highlighted_line = Some((80, expired));
         assert!(app.document.expire_highlight());
+
+        // Scroll the highlighted text under the search box, leaving its gutter outside it.
+        let highlighted_y = screen
+            .lines()
+            .position(|row| row.contains("line 80"))
+            .unwrap();
+        let prompt_y = usize::from(prompt_area(Rect::new(0, 0, 80, 24)).y + 2);
+        app.document.scroll = (usize::from(app.document.scroll) + highlighted_y - prompt_y) as u16;
+        app.document.highlighted_line = Some((80, Instant::now()));
+        assert!(draw_at(&mut app, 80, 24).contains("line 80"));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        let covered = draw_at(&mut app, 80, 24);
+        assert!(covered.contains("Find in document"));
+        assert!(!covered.contains("line 80"));
+        app.document.highlighted_line = Some((80, expired));
+        assert!(!app.document.expire_highlight());
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
         for hide in [|app: &mut App| app.help = true, App::open_theme_picker] {
             app.document.highlighted_line = Some((80, Instant::now()));
             hide(&mut app);
@@ -954,7 +997,7 @@ mod tests {
                 let expected_rows = Paragraph::new(line.clone())
                     .wrap(Wrap { trim: false })
                     .line_count(width);
-                let rows = super::wrap_line(line, width);
+                let rows = super::wrap_line(line, width, usize::MAX);
                 assert_eq!(rows.len(), expected_rows, "{line} at {width}");
                 let area = Rect::new(0, 0, width, u16::try_from(rows.len()).unwrap());
                 let mut expected = Buffer::empty(area);
@@ -966,6 +1009,14 @@ mod tests {
                     row.render(area, y, None, &mut actual);
                 }
                 assert_eq!(actual, expected, "{line} at {width}");
+
+                let prefix = super::wrap_line(line, width, 2);
+                assert_eq!(prefix.len(), rows.len().min(2));
+                let mut clipped = Buffer::empty(Rect::new(0, 0, width, prefix.len() as u16));
+                for (y, row) in (0..).zip(&prefix) {
+                    row.render(area, y, None, &mut clipped);
+                }
+                assert_eq!(clipped.content, actual.content[..clipped.content.len()]);
 
                 // The uncached highlight patched every span and replaced the line style.
                 let highlight = Style::new().fg(Color::Black).bg(Color::Yellow);
