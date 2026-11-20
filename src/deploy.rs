@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 
 use crate::config::{
-    GlobalConfig, atomic_write, persist_atomic_create, prepare_atomic_create, sha256_hex,
+    GlobalConfig, Paths, atomic_write, persist_atomic_create, prepare_atomic_create, sha256_hex,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -452,8 +452,8 @@ fn apply_inner(
     Ok(reports)
 }
 
-fn state_path(global: &GlobalConfig) -> PathBuf {
-    global.paths.state_dir.join("state.toml")
+pub(crate) fn state_path(paths: &Paths) -> PathBuf {
+    paths.state_dir.join("state.toml")
 }
 
 // A stable inode beside state serializes all Global deployment writers.
@@ -486,7 +486,7 @@ fn ensure_state_still_invalid(global: &GlobalConfig) -> Result<(), String> {
 }
 
 fn load_state(global: &GlobalConfig) -> Result<State, String> {
-    let path = state_path(global);
+    let path = state_path(&global.paths);
     match fs::read_to_string(&path) {
         Ok(source) => {
             toml::from_str(&source).map_err(|error| format!("invalid {}: {error}", path.display()))
@@ -499,7 +499,7 @@ fn load_state(global: &GlobalConfig) -> Result<State, String> {
 fn save_state(global: &GlobalConfig, state: &State) -> Result<(), String> {
     let source = toml::to_string_pretty(state)
         .map_err(|error| format!("cannot serialize state: {error}"))?;
-    atomic_write(&state_path(global), source.as_bytes())
+    atomic_write(&state_path(&global.paths), source.as_bytes())
 }
 
 fn backup_target(global: &GlobalConfig, id: &str, path: &Path) -> Result<PathBuf, String> {
@@ -718,7 +718,7 @@ claude = ["common"]
         assert_eq!(fs::read(&target).unwrap(), b"manual sentinel");
         assert!(!slot.exists());
         assert!(!paths.data_dir.join("backups/claude.1.bak").exists());
-        assert!(!state_path(&global).exists());
+        assert!(!state_path(&global.paths).exists());
     }
 
     #[test]
@@ -850,10 +850,13 @@ claude = ["common"]
         // A plan reviewed before another writer's apply is stale once that apply commits.
         let reviewed = inspect(&global, "default").unwrap();
         apply(&global, "default", None, true, true).unwrap();
-        let state = fs::read_to_string(state_path(&global)).unwrap();
+        let state = fs::read_to_string(state_path(&global.paths)).unwrap();
         let error = apply_reviewed(&global, "default", &reviewed, true).unwrap_err();
         assert!(error.contains("changed after review"));
-        assert_eq!(fs::read_to_string(state_path(&global)).unwrap(), state);
+        assert_eq!(
+            fs::read_to_string(state_path(&global.paths)).unwrap(),
+            state
+        );
     }
 
     #[test]
@@ -964,9 +967,9 @@ claude = ["common"]
                 let expected_claude = global.render("default", "claude").unwrap().into_bytes();
                 let (path, skip) = match failure {
                     "later output" => (claude.clone(), 0),
-                    "first state" => (state_path(&global), 0),
-                    "later state" => (state_path(&global), 1),
-                    "activation" => (state_path(&global), 2),
+                    "first state" => (state_path(&global.paths), 0),
+                    "later state" => (state_path(&global.paths), 1),
+                    "activation" => (state_path(&global.paths), 2),
                     _ => unreachable!(),
                 };
                 let hook = crate::config::write_hook::install(&path, skip, || {
@@ -1014,7 +1017,7 @@ claude = ["common"]
                     toml::to_string(&durable).unwrap(),
                     toml::to_string(&expected_state).unwrap()
                 );
-                let durable_bytes = fs::read(state_path(&fresh)).ok();
+                let durable_bytes = fs::read(state_path(&fresh.paths)).ok();
                 let target_bytes = [fs::read(&pi).ok(), fs::read(&claude).ok()];
                 let retry = apply(&fresh, "default", None, false, true);
                 let needs_recovery =
@@ -1025,7 +1028,7 @@ claude = ["common"]
                     "{failure}, previous={previous_active}"
                 );
                 if needs_recovery {
-                    assert_eq!(fs::read(state_path(&fresh)).ok(), durable_bytes);
+                    assert_eq!(fs::read(state_path(&fresh.paths)).ok(), durable_bytes);
                     assert_eq!([fs::read(&pi).ok(), fs::read(&claude).ok()], target_bytes);
                     // A user edit after failure must also survive an ordinary retry.
                     let unowned = if failure == "first state" {
@@ -1115,7 +1118,7 @@ claude = ["common"]
                 .unwrap_err()
                 .contains("changed during repair")
         );
-        fs::write(state_path(&global), "invalid").unwrap();
+        fs::write(state_path(&global.paths), "invalid").unwrap();
         repair_state(&global, "work").unwrap();
         let state = load_state(&global).unwrap();
         assert_eq!(

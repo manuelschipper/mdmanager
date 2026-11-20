@@ -38,7 +38,9 @@ use self::overview::{
     OverviewInput, home_canvas_height, home_canvas_width, home_header_line, home_item_key,
     home_target_reference, render_home,
 };
-use self::reload::{Observations, RefreshRequest, ReloadWatcher, WatchInput, WatchSignature};
+use self::reload::{
+    DirectoryListings, Observations, RefreshRequest, ReloadWatcher, WatchInput, WatchSignature,
+};
 use super::context_ui;
 use super::{ACTIVE_THEME, activate_theme, active_theme, reset_theme};
 use std::env;
@@ -250,6 +252,7 @@ impl App {
             .or_else(|| render_error.map(|error| format!("{error}; keeping current render mode")));
         let mut topology = Topology::default();
         topology.revalidate(&directory);
+        let mut listings = DirectoryListings::default();
         let Observations {
             project,
             project_error,
@@ -262,7 +265,7 @@ impl App {
             inspection,
             signature,
         } = topology.scope(|| {
-            let baseline = WatchSignature::startup(&paths, &directory);
+            let baseline = WatchSignature::startup(&paths, &directory, &mut listings);
             Observations::discover(
                 &paths,
                 &directory,
@@ -274,7 +277,7 @@ impl App {
             )
         });
         let mut context = ContextUi::new(paths.clone(), inspection.context.clone());
-        context.start_scan();
+        context.start_scan(&topology);
         let view = global_error
             .as_ref()
             .map_or(View::Home, |error| View::Info {
@@ -311,7 +314,7 @@ impl App {
             theme_picker: None,
             message: ui_error.map(|error| (false, error)),
             message_expires_at: None,
-            watcher: ReloadWatcher::new(signature, topology),
+            watcher: ReloadWatcher::new(signature, topology, listings),
             intro_started: None,
             timer_drawn: false,
         })
@@ -362,7 +365,7 @@ impl App {
 
     fn open(&mut self, view: View) {
         if matches!(view, View::Context) {
-            self.context.start_scan();
+            self.context.start_scan(self.watcher.topology());
         }
         self.history.push((self.view.clone(), self.section_index));
         self.view = view;
@@ -508,7 +511,8 @@ impl App {
         self.local_repository = local_repository;
         self.global_sources = global_sources;
         if matches!(self.view, View::Context | View::Source) {
-            self.context.reload_and_scan(inspection.context.clone());
+            self.context
+                .reload_and_scan(inspection.context.clone(), self.watcher.topology());
         } else {
             self.context.reload(inspection.context.clone());
         }
@@ -731,9 +735,7 @@ impl App {
 
     fn select_runtime(&mut self, index: usize) {
         let (context, global) = (&mut self.context, self.global.as_ref());
-        self.watcher
-            .topology()
-            .scope(|| context.select_runtime(index, global));
+        context.select_runtime(index, global, self.watcher.topology());
         self.inspection.observe_context(self.context.audit.clone());
         // Only the known-files half of the signature depends on the runtime. A running check
         // of the previous runtime can no longer be accepted; a change it found is found again

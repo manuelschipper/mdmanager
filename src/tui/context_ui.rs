@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::GlobalConfig;
 use crate::context::{Audit, ClaudeScan, ContextRuntime, ContextSource, scan_claude_descendants};
+use crate::git_worktree::Topology;
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
@@ -51,15 +52,23 @@ impl ContextUi {
         self.audit.sources.get(self.source_index)
     }
 
-    pub(crate) fn select_runtime(&mut self, index: usize, global: Option<&GlobalConfig>) {
+    pub(crate) fn select_runtime(
+        &mut self,
+        index: usize,
+        global: Option<&GlobalConfig>,
+        topology: &mut Topology,
+    ) {
         self.runtime_index = index.min(ContextRuntime::ALL.len().saturating_sub(1));
         self.source_index = 0;
-        self.reload_and_scan(Audit::resolve(
-            ContextRuntime::ALL[self.runtime_index],
-            &self.audit.directory,
-            &self.paths,
-            global,
-        ));
+        let audit = topology.scope(|| {
+            Audit::resolve(
+                ContextRuntime::ALL[self.runtime_index],
+                &self.audit.directory,
+                &self.paths,
+                global,
+            )
+        });
+        self.reload_and_scan(audit, topology);
     }
 
     /// Accepts the selected runtime's freshly resolved audit.
@@ -87,12 +96,12 @@ impl ContextUi {
         };
     }
 
-    pub(crate) fn reload_and_scan(&mut self, audit: Audit) {
+    pub(crate) fn reload_and_scan(&mut self, audit: Audit, topology: &Topology) {
         self.reload(audit);
-        self.start_scan();
+        self.start_scan(topology);
     }
 
-    pub(crate) fn start_scan(&mut self) {
+    pub(crate) fn start_scan(&mut self, topology: &Topology) {
         if self.audit.runtime != ContextRuntime::Claude
             || !matches!(self.scan_status, ContextScanStatus::NotStarted)
         {
@@ -107,8 +116,10 @@ impl ContextUi {
             .map(|source| source.path.clone())
             .collect::<HashSet<_>>();
         let (sender, receiver) = mpsc::channel();
+        let mut topology = topology.clone();
         thread::spawn(move || {
-            let _ = sender.send(scan_claude_descendants(&directory, &paths, seen));
+            let scan = topology.scope(|| scan_claude_descendants(&directory, &paths, seen));
+            let _ = sender.send(scan);
         });
         self.scan_receiver = Some(receiver);
         self.scan_started_at = Some(Instant::now());
@@ -191,6 +202,7 @@ mod tests {
                         .position(|runtime| *runtime == ContextRuntime::Pi)
                         .unwrap(),
                     None,
+                    &mut Topology::default(),
                 );
             } else {
                 context.reload(context.audit.clone());

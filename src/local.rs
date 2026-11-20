@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{GlobalConfig, Paths, atomic_create, atomic_write, sha256_hex};
 use crate::context::{PI_INSTRUCTION_CANDIDATES, claude_filename_matches};
 use crate::deploy::unified_diff;
-use crate::git_worktree::{command, git};
+use crate::git_worktree::command;
 
 /// Local-disable runtime: a runtime with a verified local disable mechanism.
 /// Unsupported: Codex local disable; `parse()` rejects `codex` with the reason.
@@ -452,14 +452,7 @@ impl LocalRepository {
                 error
             }
         })?;
-        let common_output = git(&root, &["rev-parse", "--git-common-dir"])?;
-        let common_raw = PathBuf::from(common_output.trim());
-        let common_git_dir = fs::canonicalize(if common_raw.is_absolute() {
-            common_raw
-        } else {
-            root.join(common_raw)
-        })
-        .map_err(|error| format!("cannot resolve common Git directory: {error}"))?;
+        let common_git_dir = crate::git_worktree::common_git_dir(&root)?;
         let key = sha256_hex(common_git_dir.to_string_lossy().as_bytes());
         let worktree_key = sha256_hex(root.to_string_lossy().as_bytes());
         Ok(Self {
@@ -1279,7 +1272,7 @@ impl LocalRepository {
         })
     }
 
-    fn local_manifest_path(&self) -> PathBuf {
+    pub(crate) fn local_manifest_path(&self) -> PathBuf {
         self.data_dir.join("local.toml")
     }
 
@@ -1579,6 +1572,7 @@ fn git_status(directory: &Path, arguments: &[&str]) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git_worktree::git;
     use tempfile::TempDir;
 
     fn repository() -> (TempDir, TempDir, LocalRepository) {

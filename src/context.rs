@@ -1054,15 +1054,7 @@ fn resolve_codex(directory: &Path, paths: &Paths) -> Audit {
         directory,
     );
 
-    let root = directory
-        .ancestors()
-        .find(|ancestor| {
-            settings
-                .root_markers
-                .iter()
-                .any(|marker| ancestor.join(marker).exists())
-        })
-        .unwrap_or(directory);
+    let root = settings.project_root(directory);
     let untrusted = codex_untrusted_project(&settings, directory);
     let mut remaining = settings.max_bytes;
     for ancestor in ancestors_from(root, directory) {
@@ -1667,11 +1659,24 @@ fn resolve_pi(directory: &Path, paths: &Paths) -> Audit {
 
 #[derive(Debug)]
 pub(crate) struct CodexSettings {
-    pub(crate) root_markers: Vec<String>,
+    root_markers: Vec<String>,
     pub(crate) fallback_names: Vec<String>,
     max_bytes: usize,
     warning: Option<String>,
     projects: std::collections::BTreeMap<String, CodexProjectSettings>,
+}
+
+impl CodexSettings {
+    pub(crate) fn project_root<'a>(&self, directory: &'a Path) -> &'a Path {
+        directory
+            .ancestors()
+            .find(|ancestor| {
+                self.root_markers
+                    .iter()
+                    .any(|marker| ancestor.join(marker).exists())
+            })
+            .unwrap_or(directory)
+    }
 }
 
 #[derive(Deserialize)]

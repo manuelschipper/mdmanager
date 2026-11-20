@@ -121,6 +121,14 @@ pub(crate) fn worktree_root(start: &Path) -> Result<PathBuf, String> {
     remembered("worktree root", start, || discover_worktree_root(start))
 }
 
+pub(crate) fn common_git_dir(root: &Path) -> Result<PathBuf, String> {
+    remembered("common Git directory", root, || {
+        let output = git(root, &["rev-parse", "--git-common-dir"])?;
+        fs::canonicalize(root.join(output.trim()))
+            .map_err(|error| format!("cannot resolve common Git directory: {error}"))
+    })
+}
+
 fn discover_worktree_root(start: &Path) -> Result<PathBuf, String> {
     let output = command()
         .args(["rev-parse", "--show-toplevel"])
