@@ -339,12 +339,6 @@ aside a:not([aria-current=page]) {
 .demo-tabs button:hover .title,.demo-tabs button[aria-selected=true] .title {
   color:var(--text)
 }
-.demo-tabs .text {
-  grid-column:2;
-  color:var(--muted);
-  font-size:12px;
-  line-height:1.5
-}
 .demo-clip video {
   display:block;
   width:100%;
@@ -361,8 +355,12 @@ aside a:not([aria-current=page]) {
 .demo-panel h1 {
   font-size:20px;
   font-weight:700;
-  margin:0 0 17px;
+  margin:0 0 2px;
   min-height:27px
+}
+.demo-text {
+  margin:0 0 15px;
+  color:var(--muted)
 }
 .back {
   font-size:12px;
@@ -381,6 +379,11 @@ aside a:not([aria-current=page]) {
 @media(max-width:650px) {
   body {
     padding:14px 10px
+  }
+  /* Scene descriptions wrap to one or two lines here; reserving two keeps the clip from
+     jumping as the demo moves between scenes. */
+  .demo-text {
+    min-height:2lh
   }
   .bar {
     align-items:flex-start;

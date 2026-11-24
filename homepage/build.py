@@ -53,9 +53,8 @@ def clip_sources(scene_id):
 tabs = "\n".join(
     f'''    <button type="button" role="tab" id="demo-tab-{scene["id"]}" aria-controls="demo-clip"
       aria-selected="{str(index == 0).lower()}" tabindex="{0 if index == 0 else -1}"
-      {clip_sources(scene["id"])}>
+      data-text="{escape(scene["text"])}" {clip_sources(scene["id"])}>
       <span class="n">{index + 1:02d}</span><span class="title">{escape(scene["title"])}</span>
-      <span class="text">{escape(scene["text"])}</span>
     </button>'''
     for index, scene in enumerate(scenes)
 )
@@ -94,7 +93,7 @@ demo = f'''<section class="demo" aria-label="Demo">
     resumeAt = video.dataset.scene === tab.id ? video.currentTime : 0;
     video.dataset.scene = tab.id;
     video.setAttribute('src', wanted);
-    video.setAttribute('aria-label', tab.querySelector('.text').textContent);
+    video.setAttribute('aria-label', tab.dataset.text);
     video.play().catch(() => {{}});
   }}
   // The tablist has one Tab stop: the tab with tabindex 0.
@@ -108,6 +107,10 @@ demo = f'''<section class="demo" aria-label="Demo">
     }}
     rove(tab);
     panel.setAttribute('aria-labelledby', tab.id);
+    // The page heading names the selected scene. It is not a live region, so auto-advance
+    // does not make a screen reader announce every scene.
+    document.getElementById('demo-title').textContent = tab.querySelector('.title').textContent;
+    document.getElementById('demo-text').textContent = tab.dataset.text;
     show();
   }}
   function stop() {{
@@ -328,7 +331,8 @@ paths.append("/news/")
 
 content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
-  <h1>The workflow, scene by scene</h1>
+  <h1 id="demo-title">{escape(scenes[0]["title"])}</h1>
+  <p class="demo-text" id="demo-text">{escape(scenes[0]["text"])}</p>
   {demo}
 </main>'''
 write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context and Profiles, review a shared Section change across runtimes, and apply it with mdmanager.", "/demo/", "", content))
