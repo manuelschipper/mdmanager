@@ -6,7 +6,7 @@ at `/docs/` and `CHANGELOG.md` at `/news/`; edit those sources to change their
 content. Unreleased changelog entries stay out of the public site.
 
 The build copies the bundled Space Mono fonts from `assets/` and reuses the
-repository's hero artwork and workflow recording. It reads the version from
+repository's hero artwork and demo clips. It reads the version from
 `Cargo.toml`.
 
 ## Build and preview
@@ -23,8 +23,8 @@ python3 -m http.server 8090 --bind 127.0.0.1 --directory homepage/dist
 Open <http://127.0.0.1:8090>. Serve the generated `homepage/dist/` directory at the
 root of `mdmanager.ai`, with directory indexes and `404.html` as the error page.
 Rebuild after changing docs, the changelog, or site sources. Generated output is
-ignored by Git. The site needs no application server; only the theme toggle and
-copy button use JavaScript. Clipboard access requires HTTPS or localhost.
+ignored by Git. The site needs no application server; only the theme toggle, copy
+button and demo tabs use JavaScript. Clipboard access requires HTTPS or localhost.
 
 ## Publish
 
@@ -84,24 +84,28 @@ tag. Wait for the Release workflow to succeed before deploying the website.
 
 ## Re-record the demo
 
-`demo/` records the workflow demo from a clean Docker installation with VHS. The
-fixture is a fictional Personal library with three machine Profiles over Claude, Codex
-and Pi, and a `harbor` Project as Context backdrop. `scenes.sh` drives the TUI in
-tmux and logs when each caption starts; `agent.sh` plays the coding-agent pane with a
-scripted transcript around real CLI commands.
+`demo/` records the demo from a clean Docker installation with VHS. The fixture is a
+fictional Personal library with three machine Profiles over Claude, Codex, Cursor and
+Pi, and a `harbor` Project as Context backdrop. `scenes.sh` drives the TUI in tmux
+through five scenes and logs where each starts and ends, with its title and caption;
+`agent.sh` plays the coding-agent pane with a scripted transcript around real CLI
+commands.
 
 ```sh
 homepage/demo/record.sh
-cp homepage/demo/out/workflow-gruvbox-dark.mp4 assets/workflow.mp4
-cp homepage/demo/out/workflow-gruvbox-light.mp4 assets/workflow-light.mp4
-cp homepage/demo/out/workflow-gruvbox-dark.gif assets/workflow.gif
 ```
 
-Both themes come from the same tape. The site plays the video matching its theme
-with the captions beside it as page text, from `demo/captions.json`, which
-`record.sh` refreshes. The README GIF carries the same captions burned in below the
-terminal and stays dark like the rest of the README. Building the image compiles mdmanager from the checkout, so the recording
-always matches the source it ships with.
+Both themes come from the same tape. `record.sh` cuts each recording at the logged
+scene boundaries and publishes `assets/demo/SCENE.mp4` and `SCENE-light.mp4`, plus an
+AV1 `.webm` of each clip where it is smaller than the MP4 at no lower SSIM, the
+README's `assets/review.gif` with its caption burned in below the terminal, and
+`demo/scenes.json`, from which the build renders one tab per scene with its title and
+caption as page text. The site plays the selected clip matching its theme, as WebM
+when the browser decodes AV1 and that clip has one; the README
+GIF stays dark like the rest of the README. Building the image compiles mdmanager from
+the checkout, so the recording always matches the source it ships with. Watch each clip
+before committing: a scene's first frame must be readable, and its last frame should
+loop back to it without a half-drawn screen.
 
 ## Refresh the screenshot
 

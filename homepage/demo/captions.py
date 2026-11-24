@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Turn the scene driver's caption log into ASS subtitles and website JSON."""
+"""Turn the scene driver's log into clip cut points, website scenes, and the GIF caption."""
 import json
 import sys
 
-log, offset, colour, ass_path, json_path = sys.argv[1:]
-offset = float(offset)
-rows = []
+log, offset, length, duration, colour, gif_scene, ass_path, cuts_path, json_path = sys.argv[1:]
+offset, rate = float(offset), float(duration) / float(length)
+# A clip ends this long before its logged cut, so the keys that follow never reach it
+# even when the video time estimate is slightly late.
+margin = 0.3
+scenes = []
 for line in open(log):
-    seconds, text = line.rstrip("\n").split("\t", 1)
-    rows.append((max(0.0, float(seconds) - offset), text))
-end_of_video = rows[-1][0] + 3600
+    seconds, event, *fields = line.rstrip("\n").split("\t")
+    seconds = max(0.0, (float(seconds) - offset) * rate)
+    if event == "scene":
+        scene_id, title, text = fields
+        scenes.append({"id": scene_id, "title": title, "text": text, "start": seconds})
+    else:
+        scenes[-1]["end"] = seconds - margin
 
+with open(cuts_path, "w") as cuts:
+    for scene in scenes:
+        cuts.write(f"{scene['id']}\t{scene['start']:.2f}\t{scene['end']:.2f}\n")
 
-def stamp(seconds):
-    return f"{int(seconds // 3600)}:{int(seconds % 3600 // 60):02d}:{seconds % 60:05.2f}"
-
-
-# ASS colours are &HBBGGRR; the caption sits centred in the 72px band padded below the video.
+# ASS colours are &HBBGGRR; the caption sits centred in the 72px band padded below the clip,
+# shown for the whole clip.
+gif = next(scene for scene in scenes if scene["id"] == gif_scene)
 rr, gg, bb = colour[1:3], colour[3:5], colour[5:7]
 with open(ass_path, "w") as ass:
     ass.write(
@@ -25,8 +33,8 @@ with open(ass_path, "w") as ass:
         "Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,Space Mono,26,&H00{bb}{gg}{rr},&H00000000,&H00000000,0,0,1,0,0,2,20,20,23,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Text\n"
+        f"Dialogue: 0,0:00:00.00,9:00:00.00,Default,{gif['text']}\n"
     )
-    for (start, text), (end, _) in zip(rows, rows[1:] + [(end_of_video, "")]):
-        ass.write(f"Dialogue: 0,{stamp(start)},{stamp(end)},Default,{text}\n")
 
-json.dump([{"start": round(start, 1), "text": text} for start, text in rows], open(json_path, "w"), indent=1)
+json.dump([{key: scene[key] for key in ("id", "title", "text")} for scene in scenes],
+          open(json_path, "w"), indent=1)

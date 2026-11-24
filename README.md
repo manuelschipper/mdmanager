@@ -129,7 +129,7 @@ Open `mdmanager` in your terminal to check the result. Browse the sources and re
 while the agent works; the TUI reloads automatically as files change.
 
 <p align="center">
-  <img src="assets/workflow.gif" alt="Open mdmanager, browse Context, the Library and two Profiles, watch a coding agent edit a Section shared by Claude, Codex and Pi, review the Global difference, then apply the Profile" width="960">
+  <img src="assets/review.gif" alt="After one Section edit, Home shows Global Claude, Codex, Cursor and Pi out of sync, and mdmanager opens the Cursor difference" width="960">
 </p>
 
 When you're happy with the changes, ask the agent to apply them. You can also authorize it to apply

@@ -26,9 +26,12 @@ tmux set -g pane-active-border-style "fg=$border"
 tmux set -g window-style "bg=$bg"
 tmux set -g escape-time 0
 
-# Captions are rendered later, outside the terminal: burned under the README GIF
-# and shown as page text beside the website video. Log when each one starts.
-say() { printf '%s\t%s\n' "$(echo "$(date +%s.%N) - $started" | bc)" "$1" >> "$captions"; }
+# Each scene becomes one website clip and carries one caption: `scene` logs where it
+# starts, on a settled frame, and `cut` where it ends, before the keys that lead on.
+# record.sh cuts the clips there; the README GIF burns one scene's caption in below it.
+now() { echo "$(date +%s.%N) - $started" | bc; }
+scene() { printf '%s\tscene\t%s\t%s\t%s\n' "$(now)" "$1" "$2" "$3" >> "$captions"; }
+cut() { printf '%s\tcut\n' "$(now)" >> "$captions"; }
 keys() { tmux send-keys -t demo:0.right "$@"; }
 type_cmd() {
   local text=$1
@@ -41,49 +44,46 @@ type_cmd() {
 (
   sleep 1.2
   type_cmd "mdmanager"; sleep 0.4; keys Enter
-  sleep 3.2                                  # splash
-  say "Home: Context, Project, Local and Global, plus your Library."
-  sleep 4.0
+  sleep 3.4                                  # splash
 
-  keys Enter; sleep 0.6
-  say "Context shows every file your agent loads, in order, and why."
-  sleep 2.6
+  scene context "Context" "Every file your agent loads, in order, and why."
+  sleep 2.2
+  keys Enter; sleep 3.0
   keys Down; sleep 2.4
+  cut
 
   keys Escape; sleep 0.4
-  for _ in 1 2 3 4 5 6 7 8; do keys Down; sleep 0.12; done
-  keys Enter; sleep 0.5
-  say "The Library: your Profiles and the Sections they share."
-  sleep 4.0
-  keys Enter; sleep 0.5
-  say "Profile laptop: each runtime gets the Sections it needs."
-  sleep 4.2
-  keys Escape; sleep 0.3; keys Down; sleep 0.2; keys Down; sleep 0.3; keys Enter; sleep 0.5
-  say "Profile hosted: same library, another machine, another mix."
-  sleep 4.2
-  keys Escape; sleep 0.3; keys Down; sleep 0.3; keys Enter; sleep 1.2
+  for _ in 1 2 3 4 5 6 7 8 9; do keys Down; sleep 0.12; done
+  keys Enter; sleep 0.6
+  scene library "Library and Profiles" "One library of Sections, a different mix for each machine."
+  sleep 2.4
+  keys Enter; sleep 3.0
+  keys Escape; sleep 0.3; keys Down; sleep 0.2; keys Down; sleep 0.3; keys Enter; sleep 3.0
+  cut
 
-  say "Your agent edits Agent Common. The TUI reloads as it works."
+  keys Escape; sleep 0.3; keys Down; sleep 0.3; keys Enter; sleep 1.0
+  # Start once the agent pane is open, so the loop never jumps between layouts.
   tmux split-window -hb -l 42 -t demo:0 "bash /demo/agent.sh"
   tmux select-pane -t demo:0.right
+  sleep 0.4
+  scene reload "Live reload" "Your agent edits a shared Section; the TUI reloads as it works."
   until [ -e "$flags/edited" ]; do sleep 0.2; done
-  sleep 3.4
+  sleep 2.6
+  cut
 
-  keys Escape; sleep 0.3; keys Escape; sleep 0.5
-  say "One edit: Claude, Codex and Pi are all out of sync."
-  sleep 4.0
-  keys Up; sleep 0.2; keys Up; sleep 0.2; keys Up; sleep 0.3; keys d; sleep 0.5
-  say "Review the Global difference before anything is applied."
-  sleep 3.6
+  keys Escape; sleep 0.3; keys Escape; sleep 0.6
+  scene review "Review the difference" "One edit leaves Claude, Codex, Cursor and Pi out of sync."
+  sleep 2.6
+  keys Up; sleep 0.2; keys Up; sleep 0.3; keys d; sleep 3.4
+  cut
 
+  scene apply "Apply" "Authorize Apply and every Global target is current again."
   touch "$flags/approve"
   until [ -e "$flags/applied" ]; do sleep 0.2; done
   sleep 0.6
   tmux capture-pane -t demo:0.right -p | grep -q 'LIBRARY' || { keys Escape; sleep 0.4; }
-  say "Authorize Apply. All three targets are current again."
-  sleep 3.6
-  say "Keep the library in dotfiles. Each machine applies its Profile."
-  sleep 4
+  sleep 3.4
+  cut
 ) &
 
 exec tmux attach -t demo

@@ -1,0 +1,27 @@
+[
+ {
+  "id": "context",
+  "title": "Context",
+  "text": "Every file your agent loads, in order, and why."
+ },
+ {
+  "id": "library",
+  "title": "Library and Profiles",
+  "text": "One library of Sections, a different mix for each machine."
+ },
+ {
+  "id": "reload",
+  "title": "Live reload",
+  "text": "Your agent edits a shared Section; the TUI reloads as it works."
+ },
+ {
+  "id": "review",
+  "title": "Review the difference",
+  "text": "One edit leaves Claude, Codex, Cursor and Pi out of sync."
+ },
+ {
+  "id": "apply",
+  "title": "Apply",
+  "text": "Authorize Apply and every Global target is current again."
+ }
+]

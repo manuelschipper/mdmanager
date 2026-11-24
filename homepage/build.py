@@ -35,6 +35,130 @@ mark = (
     f'role="img" aria-label="MD">{mark_paths}</svg>'
 )
 
+# /demo/ is one tabbed player: one tab per recorded scene, and one video that loads only the
+# selected clip in the site's current theme.
+scenes = json.loads((HERE / "demo/scenes.json").read_text())
+
+
+def clip_sources(scene_id):
+    # Every clip has an MP4; record.sh adds an AV1 WebM only where it is smaller at equal quality.
+    sources = []
+    for theme, clip in [("dark", scene_id), ("light", f"{scene_id}-light")]:
+        sources.append(f'data-{theme}="/assets/demo/{clip}.mp4"')
+        if (ROOT / f"assets/demo/{clip}.webm").exists():
+            sources.append(f'data-{theme}-webm="/assets/demo/{clip}.webm"')
+    return " ".join(sources)
+
+
+tabs = "\n".join(
+    f'''    <button type="button" role="tab" id="demo-tab-{scene["id"]}" aria-controls="demo-clip"
+      aria-selected="{str(index == 0).lower()}" tabindex="{0 if index == 0 else -1}"
+      {clip_sources(scene["id"])}>
+      <span class="n">{index + 1:02d}</span><span class="title">{escape(scene["title"])}</span>
+      <span class="text">{escape(scene["text"])}</span>
+    </button>'''
+    for index, scene in enumerate(scenes)
+)
+demo = f'''<section class="demo" aria-label="Demo">
+  <div class="demo-tabs" role="tablist" aria-label="Demo scenes">
+{tabs}
+  </div>
+  <div class="demo-clip" id="demo-clip" role="tabpanel" aria-labelledby="demo-tab-{scenes[0]["id"]}">
+    <video autoplay muted loop playsinline controls></video>
+  </div>
+</section>
+<script>
+{{
+  const tabs = [...document.querySelectorAll('.demo [role=tab]')];
+  const panel = document.getElementById('demo-clip');
+  const video = panel.querySelector('video');
+  const av1 = video.canPlayType('video/webm; codecs="av01.0.04M.08"') !== '';
+  // The demo plays through its scenes until the visitor picks one, which then loops.
+  // Reduced motion, at load or turned on later, keeps the current scene looping without a
+  // progress line.
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  let auto = !reduceMotion.matches;
+  video.loop = !auto;
+  // A theme switch resumes the scene where it was; a new scene starts from its first frame.
+  // The other theme's clip can be slightly shorter, so the resume point stops short of its
+  // end: seeking past it would end the clip and, during auto-advance, skip the scene.
+  let resumeAt = 0;
+  video.addEventListener('loadedmetadata', () => {{
+    if (resumeAt) video.currentTime = Math.min(resumeAt, video.duration - 0.25);
+  }});
+  function show() {{
+    const tab = tabs.find(candidate => candidate.getAttribute('aria-selected') === 'true');
+    const theme = document.documentElement.classList.contains('light') ? 'light' : 'dark';
+    const wanted = (av1 && tab.dataset[`${{theme}}Webm`]) || tab.dataset[theme];
+    if (video.getAttribute('src') === wanted) return;
+    resumeAt = video.dataset.scene === tab.id ? video.currentTime : 0;
+    video.dataset.scene = tab.id;
+    video.setAttribute('src', wanted);
+    video.setAttribute('aria-label', tab.querySelector('.text').textContent);
+    video.play().catch(() => {{}});
+  }}
+  // The tablist has one Tab stop: the tab with tabindex 0.
+  function rove(tab) {{
+    for (const candidate of tabs) candidate.tabIndex = candidate === tab ? 0 : -1;
+  }}
+  function select(tab) {{
+    for (const candidate of tabs) {{
+      candidate.setAttribute('aria-selected', candidate === tab);
+      candidate.style.removeProperty('--progress');
+    }}
+    rove(tab);
+    panel.setAttribute('aria-labelledby', tab.id);
+    show();
+  }}
+  function stop() {{
+    auto = false;
+    video.loop = true;
+    for (const candidate of tabs) candidate.style.removeProperty('--progress');
+  }}
+  function takeOver(tab) {{
+    stop();
+    select(tab);
+  }}
+  function progress() {{
+    if (!auto) return;
+    const tab = tabs.find(candidate => candidate.getAttribute('aria-selected') === 'true');
+    if (video.duration) tab.style.setProperty('--progress', video.currentTime / video.duration);
+    requestAnimationFrame(progress);
+  }}
+  video.addEventListener('ended', () => {{
+    if (!auto) return;
+    const index = tabs.findIndex(candidate => candidate.getAttribute('aria-selected') === 'true');
+    // Selecting without focus() leaves keyboard focus where the visitor put it, and a
+    // focused tab keeps the Tab stop so the next Tab leaves the tablist.
+    select(tabs[(index + 1) % tabs.length]);
+    if (tabs.includes(document.activeElement)) rove(document.activeElement);
+  }});
+  // Once focus leaves the tablist, the Tab stop returns to the selected tab.
+  document.querySelector('.demo [role=tablist]').addEventListener('focusout', event => {{
+    if (tabs.includes(event.relatedTarget)) return;
+    rove(tabs.find(candidate => candidate.getAttribute('aria-selected') === 'true'));
+  }});
+  reduceMotion.addEventListener('change', () => {{
+    if (reduceMotion.matches) stop();
+  }});
+  tabs.forEach((tab, index) => {{
+    tab.addEventListener('click', () => takeOver(tab));
+    tab.addEventListener('keydown', event => {{
+      const step = {{ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1}}[event.key];
+      if (!step) return;
+      event.preventDefault();
+      const next = tabs[(index + step + tabs.length) % tabs.length];
+      next.focus();
+      takeOver(next);
+    }});
+  }});
+  window.addEventListener('themechange', show);
+  show();
+  progress();
+}}
+</script>'''
+
+
 def topic(stem):
     # docs/claude-code.md is the `claude` topic: a file named claude.md would load as CLAUDE.md
     # on case-insensitive filesystems.
@@ -162,8 +286,8 @@ shutil.copytree(HERE / "assets", OUT / "assets")
 shutil.copyfile(HERE / "install.sh", OUT / "install")
 (OUT / "_headers").write_text("/install\n  Content-Type: text/plain; charset=utf-8\n  Cache-Control: no-cache\n  X-Content-Type-Options: nosniff\n")
 (OUT / "_routes.json").write_text(json.dumps({"version": 1, "include": ["/install"], "exclude": []}))
-for filename in ["workflow.mp4", "workflow-light.mp4", "context-rendered.png"]:
-    shutil.copyfile(ROOT / "assets" / filename, OUT / "assets" / filename)
+shutil.copyfile(ROOT / "assets/context-rendered.png", OUT / "assets/context-rendered.png")
+shutil.copytree(ROOT / "assets/demo", OUT / "assets/demo")
 (OUT / "assets/favicon.svg").write_text(
     mark.replace('class="mark"', 'color="#d79921"').replace('44 16 282 141', '34 -64 302 302')
 )
@@ -202,42 +326,11 @@ content = f'''<main id="content" class="release"><div class="document">
 write_page("/news/", page("Changelog · mdmanager.ai", "mdmanager releases and changes.", "/news/", "/news/", content))
 paths.append("/news/")
 
-DEMO_ALT = (
-    "Open mdmanager, browse Context, the Library and two Profiles, watch a coding agent edit a "
-    "Section shared by Claude, Codex and Pi, review the Global difference, then apply the Profile"
-)
-captions = json.loads((HERE / "demo/captions.json").read_text())
 content = f'''<main id="content" class="demo-panel">
   <a class="back" href="/">← Overview</a>
-  <h1 class="caption"><span class="counter"></span><span class="text">The workflow in one minute</span></h1>
-  <video class="demo-video" autoplay muted loop playsinline controls
-    data-dark="/assets/workflow.mp4" data-light="/assets/workflow-light.mp4"
-    aria-label="{escape(DEMO_ALT)}"></video>
-</main>
-<script>
-const video = document.querySelector('.demo-video');
-const steps = {json.dumps(captions)};
-const counter = document.querySelector('.caption .counter');
-const text = document.querySelector('.caption .text');
-function source() {{
-  const wanted = video.dataset[document.documentElement.classList.contains('light') ? 'light' : 'dark'];
-  if (video.getAttribute('src') === wanted) return;
-  const at = video.currentTime;
-  video.setAttribute('src', wanted);
-  video.currentTime = at;
-  video.play().catch(() => {{}});
-}}
-source();
-window.addEventListener('themechange', source);
-video.addEventListener('timeupdate', () => {{
-  let active = -1;
-  steps.forEach((step, index) => {{ if (video.currentTime >= step.start) active = index; }});
-  if (active < 0) return;
-  counter.textContent = `${{active + 1}}/${{steps.length}}`;
-  text.textContent = steps[active].text;
-}});
-</script>
-'''
+  <h1>The workflow, scene by scene</h1>
+  {demo}
+</main>'''
 write_page("/demo/", page("Demo · mdmanager.ai", "Browse Context and Profiles, review a shared Section change across runtimes, and apply it with mdmanager.", "/demo/", "", content))
 paths.append("/demo/")
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Tabbed demo clips** — `/demo/` on mdmanager.ai, linked from the homepage, shows the demo
+  as five short numbered scenes (Context, Library and Profiles, live reload, review, apply)
+  instead of a one-minute video. The tabs are bordered buttons, and the demo plays through
+  the scenes by itself, with a progress line on the current tab, until the visitor picks a
+  scene, which then loops; with reduced motion the current scene loops instead. Each clip
+  plays in the site's theme and loads only when its tab is selected, as AV1 WebM where
+  that is smaller than the MP4 and the browser supports it. The recording now shows Cursor beside Claude, Codex and Pi, and the
+  README GIF is the review scene.
 - **Project Section links** — Open Project Sections show the loader's diagnostic when a link
   leaves `.mdmanager/`. Edits to an outside destination no longer reload the Section view,
   and restoring a contained file brings its contents back.

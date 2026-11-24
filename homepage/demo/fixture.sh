@@ -3,7 +3,7 @@
 # Project, "harbor", whose CLAUDE.md and AGENTS.md share one Project Section.
 set -euo pipefail
 
-mkdir -p "$HOME/.mdmanager/sections" "$HOME/.claude" "$HOME/.codex" "$HOME/.pi/agent"
+mkdir -p "$HOME/.mdmanager/sections" "$HOME/.claude" "$HOME/.codex" "$HOME/.cursor/rules" "$HOME/.pi/agent"
 cat > "$HOME/.mdmanager/mdmanager.toml" <<TOML
 [ui]
 theme = "${MDMANAGER_THEME:-gruvbox-dark}"
@@ -46,6 +46,10 @@ title = "Global Claude"
 path = "~/.codex/AGENTS.md"
 title = "Global Codex"
 
+[targets.cursor]
+path = "~/.cursor/rules/mdmanager.mdc"
+title = "Global Cursor"
+
 [targets.pi]
 path = "~/.pi/agent/AGENTS.md"
 title = "Global Pi"
@@ -53,6 +57,7 @@ title = "Global Pi"
 [profiles.laptop]
 claude = ["agent-common", "claude-common", "delegation"]
 codex = ["agent-common", "delegation"]
+cursor = ["agent-common", "delegation"]
 pi = ["agent-common", "pi-common", "delegation"]
 
 [profiles.office]
@@ -62,6 +67,7 @@ codex = ["agent-common"]
 [profiles.hosted]
 claude = ["agent-common", "claude-common", "delegation-hosted", "hosted-ops"]
 codex = ["agent-common", "delegation-hosted", "hosted-ops"]
+cursor = ["agent-common", "delegation-hosted", "hosted-ops"]
 pi = ["agent-common", "pi-common", "delegation-hosted", "hosted-ops"]
 TOML
 cat > "$HOME/.mdmanager/sections/agent-common.md" <<'MD'
@@ -87,13 +93,13 @@ cat > "$HOME/.mdmanager/sections/delegation.md" <<'MD'
 ## Delegation
 
 - Delegate long tasks to a second agent in a worktree.
-- Available runtimes: claude, codex, pi.
+- Available runtimes: claude, codex, cursor, pi.
 MD
 cat > "$HOME/.mdmanager/sections/delegation-hosted.md" <<'MD'
 ## Delegation
 
 - This machine runs unattended. Never wait for a human answer.
-- Delegate only to codex and pi; claude is reserved for review.
+- Delegate only to codex, cursor and pi; claude is reserved for review.
 MD
 cat > "$HOME/.mdmanager/sections/hosted-ops.md" <<'MD'
 ## Hosted machine

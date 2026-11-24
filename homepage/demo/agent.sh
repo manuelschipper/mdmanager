@@ -4,7 +4,7 @@ set -u
 cd "$HOME/projects/harbor"
 flags=/tmp/demo
 type_line() {
-  local text=$1 delay=${2:-0.03}
+  local text=$1 delay=${2:-0.02}
   for ((i = 0; i < ${#text}; i++)); do
     printf '%s' "${text:i:1}"
     sleep "$delay"
@@ -21,8 +21,8 @@ type_line "agreement for every runtime: say which"
 printf '  '
 type_line "files you changed when you hand off."
 echo
-sleep 0.8
-step "Reading mdmanager docs start"
+sleep 0.5
+step "Reading mdmanager docs start" 0.7
 step "mdmanager status" 0.7
 mdmanager status >/dev/null
 step "Editing ~/.mdmanager/sections/agent-common.md" 0.5
@@ -33,9 +33,9 @@ step "mdmanager diff laptop claude" 0.7
 mdmanager diff laptop claude >/dev/null || true
 echo
 echo "  Agent Common is in every Profile, so"
-echo "  Global Claude, Codex and Pi are out of"
-echo "  sync. Review them in mdmanager, then"
-echo "  tell me to apply."
+echo "  Global Claude, Codex, Cursor and Pi are"
+echo "  out of sync. Review them in mdmanager,"
+echo "  then tell me to apply."
 echo
 until [ -e "$flags/approve" ]; do sleep 0.2; done
 printf '\033[1;33m❯\033[0m '
@@ -51,6 +51,7 @@ echo
 echo "  Applied Profile laptop:"
 echo "    ~/.claude/CLAUDE.md"
 echo "    ~/.codex/AGENTS.md"
+echo "    ~/.cursor/rules/mdmanager.mdc"
 echo "    ~/.pi/agent/AGENTS.md"
 echo
 echo "  Commit sections/agent-common.md to your"
