@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## mdmanager 0.5.1 — Nov 23, 2026
 
 - **Tabbed demo clips** — `/demo/` on mdmanager.ai, linked from the homepage, shows the demo
   as five short numbered scenes (Context, Library and Profiles, live reload, review, apply)
